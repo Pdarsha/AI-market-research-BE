@@ -19,3 +19,9 @@ bcrypt==4.0.1
 sentence-transformers
 chromadb
 serpapi
+groq
+textract
+python-docx
+pypdf
+pandas
+openpyxl

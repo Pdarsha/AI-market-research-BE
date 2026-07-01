@@ -4,7 +4,13 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from server.config import settings
+from server.models.user import User, EmailOtp
+from server.models.genai import GenAI, Embedding, ChatSession, ChatMessage
+from server.models.workspace import Workspace
 from server.db.base_class import Base
+
+
+print(Base.metadata.tables.keys())
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

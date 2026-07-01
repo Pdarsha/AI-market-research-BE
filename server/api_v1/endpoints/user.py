@@ -150,7 +150,7 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
         if user_obj.is_verified:
             logger.warning("verify_otp: email=%s already verified", email)
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_200_OK,
                 detail="Your email is already verified.",
             )
 
@@ -174,6 +174,11 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
                 data={"sub": user_obj.email, "id": user_obj.id},
                 expires_delta=access_token_expires,
             )
+            # create refresh token with longer expiry
+            refresh_expires = timedelta(minutes=TOKEN_EXPIRE_DELTA * 2)
+            refresh_token = create_refresh_token(
+                data={"sub": user_obj.email, "id": user_obj.id}, expires_delta=refresh_expires
+            )
             logger.info("verify_otp success: email=%s user_id=%s", email, user_obj.id)
             return JSONResponse(
                 status_code=200,
@@ -181,7 +186,8 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
                     "success": True,
                     "error": None,
                     "data": {
-                        "token": access_token,
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
                         "token_type": "bearer",
                     },
                     "message": "OTP verified successfully, thanks for signup.",

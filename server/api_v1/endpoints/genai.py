@@ -1,20 +1,18 @@
 import json
 import logging
-import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from groq import Groq
 
-import server.utils.embedding_service as emb
 from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.config import settings
 from server.utils.auth import get_current_user
 from server.utils.common import (
     agent_search,
-    chromadb_client,
-    chunk_text,
+    ingest_file_into_workspace,
     search_similarity,
 )
 from server.utils.prompt import (
@@ -35,9 +33,237 @@ logger = logging.getLogger(__name__)
 ai_router = APIRouter(prefix="/ai", tags=["GenAI"])
 
 
+@ai_router.post("/chats")
+def create_chat_session(
+    title: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if workspace_id:
+        workspace = crud.workspace.get(db, workspace_id)
+        if not workspace or workspace.user_id != str(current_user.id):
+            raise HTTPException(status_code=404, detail="Workspace not found")
+
+    session = crud.chat_session.create(
+        db=db,
+        obj_in=schemas.ChatSessionCreate(
+            user_id=str(current_user.id), title=title, workspace_id=workspace_id
+        ),
+    )
+    return JSONResponse(
+        status_code=201,
+        content={
+            "success": True,
+            "error": None,
+            "data": {
+                "id": session.id,
+                "title": session.title,
+                "user_id": session.user_id,
+                "workspace_id": session.workspace_id,
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+            },
+            "message": "Chat session created successfully.",
+        },
+    )
+
+
+@ai_router.get("/chats")
+def list_chat_sessions(
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    skip: int = 0,
+    limit: int = 100,
+):
+    sessions = crud.chat_session.get_multi(
+        db, user_id=str(current_user.id), skip=skip, limit=limit
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "user_id": item.user_id,
+                    "workspace_id": item.workspace_id,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                    "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+                }
+                for item in sessions
+            ],
+            "message": "Chat sessions fetched successfully.",
+        },
+    )
+
+@ai_router.delete("/chats/{chat_id}")
+def delete_chat_session(
+    chat_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    session = crud.chat_session.get(db, chat_id)
+
+    if not session or session.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    db.delete(session)
+    db.commit()
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": None,
+            "message": "Chat session deleted successfully.",
+        },
+    )
+
+
+@ai_router.get("/chats/{chat_id}")
+def get_chat_session(
+    chat_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    session = crud.chat_session.get(db, chat_id)
+    if not session or session.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    messages = [
+        {
+            "id": msg.id,
+            "chat_id": msg.chat_id,
+            "role": msg.role,
+            "content": msg.content,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
+        }
+        for msg in session.messages
+    ]
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": {
+                "id": session.id,
+                "title": session.title,
+                "workspace_id": session.workspace_id,
+                "messages": messages,
+            },
+            "message": "Chat session details fetched successfully.",
+        },
+    )
+
+
+@ai_router.put("/chats/{chat_id}")
+def update_chat_title(
+    chat_id: str,
+    request: schemas.ChatSessionTitleUpdate,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    session = crud.chat_session.get(db, chat_id)
+    if not session or session.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    session.title = request.title
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": {
+                "id": session.id,
+                "title": session.title,
+                "user_id": session.user_id,
+                "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+            },
+            "message": "Chat title updated successfully.",
+        },
+    )
+
+
+@ai_router.post("/chats/{chat_id}/messages")
+def add_chat_message(
+    chat_id: str,
+    request: schemas.ChatMessageRequest,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    session = crud.chat_session.get(db, chat_id)
+    if not session or session.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    user_message = crud.chat_message.create(
+        db=db,
+        obj_in=schemas.ChatMessageCreate(
+            chat_id=chat_id,
+            content=request.content,
+            role="user",
+            user_id=str(current_user.id),
+        ),
+    )
+
+    ai_response = ""
+    conversation = sorted(session.messages, key=lambda msg: msg.created_at)
+    message_history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in conversation
+    ]
+    message_history.append({"role": "user", "content": request.content})
+
+    completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=message_history,
+        temperature=0,
+        max_completion_tokens=1024,
+        top_p=1,
+        stream=True,
+        stop=None,
+    )
+    for chunk in completion:
+        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+            content = chunk.choices[0].delta.content
+            if content:
+                ai_response += content
+
+    assistant_message = crud.chat_message.create(
+        db=db,
+        obj_in=schemas.ChatMessageCreate(
+            chat_id=chat_id,
+            content=ai_response,
+            role="assistant",
+        ),
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": {
+                "user_message_id": user_message.id,
+                "assistant_message_id": assistant_message.id,
+                "response": ai_response,
+            },
+            "message": "Message added and AI response created successfully.",
+        },
+    )
+
+
 @ai_router.post("/ai-agent")
 def ai_agent(
     request: schemas.GenAIBase,
+    workspace_id: Optional[str] = None,
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -64,8 +290,15 @@ def ai_agent(
             len(request.user_query) if getattr(request, "user_query", None) else 0,
         )
 
-        similarity_results = search_similarity(
-            request.user_query, current_user, top_k=3
+        if workspace_id:
+            workspace = crud.workspace._get_owned_workspace(
+                db, workspace_id, str(current_user.id)
+            )
+            if workspace is None:
+                raise HTTPException(status_code=404, detail="Workspace not found")
+
+        similarity_results, file_names = search_similarity(
+            request.user_query, current_user, top_k=3, workspace_id=workspace_id
         )
         logger.debug(
             "grok_ai: user=%s similarity results=%d",
@@ -119,7 +352,11 @@ def ai_agent(
         content={
             "success": True,
             "error": None,
-            "data": {"prompt": request.user_query, "response": ai_response},
+            "data": {
+                "prompt": request.user_query,
+                "response": ai_response,
+                "file_names": file_names if "@doc" in request.user_query else None,
+            },
             "message": "AI response generated successfully.",
         },
     )
@@ -127,69 +364,32 @@ def ai_agent(
 
 @ai_router.post("/upload-files")
 async def upload_files(
+    workspace_id: str,
     file: UploadFile = File(...),
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    if not file.filename.endswith(".txt"):
-        raise HTTPException(status_code=400, detail="Only .txt files are allowed")
+    """Upload a document into a workspace.
+
+    Files always belong to a workspace: the caller must own ``workspace_id``.
+    The file's text is chunked, embedded and stored (tagged with the workspace)
+    so a chat inside the workspace can retrieve it via the ``@doc`` agent.
+    """
+    workspace = crud.workspace._get_owned_workspace(
+        db, workspace_id, str(current_user.id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
 
     logger.info(
-        "create_embedding: user=%s uploaded file=%s",
+        "create_embedding: user=%s workspace=%s uploaded file=%s",
         getattr(current_user, "id", None),
+        workspace_id,
         file.filename,
     )
 
-    content = await file.read()
-
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="Unable to decode file as UTF-8")
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="File is empty")
-
-    client = chromadb_client()
-
-    collection = client.get_or_create_collection(name="embedded")
-
-    chunks = chunk_text(text=text, chunk_size=2500)
-
-    model = emb.load_model()
-
-    embeddings = model.encode(chunks).tolist()
-    logger.debug(
-        "create_embedding: user=%s embeddings_generated=%d",
-        getattr(current_user, "id", None),
-        len(embeddings),
-    )
-
-    ids = [str(uuid.uuid4()) for _ in chunks]
-
-    metadatas = [
-        {
-            "user_id": str(current_user.id),
-            "file_name": file.filename,
-            "chunk_number": index,
-            "total_chunks": len(chunks),
-        }
-        for index in range(len(chunks))
-    ]
-
-    collection.upsert(
-        ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas
-    )
-
-    crud.enbedding.create(
-        db=db, obj_in=schemas.EmbeddingResponse(file_name=file.filename)
-    )
-
-    logger.info(
-        "create_embedding: user=%s embedding upserted collection=embedded file=%s chunks=%d",
-        getattr(current_user, "id", None),
-        file.filename,
-        len(chunks),
+    await ingest_file_into_workspace(
+        db, file=file, user_id=current_user.id, workspace_id=workspace_id
     )
 
     return JSONResponse(
@@ -198,6 +398,6 @@ async def upload_files(
             "success": True,
             "error": None,
             "data": None,
-            "message": "File upload successfully.",
+            "message": "File uploaded successfully.",
         },
     )

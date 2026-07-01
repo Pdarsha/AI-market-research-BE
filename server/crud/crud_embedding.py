@@ -24,5 +24,13 @@ class CRUDEMBEDDING(CRUDBase[Embedding, CreateEmbedding, updateEmbedding]):
     def remove(self, db: Session, *, id: str) -> Optional[Embedding]:
         return super().remove(db, id=id)
 
+    def get_multi_by_workspace(self, db: Session, *, workspace_id: str):
+        return (
+            db.query(self.model)
+            .filter(self.model.workspace_id == workspace_id)
+            .order_by(self.model.created_at.desc())
+            .all()
+        )
+
 
 enbedding = CRUDEMBEDDING(Embedding)
