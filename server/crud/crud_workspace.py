@@ -54,7 +54,7 @@ class CRUDWorkspace(CRUDBase[Workspace, WorkspaceCreate, WorkspaceUpdate]):
         Delete a workspace and everything it contains.
 
         The DB-level ``ON DELETE CASCADE`` on ``chat_sessions.workspace_id`` and
-        ``embeddings.workspace_id`` removes the workspace's chats (and their
+        ``document.workspace_id`` removes the workspace's chats (and their
         messages) and its file rows. We additionally purge the workspace's vector
         chunks from ChromaDB, which the relational cascade cannot reach.
         """

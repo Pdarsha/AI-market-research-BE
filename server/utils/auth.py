@@ -32,10 +32,12 @@ def get_password_hash(password):
 def authenticate_user(db, email: str, password: str):
     user = crud.user.get_by_email(db, email=email)
     if not user:
-        return False
+        error_msg = "This email is not registered in our system."
+        return False, error_msg
     if not verify_password(password, user.hashed_password):
-        return False
-    return user
+        error_msg = "Incorrect password"
+        return False, error_msg
+    return user, None
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):

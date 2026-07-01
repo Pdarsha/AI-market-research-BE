@@ -28,8 +28,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="FastAPI Auth Boilerplate",
-    description="Boilerplate with User Authentication Operations, SQLAlchemy, Alembic, Pydantic, and JWT",
+    title="CapitalEdge AI Enterprise",
+    description="AI-powered Conversational Intelligence and Workspace Analysis platform",
     version="1.0.0",
     debug=settings.debug,
     lifespan=lifespan,

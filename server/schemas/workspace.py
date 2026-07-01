@@ -28,3 +28,26 @@ class WorkspaceResponse(WorkspaceBase):
 
     class Config:
         from_attributes = True
+
+
+class DocumentBase(BaseModel):
+    text: str
+
+    class Config:
+        from_attributes = True
+
+
+class CreateDocument(DocumentBase):
+    pass
+
+
+class updateDocument(DocumentBase):
+    pass
+
+
+class DocumentResponse(BaseModel):
+    user_id: str
+    workspace_id: Optional[str] = None
+    file_name: str
+    file_format: str
+    storage_path: str
