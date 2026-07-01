@@ -133,16 +133,21 @@ def get_chat_session(
     session = crud.chat_session.get(db, chat_id)
     if not session or session.user_id != str(current_user.id):
         raise HTTPException(status_code=404, detail="Chat session not found")
+
+    conversation = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
     messages = [
         {
             "id": msg.id,
             "chat_id": msg.chat_id,
             "role": msg.role,
             "content": msg.content,
+            "workspace_id": msg.workspace_id,
+            "document_ids": msg.document_ids,
+            "source_documents": msg.source_documents,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
             "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
         }
-        for msg in session.messages
+        for msg in conversation
     ]
     return JSONResponse(
         status_code=200,
@@ -153,6 +158,12 @@ def get_chat_session(
                 "id": session.id,
                 "title": session.title,
                 "workspace_id": session.workspace_id,
+                "document_ids": crud.chat_message.get_latest_document_ids(
+                    db, chat_id=chat_id
+                ),
+                "source_documents": crud.chat_message.get_latest_source_documents(
+                    db, chat_id=chat_id, document_ids=crud.chat_message.get_latest_document_ids(db, chat_id=chat_id)
+                ),
                 "messages": messages,
             },
             "message": "Chat session details fetched successfully.",
@@ -203,6 +214,12 @@ def add_chat_message(
     if not session or session.user_id != str(current_user.id):
         raise HTTPException(status_code=404, detail="Chat session not found")
 
+    prior_messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
+    message_history = [
+        {"role": msg.role, "content": msg.content} for msg in prior_messages
+    ]
+    message_history.append({"role": "user", "content": request.content})
+
     user_message = crud.chat_message.create(
         db=db,
         obj_in=schemas.ChatMessageCreate(
@@ -210,17 +227,12 @@ def add_chat_message(
             content=request.content,
             role="user",
             user_id=str(current_user.id),
+            workspace_id=session.workspace_id,
+            document_ids=request.document_ids,
         ),
     )
 
     ai_response = ""
-    conversation = sorted(session.messages, key=lambda msg: msg.created_at)
-    message_history = [
-        {"role": msg.role, "content": msg.content}
-        for msg in conversation
-    ]
-    message_history.append({"role": "user", "content": request.content})
-
     completion = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=message_history,
@@ -242,6 +254,9 @@ def add_chat_message(
             chat_id=chat_id,
             content=ai_response,
             role="assistant",
+            user_id=str(current_user.id),
+            workspace_id=session.workspace_id,
+            document_ids=request.document_ids,
         ),
     )
 
@@ -254,6 +269,7 @@ def add_chat_message(
                 "user_message_id": user_message.id,
                 "assistant_message_id": assistant_message.id,
                 "response": ai_response,
+                "document_ids": request.document_ids,
             },
             "message": "Message added and AI response created successfully.",
         },
@@ -267,6 +283,14 @@ def ai_agent(
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    session = crud.chat_session.create(
+        db=db,
+        obj_in=schemas.ChatSessionCreate(
+            user_id=str(current_user.id), title=request.title, workspace_id=workspace_id
+        ),
+    )
+
+    file_names = None
 
     if "@doom" in request.user_query:
         logger.info("This is the agentic flow. User query contains '@doom' trigger.")
@@ -340,12 +364,30 @@ def ai_agent(
         len(ai_response),
     )
 
-    crud.genai.create(
-        db=db,
-        obj_in=schemas.GenAICreate(
-            user_query=request.user_query, ai_response=ai_response
-        ),
-    )
+    if session is not None:
+        crud.chat_message.create(
+            db=db,
+            obj_in=schemas.ChatMessageCreate(
+                chat_id=session.id,
+                content=request.user_query,
+                role="user",
+                user_id=str(current_user.id),
+                workspace_id=workspace_id or session.workspace_id,
+                document_ids=request.document_ids,
+            ),
+        )
+        crud.chat_message.create(
+            db=db,
+            obj_in=schemas.ChatMessageCreate(
+                chat_id=session.id,
+                content=ai_response,
+                role="assistant",
+                user_id=str(current_user.id),
+                workspace_id=workspace_id or session.workspace_id,
+                document_ids=request.document_ids,
+                source_documents=file_names,
+            ),
+        )
 
     return JSONResponse(
         status_code=200,
@@ -356,6 +398,7 @@ def ai_agent(
                 "prompt": request.user_query,
                 "response": ai_response,
                 "file_names": file_names if "@doc" in request.user_query else None,
+                "chat_session_id": session.id if session else None,
             },
             "message": "AI response generated successfully.",
         },
