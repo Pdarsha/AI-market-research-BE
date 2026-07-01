@@ -362,42 +362,42 @@ def ai_agent(
     )
 
 
-@ai_router.post("/upload-files")
-async def upload_files(
-    workspace_id: str,
-    file: UploadFile = File(...),
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Upload a document into a workspace.
-
-    Files always belong to a workspace: the caller must own ``workspace_id``.
-    The file's text is chunked, embedded and stored (tagged with the workspace)
-    so a chat inside the workspace can retrieve it via the ``@doc`` agent.
-    """
-    workspace = crud.workspace._get_owned_workspace(
-        db, workspace_id, str(current_user.id)
-    )
-    if workspace is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    logger.info(
-        "create_embedding: user=%s workspace=%s uploaded file=%s",
-        getattr(current_user, "id", None),
-        workspace_id,
-        file.filename,
-    )
-
-    await ingest_file_into_workspace(
-        db, file=file, user_id=current_user.id, workspace_id=workspace_id
-    )
-
-    return JSONResponse(
-        status_code=200,
-        content={
-            "success": True,
-            "error": None,
-            "data": None,
-            "message": "File uploaded successfully.",
-        },
-    )
+# @ai_router.post("/upload-docs")
+# async def upload_docs(
+#     workspace_id: str,
+#     file: UploadFile = File(...),
+#     db=Depends(get_db),
+#     current_user=Depends(get_current_user),
+# ):
+#     """Upload a document into a workspace.
+#
+#     Files always belong to a workspace: the caller must own ``workspace_id``.
+#     The file's text is chunked, embedded and stored (tagged with the workspace)
+#     so a chat inside the workspace can retrieve it via the ``@doc`` agent.
+#     """
+#     workspace = crud.workspace._get_owned_workspace(
+#         db, workspace_id, str(current_user.id)
+#     )
+#     if workspace is None:
+#         raise HTTPException(status_code=404, detail="Workspace not found")
+#
+#     logger.info(
+#         "create_embedding: user=%s workspace=%s uploaded file=%s",
+#         getattr(current_user, "id", None),
+#         workspace_id,
+#         file.filename,
+#     )
+#
+#     await ingest_file_into_workspace(
+#         db, file=file, user_id=current_user.id, workspace_id=workspace_id
+#     )
+#
+#     return JSONResponse(
+#         status_code=200,
+#         content={
+#             "success": True,
+#             "error": None,
+#             "data": None,
+#             "message": "File uploaded successfully.",
+#         },
+#     )

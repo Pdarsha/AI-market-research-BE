@@ -55,9 +55,9 @@ def _serialize_file(file) -> dict:
 
 @workspace_router.post("/create-workspace")
 def create_workspace(
-    request: schemas.WorkspaceCreate,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+        request: schemas.WorkspaceCreate,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace.create(
         db=db,
@@ -80,10 +80,10 @@ def create_workspace(
 
 @workspace_router.get("/list-workspaces")
 def list_workspaces(
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
-    skip: int = 0,
-    limit: int = 100,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
+        skip: int = 0,
+        limit: int = 100,
 ):
     workspaces = crud.workspace.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
@@ -103,8 +103,8 @@ def list_workspaces(
 
 @workspace_router.get("/public/{workspace_id}")
 def public_workspace(
-    workspace_id: str,
-    db=Depends(get_db),
+        workspace_id: str,
+        db=Depends(get_db),
 ):
     """Public, unauthenticated view of a workspace.
 
@@ -140,9 +140,9 @@ def public_workspace(
 
 @workspace_router.get("/{workspace_id}")
 def get_workspace(
-    workspace_id: str,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+        workspace_id: str,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -173,10 +173,10 @@ def get_workspace(
 
 @workspace_router.put("/{workspace_id}")
 def update_workspace(
-    workspace_id: str,
-    request: schemas.WorkspaceUpdate,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+        workspace_id: str,
+        request: schemas.WorkspaceUpdate,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -197,9 +197,9 @@ def update_workspace(
 
 @workspace_router.delete("/{workspace_id}")
 def delete_workspace(
-    workspace_id: str,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+        workspace_id: str,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -220,11 +220,52 @@ def delete_workspace(
     )
 
 
-@workspace_router.get("/{workspace_id}/files")
-def list_workspace_files(
-    workspace_id: str,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+@workspace_router.post("/upload-docs")
+async def upload_docs(
+        workspace_id: str,
+        doc: UploadFile = File(...),
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
+):
+    """Upload a document into a workspace.
+
+    Files always belong to a workspace: the caller must own ``workspace_id``.
+    The file's text is chunked, embedded and stored (tagged with the workspace)
+    so a chat inside the workspace can retrieve it via the ``@doc`` agent.
+    """
+    workspace = crud.workspace._get_owned_workspace(
+        db, workspace_id, str(current_user.id)
+    )
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    logger.info(
+        "create_embedding: user=%s workspace=%s uploaded file=%s",
+        getattr(current_user, "id", None),
+        workspace_id,
+        doc.filename,
+    )
+
+    await ingest_file_into_workspace(
+        db, file=doc, user_id=current_user.id, workspace_id=workspace_id
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": None,
+            "message": "File uploaded successfully.",
+        },
+    )
+
+
+@workspace_router.get("/{workspace_id}/docs")
+def list_workspace_docs(
+        workspace_id: str,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -232,7 +273,7 @@ def list_workspace_files(
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    files = crud.enbedding.get_multi_by_workspace(db, workspace_id=workspace_id)
+    files = crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     return JSONResponse(
         status_code=200,
         content={
@@ -244,12 +285,12 @@ def list_workspace_files(
     )
 
 
-@workspace_router.post("/{workspace_id}/files")
-async def upload_workspace_file(
-    workspace_id: str,
-    file: UploadFile = File(...),
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+@workspace_router.post("/{workspace_id}/docs/{doc_id}")
+async def get_workspace_document(
+        workspace_id: str,
+        doc: UploadFile = File(...),
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -258,7 +299,7 @@ async def upload_workspace_file(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     embedding = await ingest_file_into_workspace(
-        db, file=file, user_id=current_user.id, workspace_id=workspace_id
+        db, file=doc, user_id=current_user.id, workspace_id=workspace_id
     )
     return JSONResponse(
         status_code=201,
@@ -271,12 +312,12 @@ async def upload_workspace_file(
     )
 
 
-@workspace_router.delete("/{workspace_id}/files/{file_id}")
-def delete_workspace_file(
-    workspace_id: str,
-    file_id: str,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
+@workspace_router.delete("/{workspace_id}/docs/{doc_id}")
+def delete_workspace_doc(
+        workspace_id: str,
+        doc_id: str,
+        db=Depends(get_db),
+        current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -284,7 +325,7 @@ def delete_workspace_file(
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    file = crud.enbedding.get(db, file_id)
+    file = crud.document.get(db, doc_id)
     if (
         not file
         or file.workspace_id != workspace_id
@@ -302,7 +343,7 @@ def delete_workspace_file(
             ]
         }
     )
-    crud.enbedding.remove(db, id=file_id)
+    crud.document.remove(db, id=doc_id)
 
     return JSONResponse(
         status_code=200,

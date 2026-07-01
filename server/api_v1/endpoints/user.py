@@ -35,14 +35,14 @@ async def login_for_access_token(
     login_details: schemas.UserCreateInput, db: Session = Depends(get_db)
 ):
     logger.info("login attempt: email=%s", login_details.email)
-    user = authenticate_user(db, login_details.email, login_details.password)
+    user, error_msg = authenticate_user(db, login_details.email, login_details.password)
     if not user:
         logger.warning(
             "login failed: email=%s - incorrect credentials", login_details.email
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail=error_msg,
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token_expires = timedelta(minutes=TOKEN_EXPIRE_DELTA)

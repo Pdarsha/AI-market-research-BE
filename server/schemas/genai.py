@@ -95,23 +95,3 @@ class ChatSessionDetail(BaseModel):
         from_attributes = True
 
 
-class EmbeddingBase(BaseModel):
-    text: str
-
-    class Config:
-        from_attributes = True
-
-
-class CreateEmbedding(EmbeddingBase):
-    pass
-
-
-class updateEmbedding(EmbeddingBase):
-    pass
-
-
-class EmbeddingResponse(BaseModel):
-    file_name: str
-    user_id: str
-    file_format: str
-    workspace_id: Optional[str] = None
