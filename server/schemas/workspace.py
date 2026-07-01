@@ -50,4 +50,4 @@ class DocumentResponse(BaseModel):
     workspace_id: Optional[str] = None
     file_name: str
     file_format: str
-    storage_path: str
+    storage_path: Optional[str] = None

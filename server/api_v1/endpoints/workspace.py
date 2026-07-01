@@ -106,18 +106,17 @@ def public_workspace(
         workspace_id: str,
         db=Depends(get_db),
 ):
-    """Public, unauthenticated view of a workspace.
-
-    Exposes ONLY the workspace metadata and its uploaded files. Chats and
-    messages are never included, so a shared link cannot leak conversation
-    history. Declared before ``/{workspace_id}`` so the literal ``public``
-    segment is not captured by the id parameter.
-    """
+    """Public, unauthenticated view of a workspace."""
     workspace = crud.workspace.get(db, workspace_id)
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    files = crud.enbedding.get_multi_by_workspace(db, workspace_id=workspace_id)
+    files = crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
+    chats = sorted(
+        workspace.chats,
+        key=lambda c: c.updated_at or c.created_at,
+        reverse=True,
+    )
     data = {
         "id": workspace.id,
         "name": workspace.name,
@@ -126,6 +125,27 @@ def public_workspace(
             workspace.created_at.isoformat() if workspace.created_at else None
         ),
         "files": [_serialize_file(f) for f in files],
+        "chats": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+                "messages": [
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "source_documents": m.source_documents,
+                        "created_at": (
+                            m.created_at.isoformat() if m.created_at else None
+                        ),
+                    }
+                    for m in crud.chat_message.get_multi_by_chat(db, chat_id=c.id)
+                ],
+            }
+            for c in chats
+        ],
     }
     return JSONResponse(
         status_code=200,
@@ -158,7 +178,7 @@ def get_workspace(
     data["chats"] = [_serialize_chat(chat) for chat in chats]
     data["files"] = [
         _serialize_file(f)
-        for f in crud.enbedding.get_multi_by_workspace(db, workspace_id=workspace_id)
+        for f in crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     ]
     return JSONResponse(
         status_code=200,

@@ -46,7 +46,7 @@ class Document(Base):
     )
     file_name = Column(String)
     file_format = Column(String)
-    storage_path: Mapped[str] = mapped_column(String(500))
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

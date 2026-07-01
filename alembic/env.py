@@ -5,8 +5,8 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from server.config import settings
 from server.models.user import User, EmailOtp
-from server.models.genai import GenAI, Embedding, ChatSession, ChatMessage
-from server.models.workspace import Workspace
+from server.models.genai import GenAI, ChatSession, ChatMessage
+from server.models.workspace import Workspace, Document
 from server.db.base_class import Base
 
 

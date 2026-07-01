@@ -267,9 +267,9 @@ async def ingest_file_into_workspace(
         metadatas=metadatas,
     )
 
-    return crud.enbedding.create(
+    return crud.document.create(
         db=db,
-        obj_in=schemas.EmbeddingResponse(
+        obj_in=schemas.DocumentResponse(
             file_name=file.filename,
             user_id=str(user_id),
             file_format=file_format,
