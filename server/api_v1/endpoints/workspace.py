@@ -285,29 +285,26 @@ def list_workspace_docs(
     )
 
 
-@workspace_router.post("/{workspace_id}/docs/{doc_id}")
+@workspace_router.get("/{workspace_id}/docs/{doc_id}")
 async def get_workspace_document(
         workspace_id: str,
-        doc: UploadFile = File(...),
+        doc_id: str,
         db=Depends(get_db),
         current_user=Depends(get_current_user),
 ):
-    workspace = crud.workspace._get_owned_workspace(
-        db, workspace_id, str(current_user.id)
+    document = crud.document.get_document(
+        db, workspace_id, doc_id, str(current_user.id)
     )
-    if workspace is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    embedding = await ingest_file_into_workspace(
-        db, file=doc, user_id=current_user.id, workspace_id=workspace_id
-    )
     return JSONResponse(
         status_code=201,
         content={
             "success": True,
             "error": None,
-            "data": _serialize_file(embedding),
-            "message": "File uploaded successfully.",
+            "data": _serialize_file(document),
+            "message": "Document fetched successfully.",
         },
     )
 
