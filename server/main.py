@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 import server.utils.embedding_service as emb
-from server.config import settings
+from server.config import settings, create_storage_directories, STATIC_DIR
 from server.db.init_db import init_db
 
 from .api import api_router
@@ -37,8 +37,11 @@ app = FastAPI(
 
 app.include_router(api_router, prefix="/v1")
 
+# Create static folders on startup
+create_storage_directories()
+
 # Custom Middlewares
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 app.add_middleware(
     CORSMiddleware,

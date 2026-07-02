@@ -125,7 +125,7 @@ def public_workspace(
         "created_at": (
             workspace.created_at.isoformat() if workspace.created_at else None
         ),
-        "files": [_serialize_file(f) for f in files],
+        "files": [_serialize_document(f) for f in files],
         "chats": [
             {
                 "id": c.id,
@@ -178,7 +178,7 @@ def get_workspace(
     data = _serialize_workspace(workspace, chat_count=len(chats))
     data["chats"] = [_serialize_chat(chat) for chat in chats]
     data["files"] = [
-        _serialize_file(f)
+        _serialize_document(f)
         for f in crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     ]
     return JSONResponse(
