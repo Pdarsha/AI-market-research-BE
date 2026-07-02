@@ -1,6 +1,6 @@
 import os
 from typing import List, Union
-
+from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -75,3 +75,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+STATIC_DIR = PROJECT_ROOT / "static"
+WORKSPACE_DOCS_DIR = STATIC_DIR / "workspace_docs"
+
+def create_storage_directories():
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_DOCS_DIR.mkdir(parents=True, exist_ok=True)
