@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from server import crud, schemas
 from server.api_v1.deps import get_db
+from server.models.genai import ChatSession
 from server.utils.auth import get_current_user
 from server.utils.common import delete_chroma_by, ingest_file_into_workspace
 
@@ -320,7 +321,7 @@ async def get_workspace_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     return JSONResponse(
-        status_code=201,
+        status_code=200,
         content={
             "success": True,
             "error": None,
@@ -350,6 +351,35 @@ def delete_workspace_doc(
         or file.user_id != str(current_user.id)
     ):
         raise HTTPException(status_code=404, detail="File not found")
+
+    chats = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.user_id == str(current_user.id),
+        )
+        .all()
+    )
+    for chat in chats:
+        messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat.id)
+        doc_ids = set()
+        for m in messages:
+            if m.document_ids:
+                doc_ids.update(m.document_ids)
+        if doc_id not in doc_ids:
+            continue
+        if doc_ids == {doc_id}:
+            db.delete(chat)  # cascades to its messages
+        else:
+            for m in messages:
+                if m.document_ids and doc_id in m.document_ids:
+                    m.document_ids = [d for d in m.document_ids if d != doc_id]
+                    db.add(m)
+                if m.source_documents and file.file_name in m.source_documents:
+                    m.source_documents = [
+                        n for n in m.source_documents if n != file.file_name
+                    ]
+                    db.add(m)
 
     # Remove the file's vector chunks from ChromaDB, then the relational row.
     delete_chroma_by(
