@@ -43,13 +43,14 @@ def _serialize_chat(chat) -> dict:
     }
 
 
-def _serialize_file(file) -> dict:
+def _serialize_document(doc) -> dict:
     return {
-        "id": file.id,
-        "file_name": file.file_name,
-        "file_format": file.file_format,
-        "workspace_id": file.workspace_id,
-        "created_at": file.created_at.isoformat() if file.created_at else None,
+        "id": doc.id,
+        "workspace_id": doc.workspace_id,
+        "file_name": doc.file_name,
+        "file_format": doc.file_format,
+        "storage_path": doc.storage_path,
+        "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
 
 
@@ -260,13 +261,13 @@ async def upload_docs(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     logger.info(
-        "create_embedding: user=%s workspace=%s uploaded file=%s",
+        "upload_docs: user=%s workspace=%s uploaded file=%s",
         getattr(current_user, "id", None),
         workspace_id,
         doc.filename,
     )
 
-    await ingest_file_into_workspace(
+    document = await ingest_file_into_workspace(
         db, file=doc, user_id=current_user.id, workspace_id=workspace_id
     )
 
@@ -275,7 +276,7 @@ async def upload_docs(
         content={
             "success": True,
             "error": None,
-            "data": None,
+            "data": _serialize_document(document),
             "message": "File uploaded successfully.",
         },
     )
@@ -299,7 +300,7 @@ def list_workspace_docs(
         content={
             "success": True,
             "error": None,
-            "data": [_serialize_file(f) for f in files],
+            "data": [_serialize_document(f) for f in files],
             "message": "Workspace files fetched successfully.",
         },
     )
@@ -323,7 +324,7 @@ async def get_workspace_document(
         content={
             "success": True,
             "error": None,
-            "data": _serialize_file(document),
+            "data": _serialize_document(document),
             "message": "Document fetched successfully.",
         },
     )

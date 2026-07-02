@@ -1,3 +1,4 @@
+import os
 import random
 import uuid
 from datetime import datetime
@@ -6,7 +7,7 @@ import io
 import chromadb
 import serpapi
 from fastapi import HTTPException, UploadFile
-
+from pathlib import Path
 from server import crud, schemas
 from server.config import settings
 from server.utils.embedding_service import load_rerank_model
@@ -235,7 +236,28 @@ async def ingest_file_into_workspace(
         )
     file_format, extractor = _EXTRACTORS[ext]
 
+    # Read uploaded file
     content = await file.read()
+
+    # Create workspace directory
+    STATIC_DIR = Path("static")
+    upload_dir = STATIC_DIR / "workspace_docs"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Generate unique filename
+    unique_filename = f"{uuid.uuid4()}{ext}"
+
+    # Full file path
+    file_path = upload_dir / unique_filename
+
+    # Save file
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Store this in DB
+    storage_path = f"static/workspace_docs/{unique_filename}"
+
+    # Extract text
     try:
         text = extractor(content)
     except Exception as e:
@@ -267,15 +289,17 @@ async def ingest_file_into_workspace(
         metadatas=metadatas,
     )
 
-    return crud.document.create(
+    document =  crud.document.create(
         db=db,
         obj_in=schemas.DocumentResponse(
-            file_name=file.filename,
             user_id=str(user_id),
-            file_format=file_format,
             workspace_id=str(workspace_id),
+            file_name=file.filename,
+            file_format=file_format,
+            storage_path=storage_path,
         ),
     )
+    return document
 
 
 def delete_chroma_by(where: dict) -> None:

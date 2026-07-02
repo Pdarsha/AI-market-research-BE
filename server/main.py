@@ -3,7 +3,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
+from starlette.staticfiles import StaticFiles
 import server.utils.embedding_service as emb
 from server.config import settings
 from server.db.init_db import init_db
@@ -36,6 +36,9 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix="/v1")
+
+# Custom Middlewares
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
