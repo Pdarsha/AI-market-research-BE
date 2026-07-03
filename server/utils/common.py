@@ -4,12 +4,12 @@ import uuid
 from datetime import datetime
 from typing import Optional
 import io
-import chromadb
 import serpapi
 from fastapi import HTTPException, UploadFile
 from pathlib import Path
 from server import crud, schemas
 from server.config import settings
+from server.models.workspace import DocumentChunk
 from server.utils.embedding_service import load_rerank_model
 from server.utils.mail import send_email
 from docx import Document
@@ -65,15 +65,6 @@ async def validate_email_send_otp(db, email, user_id):
     return True
 
 
-def chromadb_client():
-    client = chromadb.CloudClient(
-        api_key=settings.CHROMADB_KEY,
-        tenant="c87cebe2-d1c4-448e-8b12-c7745ebea77e",
-        database=settings.CHROMADB_DATABASE,
-    )
-    return client
-
-
 def rerank_documents(query, documents, top_k=3):
 
     pairs = [(query, doc) for doc in documents]
@@ -86,7 +77,7 @@ def rerank_documents(query, documents, top_k=3):
 
 
 def search_similarity(
-    query: str, current_user, top_k: int = 3, workspace_id: Optional[str] = None
+    db, query: str, current_user, top_k: int = 3, workspace_id: Optional[str] = None
 ):
     import server.utils.embedding_service as emb
 
@@ -94,31 +85,23 @@ def search_similarity(
 
     query_embedding = model.encode(query).tolist()
 
-    client = chromadb_client()
-    collection = client.get_collection("embedded")
-
-    # Scope retrieval to a workspace's documents when a workspace is in play.
-    # Chroma requires the $and operator to combine more than one condition.
+    # Scope retrieval to the current user's chunks, and to a single workspace when
+    # one is in play. pgvector orders by cosine distance (``<=>``) so the nearest
+    # chunks come first; we then rerank the raw candidates with the CrossEncoder.
+    stmt = db.query(DocumentChunk).filter(
+        DocumentChunk.user_id == str(current_user.id)
+    )
     if workspace_id:
-        where = {
-            "$and": [
-                {"user_id": {"$eq": str(current_user.id)}},
-                {"workspace_id": {"$eq": str(workspace_id)}},
-            ]
-        }
-    else:
-        where = {"user_id": {"$eq": str(current_user.id)}}
+        stmt = stmt.filter(DocumentChunk.workspace_id == str(workspace_id))
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=top_k,
-        where=where,
+    rows = (
+        stmt.order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
+        .limit(top_k)
+        .all()
     )
 
-    documents = results["documents"][0]
-    file_names = list(
-        dict.fromkeys(metadata["file_name"] for metadata in results["metadatas"][0])
-    )
+    documents = [row.content for row in rows]
+    file_names = list(dict.fromkeys(row.file_name for row in rows))
 
     reranked_docs = rerank_documents(query=query, documents=documents, top_k=top_k)
 
@@ -223,9 +206,10 @@ async def ingest_file_into_workspace(
 ):
     """Extract, chunk, embed and store an uploaded file under a workspace.
 
-    Chunks are upserted into ChromaDB tagged with both ``user_id`` and
-    ``workspace_id`` (so retrieval can be scoped to the workspace), and a single
-    ``Embedding`` row is persisted to represent the file. Returns that row.
+    A ``Document`` row is persisted to represent the file, and each text chunk is
+    stored as a ``DocumentChunk`` row (with its pgvector embedding) tagged with
+    both ``user_id`` and ``workspace_id`` so retrieval can be scoped to the
+    workspace. Returns the ``Document`` row.
     """
     filename = (file.filename or "").lower()
     ext = next((e for e in _EXTRACTORS if filename.endswith(e)), None)
@@ -268,28 +252,12 @@ async def ingest_file_into_workspace(
 
     import server.utils.embedding_service as emb
 
-    collection = chromadb_client().get_or_create_collection(name="embedded")
     chunks = chunk_text(text=text, chunk_size=2500)
     embeddings = emb.load_model().encode(chunks).tolist()
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    metadatas = [
-        {
-            "user_id": str(user_id),
-            "workspace_id": str(workspace_id),
-            "file_name": file.filename,
-            "chunk_number": index,
-            "total_chunks": len(chunks),
-        }
-        for index in range(len(chunks))
-    ]
-    collection.upsert(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
 
-    document =  crud.document.create(
+    # Persist the document first so chunks can reference it. Chunk rows carry the
+    # embeddings into pgvector; their FK to the document cascades on delete.
+    document = crud.document.create(
         db=db,
         obj_in=schemas.DocumentResponse(
             user_id=str(user_id),
@@ -299,9 +267,21 @@ async def ingest_file_into_workspace(
             storage_path=storage_path,
         ),
     )
+
+    chunk_rows = [
+        DocumentChunk(
+            document_id=document.id,
+            user_id=str(user_id),
+            workspace_id=str(workspace_id),
+            file_name=file.filename,
+            chunk_number=index,
+            total_chunks=len(chunks),
+            content=chunk,
+            embedding=embedding,
+        )
+        for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
+    ]
+    db.add_all(chunk_rows)
+    db.commit()
+
     return document
-
-
-def delete_chroma_by(where: dict) -> None:
-    """Delete all ChromaDB chunks matching a metadata filter."""
-    chromadb_client().get_or_create_collection(name="embedded").delete(where=where)

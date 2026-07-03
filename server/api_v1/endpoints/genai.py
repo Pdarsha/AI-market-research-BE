@@ -322,7 +322,7 @@ def ai_agent(
                 raise HTTPException(status_code=404, detail="Workspace not found")
 
         similarity_results, file_names = search_similarity(
-            request.user_query, current_user, top_k=3, workspace_id=workspace_id
+            db, request.user_query, current_user, top_k=3, workspace_id=workspace_id
         )
         logger.debug(
             "grok_ai: user=%s similarity results=%d",
