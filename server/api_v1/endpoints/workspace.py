@@ -8,7 +8,7 @@ from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.models.genai import ChatSession
 from server.utils.auth import get_current_user
-from server.utils.common import delete_chroma_by, ingest_file_into_workspace
+from server.utils.common import ingest_file_into_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -381,16 +381,8 @@ def delete_workspace_doc(
                     ]
                     db.add(m)
 
-    # Remove the file's vector chunks from ChromaDB, then the relational row.
-    delete_chroma_by(
-        {
-            "$and": [
-                {"user_id": {"$eq": str(current_user.id)}},
-                {"workspace_id": {"$eq": workspace_id}},
-                {"file_name": {"$eq": file.file_name}},
-            ]
-        }
-    )
+    # Removing the document row cascades (ON DELETE CASCADE) to its
+    # ``document_chunks`` rows, purging the file's embeddings from pgvector.
     crud.document.remove(db, id=doc_id)
 
     return JSONResponse(

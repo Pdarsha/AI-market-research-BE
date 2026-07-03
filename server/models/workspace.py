@@ -1,10 +1,14 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship, Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 from server.db.base_class import Base
+
+# Dimensionality of the sentence-transformers/all-MiniLM-L6-v2 embeddings.
+EMBEDDING_DIM = 384
 
 
 class Workspace(Base):
@@ -53,3 +57,61 @@ class Document(Base):
 
     user = relationship("User")
     workspace = relationship("Workspace", back_populates="docs")
+    # Chunks (with their pgvector embeddings) belong to a document. Deleting the
+    # document cascades to them at the DB level; passive_deletes avoids loading rows.
+    chunks = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DocumentChunk(Base):
+    """A single embedded chunk of a document, stored in PostgreSQL/pgvector.
+
+    Replaces the former ChromaDB collection ``embedded``. The metadata that used
+    to live on the Chroma record (``user_id``, ``workspace_id``, ``file_name`` …)
+    is denormalized here so retrieval can filter by owner/workspace directly, and
+    the ``embedding`` column holds the 384-dim vector for similarity search.
+    Foreign keys use ``ON DELETE CASCADE`` so deleting a document (or its
+    workspace) also removes the associated embeddings.
+    """
+
+    id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
+    document_id = Column(
+        String,
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id = Column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    file_name = Column(String)
+    chunk_number = Column(Integer)
+    total_chunks = Column(Integer)
+    content = Column(Text)
+    embedding = Column(Vector(EMBEDDING_DIM))
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    document = relationship("Document", back_populates="chunks")
+    user = relationship("User")
+    workspace = relationship("Workspace")
+
+
+# HNSW index for approximate-nearest-neighbour cosine similarity search over the
+# embeddings. Defined here so ``create_all`` builds it, mirroring the Alembic
+# migration. Only materializes on PostgreSQL (pgvector); ignored elsewhere.
+Index(
+    "ix_document_chunks_embedding",
+    DocumentChunk.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+)

@@ -53,15 +53,11 @@ class CRUDWorkspace(CRUDBase[Workspace, WorkspaceCreate, WorkspaceUpdate]):
         """
         Delete a workspace and everything it contains.
 
-        The DB-level ``ON DELETE CASCADE`` on ``chat_sessions.workspace_id`` and
-        ``document.workspace_id`` removes the workspace's chats (and their
-        messages) and its file rows. We additionally purge the workspace's vector
-        chunks from ChromaDB, which the relational cascade cannot reach.
+        The DB-level ``ON DELETE CASCADE`` on ``chat_sessions.workspace_id``,
+        ``documents.workspace_id`` and ``document_chunks.workspace_id`` removes the
+        workspace's chats (and their messages), its file rows and their pgvector
+        embeddings in a single relational cascade.
         """
-        from server.utils.common import delete_chroma_by
-
-        delete_chroma_by({"workspace_id": {"$eq": workspace.id}})
-
         db.delete(workspace)
         db.commit()
 

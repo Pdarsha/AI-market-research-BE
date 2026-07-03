@@ -40,8 +40,6 @@ class Settings(BaseSettings):
 
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
     SERPAPI_KEY: str = os.getenv("SERPAPI_KEY")
-    CHROMADB_KEY: str = os.getenv("CHROMADB_KEY")
-    CHROMADB_DATABASE: str = os.getenv("CHROMADB_DATABASE")
 
     # IMAGE_ENHANCER_URL = os.environ.get("IMAGE_ENHANCER_URL")
     # IMAGE_ENHANCER_API_KEY = os.environ.get("IMAGE_ENHANCER_API_KEY")
