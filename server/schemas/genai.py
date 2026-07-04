@@ -67,6 +67,8 @@ class ChatMessageBase(BaseModel):
 class ChatMessageRequest(BaseModel):
     content: str
     document_ids: Optional[list[str]] = None
+    workspace_id: Optional[str] = None
+    title: Optional[str] = None
 
 
 class ChatMessageCreate(ChatMessageBase):

@@ -1,5 +1,5 @@
 import os
-from typing import List, Union
+from typing import List, Optional, Union
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import field_validator
@@ -12,22 +12,6 @@ class Settings(BaseSettings):
     debug: bool = os.environ.get("DEBUG")
     FASTAPI_CONFIG: str = os.environ.get("FASTAPI_CONFIG")
 
-    # FB_TYPE: str = os.environ.get("FB_TYPE")
-    # FB_PROJECT_ID: str = os.environ.get("FB_PROJECT_ID")
-    # FB_PRIVATE_KEY_ID: str = os.environ.get("FB_PRIVATE_KEY_ID")
-    # FB_PRIVATE_KEY: str = os.environ.get("FB_PRIVATE_KEY")
-    # FB_CLIENT_EMAIL: str = os.environ.get("FB_CLIENT_EMAIL")
-    # FB_CLIENT_ID: str = os.environ.get("FB_CLIENT_ID")
-    # FB_AUTH_URL: str = os.environ.get("FB_AUTH_URL")
-    # FB_TOKEN_URL: str = os.environ.get("FB_TOKEN_URL")
-    # FB_AUTH_PROVIDER_URL: str = os.environ.get("FB_AUTH_PROVIDER_URL")
-    # FB_CLIENT_URL: str = os.environ.get("FB_CLIENT_URL")
-
-    # POSTGRES_USER: str = os.environ.get("POSTGRES_USER")
-    # POSTGRES_PASSWORD: str = os.environ.get("POSTGRES_PASSWORD")
-    # POSTGRES_SERVER: str = os.environ.get("POSTGRES_SERVER")
-    # POSTGRES_DB: str = os.environ.get("POSTGRES_DB")
-
     SQLALCHEMY_DATABASE_URI: str = os.getenv("SQLALCHEMY_DATABASE_URI")
     MAIL_PORT: str = os.getenv("MAIL_PORT")
     MAIL_SERVER: str = os.getenv("MAIL_SERVER")
@@ -36,20 +20,26 @@ class Settings(BaseSettings):
     MAIL_USERNAME: str = os.getenv("MAIL_USERNAME")
     MAIL_PASSWORD: str = os.getenv("MAIL_PASSWORD")
     MAIL_FROM: str = os.getenv("MAIL_FROM")
-    # OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
     SERPAPI_KEY: str = os.getenv("SERPAPI_KEY")
 
-    # IMAGE_ENHANCER_URL = os.environ.get("IMAGE_ENHANCER_URL")
-    # IMAGE_ENHANCER_API_KEY = os.environ.get("IMAGE_ENHANCER_API_KEY")
-    # OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
-    # TYPESENSE_ADMIN_API_KEY: str = os.environ.get("TYPESENSE_ADMIN_API_KEY")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
 
-    # CHARGEBEE_SITE_NAME = os.environ.get("CHARGEBEE_SITE_NAME")
-    # CHARGEBEE_ACCESS_TOKEN = os.environ.get("CHARGEBEE_ACCESS_TOKEN")
-    # CHARGEBEE_HOOK_USERNAME = os.environ.get("CHARGEBEE_HOOK_USERNAME")
-    # CHARGEBEE_HOOK_PASSWORD = os.environ.get("CHARGEBEE_HOOK_PASSWORD")
+    # -- OpenAI embeddings -------------------------------------------------
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL") or None
+
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+    EMBEDDING_BATCH_SIZE: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
+    EMBEDDING_MAX_RETRIES: int = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
+
+    # -- Chunking / retrieval ---------------------------------------------
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
+    RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "5"))
+    
     BACKEND_CORS_ORIGINS: List = []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
@@ -59,18 +49,6 @@ class Settings(BaseSettings):
         elif isinstance(v, (list, str)):
             return v
         raise ValueError(v)
-
-    # def assemble_db_connection(self):
-    #     return PostgresDsn.build(
-    #         scheme="postgresql",
-    #         user=self.POSTGRES_USER,
-    #         password=self.POSTGRES_PASSWORD,
-    #         host=self.POSTGRES_SERVER,
-    #         path=f"/{self.POSTGRES_DB or ''}",
-    #     )
-
-    # SENTRY_DSN: str = os.environ.get("SENTRY_DSN")
-
 
 settings = Settings()
 

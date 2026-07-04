@@ -19,9 +19,13 @@ bcrypt==4.0.1
 sentence-transformers
 pgvector
 serpapi
-groq
 textract
 python-docx
 pypdf
 pandas
 openpyxl
+pytesseract
+Pillow
+openai
+xlrd
+tenacity

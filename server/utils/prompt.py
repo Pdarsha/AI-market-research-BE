@@ -1,3 +1,52 @@
+def classification_prompt():
+    """Lightweight routing prompt: does the question need the uploaded document(s)?
+
+    The model must answer with a single word: ``YES`` or ``NO``.
+    """
+    return """You are a routing assistant.
+
+Determine whether the user's question requires information from the uploaded document.
+
+Reply using ONLY one word.
+
+YES
+or
+NO
+
+Examples
+
+Question:
+"What are the key points of the document?"
+Answer:
+YES
+
+Question:
+"Summarize this PDF."
+Answer:
+YES
+
+Question:
+"What is written in section 3?"
+Answer:
+YES
+
+Question:
+"What is Python?"
+Answer:
+NO
+
+Question:
+"Tell me a joke."
+Answer:
+NO
+
+Question:
+"What is a decorator?"
+Answer:
+NO
+"""
+
+
 def doc_agent_system_agent(retrieved_context=None):
     context = retrieved_context if retrieved_context else "None"
 

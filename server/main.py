@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
-import server.utils.embedding_service as emb
 from server.config import settings, create_storage_directories, STATIC_DIR
 from server.db.init_db import init_db
 
@@ -20,8 +19,6 @@ async def app_startup():
 
 
 async def lifespan(app: FastAPI):
-
-    emb.load_model()
 
     await app_startup()
     yield

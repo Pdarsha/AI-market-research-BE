@@ -1,27 +1,20 @@
-import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from groq import Groq
+from openai import OpenAI
 
 from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.config import settings
+from server.services.rag_service import get_rag_service
 from server.utils.auth import get_current_user
-from server.utils.common import (
-    agent_search,
-    ingest_file_into_workspace,
-    search_similarity,
-)
-from server.utils.prompt import (
-    ai_assistent,
-    doc_agent_system_agent,
-    doom_agent_system_prompt,
-)
 
-client = Groq(api_key=settings.GROQ_API_KEY)
+client = OpenAI(
+    api_key=settings.OPENAI_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -31,6 +24,43 @@ logger = logging.getLogger(__name__)
 
 
 ai_router = APIRouter(prefix="/ai", tags=["GenAI"])
+
+
+def _resolve_or_create_session(
+    db,
+    *,
+    chat_id: Optional[str],
+    current_user,
+    title: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+):
+    """Return the caller's chat session for ``chat_id``, creating it if absent.
+
+    Shared by the chat/message and ai-agent endpoints so both handle sessions
+    identically:
+      * existing session -> returned only if owned by the caller (else 404);
+      * missing session  -> created with the given ``chat_id`` (so the id the
+        client already uses stays consistent) after validating any workspace.
+    """
+    if chat_id:
+        session = crud.chat_session.get(db, chat_id)
+        if session is not None:
+            if session.user_id != str(current_user.id):
+                raise HTTPException(status_code=404, detail="Chat session not found")
+            return session
+
+    if workspace_id:
+        workspace = crud.workspace.get(db, workspace_id)
+        if not workspace or workspace.user_id != str(current_user.id):
+            raise HTTPException(status_code=404, detail="Workspace not found")
+
+    return crud.chat_session.create_with_id(
+        db,
+        chat_id=chat_id,
+        user_id=str(current_user.id),
+        title=title,
+        workspace_id=workspace_id,
+    )
 
 
 @ai_router.post("/chats")
@@ -251,15 +281,19 @@ def add_chat_message(
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    session = crud.chat_session.get(db, chat_id)
-    if not session or session.user_id != str(current_user.id):
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    session = _resolve_or_create_session(
+        db,
+        chat_id=chat_id,
+        current_user=current_user,
+        title=request.title,
+        workspace_id=request.workspace_id,
+    )
+    chat_id = session.id
+
+    document_ids = request.document_ids or []
 
     prior_messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
-    message_history = [
-        {"role": msg.role, "content": msg.content} for msg in prior_messages
-    ]
-    message_history.append({"role": "user", "content": request.content})
+    history = [{"role": msg.role, "content": msg.content} for msg in prior_messages]
 
     user_message = crud.chat_message.create(
         db=db,
@@ -273,21 +307,47 @@ def add_chat_message(
         ),
     )
 
-    ai_response = ""
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=message_history,
-        temperature=0,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
+    used_rag = False
+    source_documents = None
+    retrieved_context = None
+
+    if document_ids:
+        requires_doc = get_rag_service().classify_requires_document(
+            client, question=request.content, model=settings.LLM_MODEL
+        )
+        if requires_doc:
+            try:
+                retrieved_context, source_documents = get_rag_service().retrieve_context(
+                    db,
+                    query=request.content,
+                    user_id=str(current_user.id),
+                    document_ids=document_ids,
+                    top_k=3,
+                )
+                used_rag = True
+            except Exception:
+                logger.exception(
+                    "chat.message: document retrieval failed; falling back to "
+                    "plain chat (chat=%s)",
+                    chat_id,
+                )
+                retrieved_context = None
+                source_documents = None
+
+    logger.info(
+        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s",
+        chat_id,
+        getattr(current_user, "id", None),
+        len(document_ids),
+        used_rag,
     )
-    for chunk in completion:
-        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            if content:
-                ai_response += content
+
+    messages = get_rag_service().build_messages(
+        history=history,
+        question=request.content,
+        retrieved_context=retrieved_context,
+    )
+    ai_response = get_rag_service().generate_response(client, messages=messages, model=settings.LLM_MODEL)
 
     assistant_message = crud.chat_message.create(
         db=db,
@@ -298,6 +358,7 @@ def add_chat_message(
             user_id=str(current_user.id),
             workspace_id=session.workspace_id,
             document_ids=request.document_ids,
+            source_documents=source_documents,
         ),
     )
 
@@ -307,140 +368,14 @@ def add_chat_message(
             "success": True,
             "error": None,
             "data": {
+                "chat_session_id": chat_id,
                 "user_message_id": user_message.id,
                 "assistant_message_id": assistant_message.id,
                 "response": ai_response,
                 "document_ids": request.document_ids,
+                "used_documents": used_rag,
+                "source_documents": source_documents,
             },
             "message": "Message added and AI response created successfully.",
-        },
-    )
-
-
-@ai_router.post("/ai-agent")
-def ai_agent(
-    request: schemas.GenAIBase,
-    workspace_id: Optional[str] = None,
-    db=Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    session = crud.chat_session.create(
-        db=db,
-        obj_in=schemas.ChatSessionCreate(
-            user_id=str(current_user.id), title=request.title, workspace_id=workspace_id
-        ),
-    )
-
-    file_names = None
-
-    if "@doom" in request.user_query:
-        logger.info("This is the agentic flow. User query contains '@doom' trigger.")
-
-        organic_results = agent_search(request.user_query.replace("@doom", "").strip())
-
-        message = [
-            {"role": "system", "content": doom_agent_system_prompt()},
-            {
-                "role": "system",
-                "content": f"Search Results:\n\n{json.dumps(organic_results, indent=2)}",
-            },
-            {"role": "user", "content": request.user_query},
-        ]
-
-    elif "@doc" in request.user_query:
-
-        logger.info(
-            "grok_ai: user=%s starting AI request; query_len=%d",
-            getattr(current_user, "id", None),
-            len(request.user_query) if getattr(request, "user_query", None) else 0,
-        )
-
-        if workspace_id:
-            workspace = crud.workspace._get_owned_workspace(
-                db, workspace_id, str(current_user.id)
-            )
-            if workspace is None:
-                raise HTTPException(status_code=404, detail="Workspace not found")
-
-        similarity_results, file_names = search_similarity(
-            db, request.user_query, current_user, top_k=3, workspace_id=workspace_id
-        )
-        logger.debug(
-            "grok_ai: user=%s similarity results=%d",
-            getattr(current_user, "id", None),
-            len(similarity_results) if similarity_results is not None else 0,
-        )
-        message = [
-            {"role": "system", "content": doc_agent_system_agent(similarity_results)},
-            {"role": "user", "content": request.user_query},
-        ]
-
-    else:
-        logger.info("This is the AI assistent flow.")
-        message = [
-            {"role": "system", "content": ai_assistent()},
-            {"role": "user", "content": request.user_query},
-        ]
-
-    ai_response = ""
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=message,
-        temperature=0,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
-
-    for chunk in completion:
-        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            if content:
-                ai_response += content
-
-    logger.info(
-        "grok_ai: user=%s AI response generated; response_len=%d",
-        getattr(current_user, "id", None),
-        len(ai_response),
-    )
-
-    if session is not None:
-        crud.chat_message.create(
-            db=db,
-            obj_in=schemas.ChatMessageCreate(
-                chat_id=session.id,
-                content=request.user_query,
-                role="user",
-                user_id=str(current_user.id),
-                workspace_id=workspace_id or session.workspace_id,
-                document_ids=request.document_ids,
-            ),
-        )
-        crud.chat_message.create(
-            db=db,
-            obj_in=schemas.ChatMessageCreate(
-                chat_id=session.id,
-                content=ai_response,
-                role="assistant",
-                user_id=str(current_user.id),
-                workspace_id=workspace_id or session.workspace_id,
-                document_ids=request.document_ids,
-                source_documents=file_names,
-            ),
-        )
-
-    return JSONResponse(
-        status_code=200,
-        content={
-            "success": True,
-            "error": None,
-            "data": {
-                "prompt": request.user_query,
-                "response": ai_response,
-                "file_names": file_names if "@doc" in request.user_query else None,
-                "chat_session_id": session.id if session else None,
-            },
-            "message": "AI response generated successfully.",
         },
     )

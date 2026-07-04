@@ -7,8 +7,8 @@ from fastapi.responses import JSONResponse
 from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.models.genai import ChatSession
+from server.services.document_processor import get_document_processor
 from server.utils.auth import get_current_user
-from server.utils.common import ingest_file_into_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +268,7 @@ async def upload_docs(
         doc.filename,
     )
 
-    document = await ingest_file_into_workspace(
+    document = await get_document_processor().process(
         db, file=doc, user_id=current_user.id, workspace_id=workspace_id
     )
 

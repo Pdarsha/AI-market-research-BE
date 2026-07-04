@@ -8,7 +8,7 @@ from pgvector.sqlalchemy import Vector
 from server.db.base_class import Base
 
 # Dimensionality of the sentence-transformers/all-MiniLM-L6-v2 embeddings.
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 1536
 
 
 class Workspace(Base):
@@ -73,7 +73,7 @@ class DocumentChunk(Base):
     Replaces the former ChromaDB collection ``embedded``. The metadata that used
     to live on the Chroma record (``user_id``, ``workspace_id``, ``file_name`` …)
     is denormalized here so retrieval can filter by owner/workspace directly, and
-    the ``embedding`` column holds the 384-dim vector for similarity search.
+    the ``embedding`` column holds the 1536-dim vector for similarity search.
     Foreign keys use ``ON DELETE CASCADE`` so deleting a document (or its
     workspace) also removes the associated embeddings.
     """
