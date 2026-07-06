@@ -1,10 +1,11 @@
 import random
 from datetime import datetime
-import serpapi
+
 from fastapi import HTTPException
+
 from server import crud, schemas
-from server.config import settings
 from server.utils.mail import send_email
+
 
 async def validate_email_send_otp(db, email, user_id):
     time_now = datetime.utcnow()
@@ -45,14 +46,3 @@ async def validate_email_send_otp(db, email, user_id):
         )
     await send_email(email, key)
     return True
-
-
-# def rerank_documents(query, documents, top_k=3):
-
-#     pairs = [(query, doc) for doc in documents]
-
-#     scores = load_rerank_model().predict(pairs)
-
-#     ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
-
-#     return [doc for doc, score in ranked[:top_k]]

@@ -24,7 +24,7 @@ class CRUDDocument(CRUDBase[Document, CreateDocument, updateDocument]):
     def remove(self, db: Session, *, id: str) -> Optional[Document]:
         return super().remove(db, id=id)
 
-    def get_document(self, db: Session, workspace_id:str, doc_id: str, user_id: str):
+    def get_document(self, db: Session, workspace_id: str, doc_id: str, user_id: str):
         return (
             db.query(self.model)
             .filter(self.model.id == doc_id, self.model.user_id == user_id)

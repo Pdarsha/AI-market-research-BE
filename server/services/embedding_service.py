@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import List, Optional
 
 from openai import AsyncOpenAI, OpenAI, OpenAIError
 from tenacity import (
@@ -51,22 +50,24 @@ class EmbeddingService:
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model: Optional[str] = None,
-        dimensions: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        max_retries: Optional[int] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        dimensions: int | None = None,
+        batch_size: int | None = None,
+        max_retries: int | None = None,
     ) -> None:
         self._api_key = api_key or settings.OPENAI_API_KEY
         self._base_url = base_url or settings.OPENAI_BASE_URL or None
         self.model = model or settings.EMBEDDING_MODEL
         self.dimensions = dimensions or settings.EMBEDDING_DIMENSIONS
         self.batch_size = max(1, batch_size or settings.EMBEDDING_BATCH_SIZE)
-        self._max_retries = max_retries if max_retries is not None else settings.EMBEDDING_MAX_RETRIES
+        self._max_retries = (
+            max_retries if max_retries is not None else settings.EMBEDDING_MAX_RETRIES
+        )
 
-        self._client: Optional[OpenAI] = None
-        self._aclient: Optional[AsyncOpenAI] = None
+        self._client: OpenAI | None = None
+        self._aclient: AsyncOpenAI | None = None
 
     # -- clients -----------------------------------------------------------
 
@@ -99,32 +100,34 @@ class EmbeddingService:
 
     # -- request helpers ---------------------------------------------------
 
-    def _request_kwargs(self, batch: List[str]) -> dict:
+    def _request_kwargs(self, batch: list[str]) -> dict:
         kwargs: dict = {"model": self.model, "input": batch}
         if self.dimensions and self.model.startswith(_MODELS_SUPPORTING_DIMENSIONS):
             kwargs["dimensions"] = self.dimensions
         return kwargs
 
     @staticmethod
-    def _sanitize(texts: List[str]) -> List[str]:
+    def _sanitize(texts: list[str]) -> list[str]:
         # The API rejects empty strings; substitute a single space so indices
         # stay aligned with the caller's input.
         return [t if (t and t.strip()) else " " for t in texts]
 
     # -- synchronous API ---------------------------------------------------
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """Embed a single string and return its vector."""
         return self.embed_texts([text])[0]
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of strings, batching requests transparently."""
         if not texts:
             return []
         clean = self._sanitize(texts)
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for start in range(0, len(clean), self.batch_size):
-            vectors.extend(self._embed_batch_sync(clean[start : start + self.batch_size]))
+            vectors.extend(
+                self._embed_batch_sync(clean[start : start + self.batch_size])
+            )
         return vectors
 
     @retry(
@@ -134,13 +137,12 @@ class EmbeddingService:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    def _embed_batch_sync(self, batch: List[str]) -> List[List[float]]:
+    def _embed_batch_sync(self, batch: list[str]) -> list[list[float]]:
         try:
             # response = self.client.embeddings.create(**self._request_kwargs(batch))
             response = _sync_client.embeddings.create(
-                        model="openai/text-embedding-3-small",
-                        input=batch
-                    )
+                model="openai/text-embedding-3-small", input=batch
+            )
         except OpenAIError:
             logger.exception(
                 "OpenAI embedding request failed (model=%s, batch_size=%d)",
@@ -152,14 +154,14 @@ class EmbeddingService:
 
     # -- asynchronous API --------------------------------------------------
 
-    async def aembed_text(self, text: str) -> List[float]:
+    async def aembed_text(self, text: str) -> list[float]:
         return (await self.aembed_texts([text]))[0]
 
-    async def aembed_texts(self, texts: List[str]) -> List[List[float]]:
+    async def aembed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         clean = self._sanitize(texts)
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for start in range(0, len(clean), self.batch_size):
             vectors.extend(
                 await self._embed_batch_async(clean[start : start + self.batch_size])
@@ -173,13 +175,12 @@ class EmbeddingService:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    async def _embed_batch_async(self, batch: List[str]) -> List[List[float]]:
+    async def _embed_batch_async(self, batch: list[str]) -> list[list[float]]:
         try:
             # response = await self.aclient.embeddings.create(**self._request_kwargs(batch))
             response = await _async_client.embeddings.create(
-                        model="openai/text-embedding-3-small",
-                        input=batch
-                    )
+                model="openai/text-embedding-3-small", input=batch
+            )
         except OpenAIError:
             logger.exception(
                 "OpenAI async embedding request failed (model=%s, batch_size=%d)",

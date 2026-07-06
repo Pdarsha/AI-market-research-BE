@@ -30,9 +30,7 @@ class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate
             .all()
         )
 
-    def get_latest_document_ids(
-        self, db: Session, *, chat_id: str
-    ) -> Optional[list]:
+    def get_latest_document_ids(self, db: Session, *, chat_id: str) -> Optional[list]:
         """Most recent ``document_ids`` referenced within a chat.
 
         Reads exclusively from ``chat_messages`` (previously sourced from the
@@ -50,7 +48,7 @@ class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate
         if latest and latest.document_ids:
             return latest.document_ids
         return None
-    
+
     def get_latest_source_documents(
         self, db: Session, *, chat_id: str, document_ids: Optional[list]
     ) -> Optional[list]:

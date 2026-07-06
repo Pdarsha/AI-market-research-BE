@@ -20,7 +20,9 @@ class CRUDChatSession(CRUDBase[ChatSession, ChatSessionCreate, ChatSessionUpdate
         query = db.query(self.model)
         if user_id:
             query = query.filter(self.model.user_id == user_id)
-        return query.order_by(desc(self.model.updated_at)).offset(skip).limit(limit).all()
+        return (
+            query.order_by(desc(self.model.updated_at)).offset(skip).limit(limit).all()
+        )
 
     def create(self, db: Session, *, obj_in: ChatSessionCreate) -> ChatSession:
         return super().create(db, obj_in=obj_in)
@@ -40,9 +42,7 @@ class CRUDChatSession(CRUDBase[ChatSession, ChatSessionCreate, ChatSessionUpdate
         message with the id the client already uses in the URL. When ``chat_id``
         is falsy the model's default UUID is generated instead.
         """
-        session = ChatSession(
-            user_id=user_id, title=title, workspace_id=workspace_id
-        )
+        session = ChatSession(user_id=user_id, title=title, workspace_id=workspace_id)
         if chat_id:
             session.id = chat_id
         db.add(session)

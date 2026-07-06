@@ -1,21 +1,27 @@
-"""Cross-encoder re-ranking service.
+"""LLM-based re-ranking service.
 
 Second stage of a two-stage retrieval pipeline. The vector search (stage 1)
 retrieves a broad candidate pool by embedding cosine similarity, which is fast
-but only approximates relevance. This service (stage 2) re-scores each candidate
-against the query with a cross-encoder — which reads the query and passage
-*together* — and returns the most relevant ones.
+but only approximates relevance. This service (stage 2) re-scores those
+candidates against the query with an LLM (listwise ranking, à la RankGPT) and
+returns the most relevant ones.
 
-The model is loaded lazily and cached as a process-wide singleton. Loading or
-scoring failures degrade gracefully: the caller gets the original (vector-ranked)
-order back, so retrieval never breaks because of the re-ranker.
+It reuses the same OpenAI-compatible endpoint (OpenRouter) as the rest of the app
+with ``settings.RERANK_MODEL`` (e.g. ``openai/gpt-4.1-mini``) — no HuggingFace /
+local model download. Any failure (API error or unparseable output) degrades
+gracefully: the caller gets the original vector-ranked order back, so retrieval
+never breaks because of the re-ranker.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from functools import lru_cache
-from typing import Callable, List, Optional, Sequence, TypeVar
+from typing import Callable, Sequence, TypeVar
+
+from openai import OpenAI
 
 from server.config import settings
 
@@ -23,35 +29,27 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# Cap the passage text sent to the ranker — a relevance judgement doesn't need the
+# full chunk, and this keeps the prompt (and cost/latency) bounded.
+_MAX_PASSAGE_CHARS = 600
+
 
 class RerankService:
-    """Re-order candidates by cross-encoder relevance to a query."""
+    """Re-order candidates by LLM-judged relevance to a query."""
 
-    def __init__(self, model_name: Optional[str] = None) -> None:
+    def __init__(self, model_name: str | None = None) -> None:
         self.model_name = model_name or settings.RERANK_MODEL
-        self._model = None
-        self._load_failed = False
+        self._client: OpenAI | None = None
 
     @property
-    def model(self):
-        """Lazily load the CrossEncoder, caching success/failure.
-
-        Returns ``None`` (once) if the model cannot be loaded, so callers can fall
-        back to the vector order instead of raising on every request.
-        """
-        if self._model is None and not self._load_failed:
-            try:
-                from sentence_transformers import CrossEncoder
-
-                logger.info("rerank: loading cross-encoder model %s", self.model_name)
-                self._model = CrossEncoder(self.model_name)
-            except Exception:
-                self._load_failed = True
-                logger.exception(
-                    "rerank: failed to load model %s; re-ranking disabled",
-                    self.model_name,
-                )
-        return self._model
+    def client(self) -> OpenAI:
+        """Lazily create the OpenAI-compatible client (OpenRouter), cached."""
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL or "https://openrouter.ai/api/v1",
+            )
+        return self._client
 
     def rerank(
         self,
@@ -60,39 +58,94 @@ class RerankService:
         *,
         top_k: int,
         text_getter: Callable[[T], str],
-    ) -> List[T]:
+    ) -> list[T]:
         """Return the ``top_k`` ``items`` most relevant to ``query``.
 
         ``text_getter`` extracts the text to score from each item, keeping this
-        service decoupled from any particular row/DTO shape. On an unavailable
-        model or a scoring error, the original order (truncated to ``top_k``) is
+        service decoupled from any particular row/DTO shape. On an API error or an
+        unparseable model response, the original order (truncated to ``top_k``) is
         returned so retrieval still succeeds.
         """
         items = list(items)
-        if not items:
-            return []
-
-        model = self.model
-        if model is None:
+        if len(items) <= 1:
             return items[:top_k]
+
+        # Number the passages so the model can refer to them by index.
+        passages = []
+        for index, item in enumerate(items, start=1):
+            text = (text_getter(item) or "").strip().replace("\n", " ")
+            passages.append(f"[{index}] {text[:_MAX_PASSAGE_CHARS]}")
+        passages_block = "\n".join(passages)
+
+        system_prompt = (
+            "You are a search-result re-ranking assistant. Given a user query and a "
+            "list of numbered passages, rank the passages by how well they answer the "
+            "query. Respond with ONLY a JSON array of passage numbers ordered from "
+            "most to least relevant, e.g. [3, 1, 2]. Do not include any other text."
+        )
+        user_prompt = (
+            f"Query:\n{query}\n\n"
+            f"Passages:\n{passages_block}\n\n"
+            f"Return the top {top_k} passage numbers as a JSON array."
+        )
 
         try:
-            pairs = [(query, text_getter(item) or "") for item in items]
-            scores = model.predict(pairs)
-            ranked = sorted(
-                zip(items, scores), key=lambda pair: pair[1], reverse=True
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                max_tokens=100,
             )
-            top = [item for item, _ in ranked[:top_k]]
-            logger.info(
-                "rerank: query_len=%d candidates=%d -> kept=%d",
-                len(query),
-                len(items),
-                len(top),
-            )
-            return top
+            content = (completion.choices[0].message.content or "").strip()
         except Exception:
-            logger.exception("rerank: scoring failed; falling back to vector order")
+            logger.exception("rerank: LLM ranking failed; falling back to vector order")
             return items[:top_k]
+
+        order = self._parse_ranking(content, n=len(items))
+        if not order:
+            logger.warning(
+                "rerank: could not parse ranking from model output; using vector order"
+            )
+            return items[:top_k]
+
+        # Map the 1-indexed ranking back to items, then append any candidates the
+        # model omitted (so we never silently drop results), and keep top_k.
+        ranked = [items[i - 1] for i in order]
+        ranked_set = set(order)
+        ranked.extend(
+            item for i, item in enumerate(items, start=1) if i not in ranked_set
+        )
+        top = ranked[:top_k]
+        logger.info(
+            "rerank: model=%s candidates=%d -> kept=%d",
+            self.model_name,
+            len(items),
+            len(top),
+        )
+        return top
+
+    @staticmethod
+    def _parse_ranking(content: str, *, n: int) -> list[int]:
+        """Extract an ordered list of valid 1..n passage indices from ``content``.
+
+        Accepts a clean JSON array, a JSON array embedded in prose, or a bare list
+        of numbers. Out-of-range and duplicate indices are dropped.
+        """
+        match = re.search(r"\[[^\]]*\]", content)
+        raw = match.group(0) if match else content
+        try:
+            candidates = [int(x) for x in json.loads(raw)]
+        except Exception:
+            candidates = [int(x) for x in re.findall(r"\d+", raw)]
+
+        indices: list[int] = []
+        for idx in candidates:
+            if 1 <= idx <= n and idx not in indices:
+                indices.append(idx)
+        return indices
 
 
 @lru_cache(maxsize=1)

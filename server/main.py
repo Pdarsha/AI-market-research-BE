@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
-from server.config import settings, create_storage_directories, STATIC_DIR
+from server.config import STATIC_DIR, create_storage_directories, settings
 from server.db.init_db import init_db
 
 from .api import api_router

@@ -29,3 +29,4 @@ Pillow
 openai
 xlrd
 tenacity
+google-auth

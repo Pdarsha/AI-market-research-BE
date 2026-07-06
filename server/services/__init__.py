@@ -13,7 +13,11 @@ Module-level singleton accessors (``get_*_service``) are provided so request
 handlers can share one instance without wiring dependencies manually.
 """
 
-from server.services.chunking_service import Chunk, ChunkingService, get_chunking_service
+from server.services.chunking_service import (
+    Chunk,
+    ChunkingService,
+    get_chunking_service,
+)
 from server.services.document_processor import (
     DocumentProcessor,
     get_document_processor,

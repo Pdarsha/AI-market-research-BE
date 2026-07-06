@@ -1,6 +1,6 @@
 import os
-from typing import List, Optional, Union
 from pathlib import Path
+from typing import List, Optional, Union
 from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     MAIL_SERVER: str = os.getenv("MAIL_SERVER")
 
     AUTH_TOKEN: str = os.getenv("AUTH_TOKEN")
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+
     MAIL_USERNAME: str = os.getenv("MAIL_USERNAME")
     MAIL_PASSWORD: str = os.getenv("MAIL_PASSWORD")
     MAIL_FROM: str = os.getenv("MAIL_FROM")
@@ -43,16 +45,14 @@ class Settings(BaseSettings):
     # -- Re-ranking (two-stage retrieval) --------------------------------
     RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "true").lower() == "true"
     RAG_RERANK_CANDIDATES: int = int(os.getenv("RAG_RERANK_CANDIDATES", "20"))
-    RERANK_MODEL: str = os.getenv(
-        "RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    )
+    RERANK_MODEL: str = os.getenv("RERANK_MODEL", "openai/gpt-4.1-mini")
 
     # -- Web search --------------------------------------------------------
     WEB_SEARCH_ENGINE: str = os.getenv("WEB_SEARCH_ENGINE", "google")
     WEB_SEARCH_RESULTS: int = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
     WEB_SEARCH_COUNTRY: str = os.getenv("WEB_SEARCH_COUNTRY", "in")
     WEB_SEARCH_LANGUAGE: str = os.getenv("WEB_SEARCH_LANGUAGE", "en")
-    
+
     BACKEND_CORS_ORIGINS: List = []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
@@ -63,11 +63,13 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
+
 settings = Settings()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 WORKSPACE_DOCS_DIR = STATIC_DIR / "workspace_docs"
+
 
 def create_storage_directories():
     STATIC_DIR.mkdir(parents=True, exist_ok=True)

@@ -17,7 +17,7 @@ import logging
 import tempfile
 from functools import lru_cache
 from io import BytesIO, StringIO
-from typing import Callable, Dict, Tuple
+from typing import Callable
 
 import openpyxl  # noqa: F401  (ensures the xlsx engine is importable)
 import pandas as pd
@@ -101,7 +101,7 @@ class OCRService:
 
     # extension -> (stored file_format, extractor). Single source of truth for
     # which upload types are accepted across the whole pipeline.
-    _EXTRACTORS: Dict[str, Tuple[str, Callable[[bytes], str]]] = {
+    _EXTRACTORS: dict[str, tuple[str, Callable[[bytes], str]]] = {
         ".txt": ("txt", _extract_txt),
         ".docx": ("docx", _extract_docx),
         ".doc": ("doc", _extract_doc),
@@ -118,7 +118,7 @@ class OCRService:
     }
 
     @property
-    def supported_extensions(self) -> Tuple[str, ...]:
+    def supported_extensions(self) -> tuple[str, ...]:
         return tuple(self._EXTRACTORS)
 
     def detect_extension(self, filename: str) -> str:

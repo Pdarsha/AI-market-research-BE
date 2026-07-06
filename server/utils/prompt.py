@@ -58,9 +58,7 @@ def augmented_system_prompt(document_context=None, web_context=None):
     """
     sections = []
     if document_context:
-        sections.append(
-            "=== UPLOADED DOCUMENT CONTEXT ===\n" + str(document_context)
-        )
+        sections.append("=== UPLOADED DOCUMENT CONTEXT ===\n" + str(document_context))
     if web_context:
         sections.append("=== WEB SEARCH RESULTS ===\n" + str(web_context))
     context_block = "\n\n".join(sections) if sections else "None"

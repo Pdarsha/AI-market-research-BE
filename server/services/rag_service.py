@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import List, Optional, Tuple
 
 import serpapi
 from sqlalchemy.orm import Session
@@ -29,13 +28,13 @@ from server.utils.prompt import (
     ai_assistent,
     augmented_system_prompt,
     classification_prompt,
-    doc_agent_system_agent,
     web_search_classification_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
 serp_client = serpapi.Client(api_key=settings.SERPAPI_KEY)
+
 
 class RAGService:
     """Embed a query and retrieve the most relevant document chunks."""
@@ -49,10 +48,10 @@ class RAGService:
         *,
         query: str,
         user_id: str,
-        top_k: Optional[int] = None,
-        document_ids: List[str],
-        workspace_id: Optional[str] = None,
-    ) -> List[DocumentChunk]:
+        top_k: int | None = None,
+        document_ids: list[str],
+        workspace_id: str | None = None,
+    ) -> list[DocumentChunk]:
         """Return the top-k most relevant :class:`DocumentChunk` rows for ``query``.
 
         Two-stage retrieval:
@@ -67,9 +66,7 @@ class RAGService:
         top_k = top_k or settings.RAG_TOP_K
         query_embedding = self._embedder.embed_text(query)
 
-        stmt = db.query(DocumentChunk).filter(
-            DocumentChunk.user_id == str(user_id)
-        )
+        stmt = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
         if workspace_id:
             stmt = stmt.filter(DocumentChunk.workspace_id == str(workspace_id))
         if document_ids:
@@ -114,18 +111,18 @@ class RAGService:
         return rows
 
     @staticmethod
-    def build_context(chunks: List[DocumentChunk]) -> str:
+    def build_context(chunks: list[DocumentChunk]) -> str:
         """Concatenate chunk contents into a single context string for the LLM."""
         return "\n\n---\n\n".join(chunk.content for chunk in chunks if chunk.content)
 
     @staticmethod
     def build_messages(
         *,
-        history: List[dict],
+        history: list[dict],
         question: str,
-        retrieved_context: Optional[str] = None,
-        web_context: Optional[str] = None,
-    ) -> List[dict]:
+        retrieved_context: str | None = None,
+        web_context: str | None = None,
+    ) -> list[dict]:
         """Prompt generation.
 
         Grounds the answer in whatever context is available:
@@ -148,7 +145,7 @@ class RAGService:
         return messages
 
     @staticmethod
-    def source_file_names(chunks: List[DocumentChunk]) -> List[str]:
+    def source_file_names(chunks: list[DocumentChunk]) -> list[str]:
         """Return the distinct source file names behind ``chunks`` (order-stable)."""
         return list(dict.fromkeys(c.file_name for c in chunks if c.file_name))
 
@@ -158,10 +155,10 @@ class RAGService:
         *,
         query: str,
         user_id: str,
-        top_k: Optional[int] = None,
-        document_ids: List[str],
-        workspace_id: Optional[str] = None,
-    ) -> Tuple[str, List[str]]:
+        top_k: int | None = None,
+        document_ids: list[str],
+        workspace_id: str | None = None,
+    ) -> tuple[str, list[str]]:
         """Convenience wrapper returning ``(context_string, source_file_names)``."""
         chunks = self.retrieve(
             db,
@@ -174,25 +171,25 @@ class RAGService:
         return self.build_context(chunks), self.source_file_names(chunks)
 
     @staticmethod
-    def generate_response(client, *, messages: List[dict], model: str) -> str:
+    def generate_response(client, *, messages: list[dict], model: str) -> str:
         """LLM response generation using streaming, returning the full text.
 
         Streaming is preserved (``stream=True``) exactly as the existing chat flow;
         the chunks are aggregated into the final response string.
         """
         ai_response = ""
-        completion =  client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=1024,
-                    stream=True,
-                    temperature=0
-                )
+        completion = client.chat.completions.create(
+            model=model, messages=messages, max_tokens=1024, stream=True, temperature=0
+        )
         for chunk in completion:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+            if (
+                chunk.choices
+                and chunk.choices[0].delta
+                and chunk.choices[0].delta.content
+            ):
                 ai_response += chunk.choices[0].delta.content
         return ai_response
-    
+
     @staticmethod
     def classify_requires_document(client, question: str, model: str) -> bool:
         """Ask the LLM whether ``question`` needs the uploaded document(s).
@@ -202,15 +199,15 @@ class RAGService:
         documents rather than silently ignoring them).
         """
         try:
-            completion =  client.chat.completions.create(
-                    model=model,
-                    messages=[
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
                     {"role": "system", "content": classification_prompt()},
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
                 max_tokens=1024,
-                temperature=0
-                )
+                temperature=0,
+            )
             answer = (completion.choices[0].message.content or "").strip().upper()
             requires = answer.startswith("Y")
             logger.info(
@@ -260,13 +257,13 @@ class RAGService:
             return False
 
     @staticmethod
-    def _format_scalar_fields(data: dict, skip: Tuple[str, ...]) -> str:
+    def _format_scalar_fields(data: dict, skip: tuple[str, ...]) -> str:
         """Flatten the scalar (str/number) fields of a SerpAPI widget to text.
 
         Nested objects, images and link metadata (in ``skip``) are ignored so the
         digest stays compact and LLM-friendly.
         """
-        parts: List[str] = []
+        parts: list[str] = []
         for key, value in data.items():
             if key in skip:
                 continue
@@ -280,10 +277,18 @@ class RAGService:
         """Pull the direct-answer widgets (answer box / knowledge graph) out of a
         SerpAPI response. This is where live data (weather, prices, scores,
         definitions) lives — organic results usually only have links."""
-        sections: List[str] = []
+        sections: list[str] = []
         _skip = (
-            "type", "thumbnail", "link", "displayed_link", "images", "list",
-            "table", "source", "serpapi_link", "people_also_search_for",
+            "type",
+            "thumbnail",
+            "link",
+            "displayed_link",
+            "images",
+            "list",
+            "table",
+            "source",
+            "serpapi_link",
+            "people_also_search_for",
         )
 
         answer_box = results.get("answer_box")
@@ -295,7 +300,8 @@ class RAGService:
         knowledge_graph = results.get("knowledge_graph")
         if isinstance(knowledge_graph, dict):
             text = cls._format_scalar_fields(
-                knowledge_graph, skip=_skip + ("kgmid", "knowledge_graph_search_link"),
+                knowledge_graph,
+                skip=_skip + ("kgmid", "knowledge_graph_search_link"),
             )
             if text:
                 sections.append("Knowledge graph:\n" + text)
@@ -304,8 +310,8 @@ class RAGService:
 
     @classmethod
     def web_search(
-        cls, query: str, max_results: Optional[int] = None
-    ) -> Tuple[str, List[dict]]:
+        cls, query: str, max_results: int | None = None
+    ) -> tuple[str, list[dict]]:
         """Run a web search and return ``(context_string, sources)``.
 
         Uses the configured engine (Google by default) and extracts, in priority
@@ -325,18 +331,20 @@ class RAGService:
             }
             results = serp_client.search(params)
         except Exception:
-            logger.exception("rag.web_search: search failed for query_len=%d", len(query))
+            logger.exception(
+                "rag.web_search: search failed for query_len=%d", len(query)
+            )
             return "", []
 
-        sections: List[str] = []
+        sections: list[str] = []
 
         direct = cls._extract_direct_answer(results)
         if direct:
             sections.append(direct)
 
         organic = (results.get("organic_results") or [])[:max_results]
-        lines: List[str] = []
-        sources: List[dict] = []
+        lines: list[str] = []
+        sources: list[dict] = []
         for index, result in enumerate(organic, start=1):
             title = (result.get("title") or "").strip()
             snippet = (result.get("snippet") or "").strip()

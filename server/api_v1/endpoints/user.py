@@ -12,6 +12,7 @@ from server.utils.auth import (
     create_refresh_token,
     get_current_user,
     get_password_hash,
+    verify_google_id_token,
     verify_password,
     verify_refresh_token,
 )
@@ -30,21 +31,14 @@ logger = logging.getLogger(__name__)
 user_router = APIRouter(prefix="/user", tags=["User"])
 
 
-@user_router.post("/login")
-async def login_for_access_token(
-    login_details: schemas.UserCreateInput, db: Session = Depends(get_db)
-):
-    logger.info("login attempt: email=%s", login_details.email)
-    user, error_msg = authenticate_user(db, login_details.email, login_details.password)
-    if not user:
-        logger.warning(
-            "login failed: email=%s - incorrect credentials", login_details.email
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=error_msg,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+def build_login_response(
+    user, *, message: str = "You have successfully logged in."
+) -> JSONResponse:
+    """Issue access + refresh JWTs for ``user`` and build the standard login body.
+
+    Shared by every endpoint that logs a user in (email/password and Google) so
+    token generation and the response shape stay identical.
+    """
     access_token_expires = timedelta(minutes=TOKEN_EXPIRE_DELTA)
     access_token = create_access_token(
         data={"sub": user.email, "id": user.id}, expires_delta=access_token_expires
@@ -60,6 +54,7 @@ async def login_for_access_token(
         id=user.id,
         email=user.email,
         avatar=user.avatar,
+        display_name=user.display_name,
         is_verified=user.is_verified,
         providers=user.providers,
         role=user.role,
@@ -69,15 +64,102 @@ async def login_for_access_token(
             access_token=access_token, refresh_token=refresh_token, token_type="bearer"
         ),
     )
-    logger.info("login success: user_id=%s email=%s", user.id, user.email)
     return JSONResponse(
         status_code=200,
         content={
             "success": True,
             "error": None,
             "data": response.model_dump(mode="json"),
-            "message": "You have successfully logged in.",
+            "message": message,
         },
+    )
+
+
+@user_router.post("/login")
+async def login_for_access_token(
+    login_details: schemas.UserCreateInput, db: Session = Depends(get_db)
+):
+    logger.info("login attempt: email=%s", login_details.email)
+    user, error_msg = authenticate_user(db, login_details.email, login_details.password)
+    if not user:
+        logger.warning(
+            "login failed: email=%s - incorrect credentials", login_details.email
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=error_msg,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    logger.info("login success: user_id=%s email=%s", user.id, user.email)
+    return build_login_response(user)
+
+
+@user_router.post("/google-login")
+async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(get_db)):
+    """Authenticate with a Google ID token (Google OAuth 2.0).
+
+    Verifies the token with Google, then logs the user in — creating the account
+    on first sign-in. Reuses the same JWT tokens and response shape as
+    email/password login.
+    """
+
+    idinfo = verify_google_id_token(data.id_token)
+
+    email = (idinfo.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account did not provide an email address.",
+        )
+    if not idinfo.get("email_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google email address is not verified.",
+        )
+
+    google_id = idinfo.get("sub")
+    display_name = idinfo.get("name")
+    picture = idinfo.get("picture")
+
+    # Match an existing account by email (unique) — this also links Google to a
+    # pre-existing email/password account. Fall back to the Google subject id.
+    user = crud.user.get_by_email(db, email=email)
+    if not user and google_id:
+        user = crud.user.get_by_google_id(db, google_id=google_id)
+
+    if user:
+        # Backfill any missing Google fields on the existing account, then log in.
+        updates = {}
+        if google_id and not user.google_id:
+            updates["google_id"] = google_id
+        if display_name and not user.display_name:
+            updates["display_name"] = display_name
+        if picture and not user.avatar:
+            updates["avatar"] = picture
+        if not user.is_verified:
+            updates["is_verified"] = True
+        if updates:
+            user = crud.user.update(
+                db, db_obj=user, obj_in=schemas.UserUpdate(**updates)
+            )
+        logger.info("google login: existing user_id=%s email=%s", user.id, email)
+    else:
+        user = crud.user.create(
+            db,
+            obj_in=schemas.UserBase(
+                email=email,
+                google_id=google_id,
+                display_name=display_name,
+                avatar=picture or "",
+                is_verified=True,
+                providers="google",
+                hashed_password=None,
+            ),
+        )
+        logger.info("google login: created user_id=%s email=%s", user.id, email)
+
+    return build_login_response(
+        user, message="You have successfully logged in with Google."
     )
 
 
@@ -177,7 +259,8 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
             # create refresh token with longer expiry
             refresh_expires = timedelta(minutes=TOKEN_EXPIRE_DELTA * 2)
             refresh_token = create_refresh_token(
-                data={"sub": user_obj.email, "id": user_obj.id}, expires_delta=refresh_expires
+                data={"sub": user_obj.email, "id": user_obj.id},
+                expires_delta=refresh_expires,
             )
             logger.info("verify_otp success: email=%s user_id=%s", email, user_obj.id)
             return JSONResponse(

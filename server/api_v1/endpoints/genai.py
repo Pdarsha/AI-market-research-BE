@@ -120,14 +120,19 @@ def list_chat_sessions(
                     "title": item.title,
                     "user_id": item.user_id,
                     "workspace_id": item.workspace_id,
-                    "created_at": item.created_at.isoformat() if item.created_at else None,
-                    "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+                    "created_at": (
+                        item.created_at.isoformat() if item.created_at else None
+                    ),
+                    "updated_at": (
+                        item.updated_at.isoformat() if item.updated_at else None
+                    ),
                 }
                 for item in sessions
             ],
             "message": "Chat sessions fetched successfully.",
         },
     )
+
 
 @ai_router.delete("/chats/{chat_id}")
 def delete_chat_session(
@@ -233,7 +238,11 @@ def get_chat_session(
                     db, chat_id=chat_id
                 ),
                 "source_documents": crud.chat_message.get_latest_source_documents(
-                    db, chat_id=chat_id, document_ids=crud.chat_message.get_latest_document_ids(db, chat_id=chat_id)
+                    db,
+                    chat_id=chat_id,
+                    document_ids=crud.chat_message.get_latest_document_ids(
+                        db, chat_id=chat_id
+                    ),
                 ),
                 "messages": messages,
             },
@@ -267,7 +276,9 @@ def update_chat_title(
                 "id": session.id,
                 "title": session.title,
                 "user_id": session.user_id,
-                "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+                "updated_at": (
+                    session.updated_at.isoformat() if session.updated_at else None
+                ),
             },
             "message": "Chat title updated successfully.",
         },

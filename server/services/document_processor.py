@@ -16,7 +16,6 @@ import re
 import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import List
 
 from fastapi import HTTPException, UploadFile
 
@@ -113,7 +112,7 @@ class DocumentProcessor:
             ),
         )
 
-        chunk_rows: List[DocumentChunk] = [
+        chunk_rows: list[DocumentChunk] = [
             DocumentChunk(
                 document_id=document.id,
                 user_id=str(user_id),

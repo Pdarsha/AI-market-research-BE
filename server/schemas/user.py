@@ -11,6 +11,8 @@ class UserBase(BaseModel):
     role: Optional[str] = "member"
     providers: Optional[str] = None
     hashed_password: Optional[str] = None
+    google_id: Optional[str] = None
+    display_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -34,6 +36,7 @@ class RespUser(BaseModel):
     id: Optional[str] = None
     email: Optional[EmailStr] = None
     avatar: Optional[str] = None
+    display_name: Optional[str] = None
     is_verified: Optional[bool] = None
     providers: Optional[str] = None
     role: Optional[str] = None

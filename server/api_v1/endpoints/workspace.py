@@ -57,9 +57,9 @@ def _serialize_document(doc) -> dict:
 
 @workspace_router.post("/create-workspace")
 def create_workspace(
-        request: schemas.WorkspaceCreate,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    request: schemas.WorkspaceCreate,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace.create(
         db=db,
@@ -82,10 +82,10 @@ def create_workspace(
 
 @workspace_router.get("/list-workspaces")
 def list_workspaces(
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
-        skip: int = 0,
-        limit: int = 100,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    skip: int = 0,
+    limit: int = 100,
 ):
     workspaces = crud.workspace.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
@@ -105,8 +105,8 @@ def list_workspaces(
 
 @workspace_router.get("/public/{workspace_id}")
 def public_workspace(
-        workspace_id: str,
-        db=Depends(get_db),
+    workspace_id: str,
+    db=Depends(get_db),
 ):
     """Public, unauthenticated view of a workspace."""
     workspace = crud.workspace.get(db, workspace_id)
@@ -162,9 +162,9 @@ def public_workspace(
 
 @workspace_router.get("/{workspace_id}")
 def get_workspace(
-        workspace_id: str,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -195,10 +195,10 @@ def get_workspace(
 
 @workspace_router.put("/{workspace_id}")
 def update_workspace(
-        workspace_id: str,
-        request: schemas.WorkspaceUpdate,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    request: schemas.WorkspaceUpdate,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -219,9 +219,9 @@ def update_workspace(
 
 @workspace_router.delete("/{workspace_id}")
 def delete_workspace(
-        workspace_id: str,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -244,10 +244,10 @@ def delete_workspace(
 
 @workspace_router.post("/upload-docs")
 async def upload_docs(
-        workspace_id: str,
-        doc: UploadFile = File(...),
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    doc: UploadFile = File(...),
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """Upload a document into a workspace.
 
@@ -285,9 +285,9 @@ async def upload_docs(
 
 @workspace_router.get("/{workspace_id}/docs")
 def list_workspace_docs(
-        workspace_id: str,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
@@ -309,10 +309,10 @@ def list_workspace_docs(
 
 @workspace_router.get("/{workspace_id}/docs/{doc_id}")
 async def get_workspace_document(
-        workspace_id: str,
-        doc_id: str,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    doc_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     document = crud.document.get_document(
         db, workspace_id, doc_id, str(current_user.id)
@@ -333,10 +333,10 @@ async def get_workspace_document(
 
 @workspace_router.delete("/{workspace_id}/docs/{doc_id}")
 def delete_workspace_doc(
-        workspace_id: str,
-        doc_id: str,
-        db=Depends(get_db),
-        current_user=Depends(get_current_user),
+    workspace_id: str,
+    doc_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)

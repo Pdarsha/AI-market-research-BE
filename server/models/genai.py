@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import relationship
 
 from server.db.base_class import Base
@@ -47,7 +47,9 @@ class ChatSession(Base):
 
 class ChatMessage(Base):
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
-    chat_id = Column(String, ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True)
+    chat_id = Column(
+        String, ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True
+    )
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role = Column(String, nullable=False)
     content = Column(Text, nullable=False)
@@ -60,13 +62,15 @@ class ChatMessage(Base):
         index=True,
         nullable=True,
     )
-    document_ids = Column(JSON, nullable=True)  # document ids referenced by this message
-    source_documents = Column(JSON, nullable=True)  # e.g. file names used to ground the answer
+    document_ids = Column(
+        JSON, nullable=True
+    )  # document ids referenced by this message
+    source_documents = Column(
+        JSON, nullable=True
+    )  # e.g. file names used to ground the answer
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     chat = relationship("ChatSession", back_populates="messages")
     user = relationship("User")
-
-

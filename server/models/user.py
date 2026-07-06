@@ -17,6 +17,9 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default=0)
 
+    google_id = Column(String, unique=True, nullable=True, index=True)
+    display_name = Column(String, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

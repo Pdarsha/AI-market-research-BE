@@ -23,7 +23,9 @@ class CRUDChatHistory(CRUDBase[ChatHistory, ChatHistoryCreate, ChatHistoryUpdate
         query = db.query(self.model)
         if user_id:
             query = query.filter(self.model.user_id == user_id)
-        return query.order_by(desc(self.model.created_at)).offset(skip).limit(limit).all()
+        return (
+            query.order_by(desc(self.model.created_at)).offset(skip).limit(limit).all()
+        )
 
 
 chat_history = CRUDChatHistory(ChatHistory)
