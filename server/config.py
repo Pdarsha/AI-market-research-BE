@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "5"))
+
+    # -- Re-ranking (two-stage retrieval) --------------------------------
+    RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "true").lower() == "true"
+    RAG_RERANK_CANDIDATES: int = int(os.getenv("RAG_RERANK_CANDIDATES", "20"))
+    RERANK_MODEL: str = os.getenv(
+        "RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    )
+
+    # -- Web search --------------------------------------------------------
+    WEB_SEARCH_ENGINE: str = os.getenv("WEB_SEARCH_ENGINE", "google")
+    WEB_SEARCH_RESULTS: int = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
+    WEB_SEARCH_COUNTRY: str = os.getenv("WEB_SEARCH_COUNTRY", "in")
+    WEB_SEARCH_LANGUAGE: str = os.getenv("WEB_SEARCH_LANGUAGE", "en")
     
     BACKEND_CORS_ORIGINS: List = []
 

@@ -307,47 +307,72 @@ def add_chat_message(
         ),
     )
 
-    used_rag = False
-    source_documents = None
-    retrieved_context = None
+    rag = get_rag_service()
 
+    used_rag = False
+    used_web = False
+    source_documents = None
+    web_sources = None
+    document_context = None
+    web_context = None
+
+    # Step 1 & 2: classify the question. The document classifier runs only when
+    # documents are attached; the web-search classifier always runs, since both
+    # document-related and general questions may need up-to-date external info.
+    is_document_question = False
     if document_ids:
-        requires_doc = get_rag_service().classify_requires_document(
+        is_document_question = rag.classify_requires_document(
             client, question=request.content, model=settings.LLM_MODEL
         )
-        if requires_doc:
-            try:
-                retrieved_context, source_documents = get_rag_service().retrieve_context(
-                    db,
-                    query=request.content,
-                    user_id=str(current_user.id),
-                    document_ids=document_ids,
-                    top_k=3,
-                )
-                used_rag = True
-            except Exception:
-                logger.exception(
-                    "chat.message: document retrieval failed; falling back to "
-                    "plain chat (chat=%s)",
-                    chat_id,
-                )
-                retrieved_context = None
-                source_documents = None
+    requires_web = rag.classify_requires_web_search(
+        client, question=request.content, model=settings.LLM_MODEL
+    )
+
+    # Step 3a: document RAG retrieval (document-related questions only).
+    if is_document_question:
+        try:
+            document_context, source_documents = rag.retrieve_context(
+                db,
+                query=request.content,
+                user_id=str(current_user.id),
+                document_ids=document_ids,
+                top_k=3,
+            )
+        except Exception:
+            logger.exception(
+                "chat.message: document retrieval failed; skipping RAG (chat=%s)",
+                chat_id,
+            )
+            document_context, source_documents = None, None
+        document_context = document_context or None
+        used_rag = document_context is not None
+
+    # Step 3b: web search (applies to both document-related and general questions).
+    if requires_web:
+        web_context, web_sources = rag.web_search(request.content)
+        web_context = web_context or None
+        used_web = web_context is not None
 
     logger.info(
-        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s",
+        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s",
         chat_id,
         getattr(current_user, "id", None),
         len(document_ids),
         used_rag,
+        used_web,
     )
 
-    messages = get_rag_service().build_messages(
+    # Step 4: build the augmented prompt (document context and/or web results as
+    # available — or a plain prompt when neither) and generate the final answer.
+    messages = rag.build_messages(
         history=history,
         question=request.content,
-        retrieved_context=retrieved_context,
+        retrieved_context=document_context,
+        web_context=web_context,
     )
-    ai_response = get_rag_service().generate_response(client, messages=messages, model=settings.LLM_MODEL)
+    ai_response = rag.generate_response(
+        client, messages=messages, model=settings.LLM_MODEL
+    )
 
     assistant_message = crud.chat_message.create(
         db=db,
@@ -374,7 +399,9 @@ def add_chat_message(
                 "response": ai_response,
                 "document_ids": request.document_ids,
                 "used_documents": used_rag,
+                "used_web_search": used_web,
                 "source_documents": source_documents,
+                "web_sources": web_sources,
             },
             "message": "Message added and AI response created successfully.",
         },

@@ -5,8 +5,9 @@ Each service has a single responsibility and is loosely coupled to the others:
 * :mod:`server.services.ocr_service` — text extraction only.
 * :mod:`server.services.chunking_service` — chunk creation only.
 * :mod:`server.services.embedding_service` — OpenAI embedding generation only.
+* :mod:`server.services.rerank_service` — cross-encoder re-ranking only.
 * :mod:`server.services.document_processor` — orchestrates ingestion.
-* :mod:`server.services.rag_service` — orchestrates retrieval.
+* :mod:`server.services.rag_service` — orchestrates retrieval (search + re-rank).
 
 Module-level singleton accessors (``get_*_service``) are provided so request
 handlers can share one instance without wiring dependencies manually.
@@ -20,6 +21,7 @@ from server.services.document_processor import (
 from server.services.embedding_service import EmbeddingService, get_embedding_service
 from server.services.ocr_service import OCRService, get_ocr_service
 from server.services.rag_service import RAGService, get_rag_service
+from server.services.rerank_service import RerankService, get_rerank_service
 
 __all__ = [
     "Chunk",
@@ -33,4 +35,6 @@ __all__ = [
     "get_ocr_service",
     "RAGService",
     "get_rag_service",
+    "RerankService",
+    "get_rerank_service",
 ]
