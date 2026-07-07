@@ -14,7 +14,9 @@ top-k are passed to the LLM.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from functools import lru_cache
 
 import serpapi
@@ -25,9 +27,11 @@ from server.models.workspace import DocumentChunk
 from server.services.embedding_service import EmbeddingService, get_embedding_service
 from server.services.rerank_service import get_rerank_service
 from server.utils.prompt import (
+    FOLLOWUP_MARKER,
     ai_assistent,
     augmented_system_prompt,
     classification_prompt,
+    followup_instruction_block,
     web_search_classification_prompt,
 )
 
@@ -131,6 +135,10 @@ class RAGService:
         When either (or both) is present the augmented system prompt is used;
         with neither, the plain-assistant prompt is used. Previous chat history is
         always included for continuity, and the current question is appended last.
+
+        The follow-up-questions instruction is appended to the system prompt so
+        every answer is followed by a parseable list of suggested follow-ups
+        (see :meth:`split_answer_and_followups`).
         """
         if retrieved_context is not None or web_context is not None:
             system_prompt = augmented_system_prompt(
@@ -139,10 +147,41 @@ class RAGService:
         else:
             system_prompt = ai_assistent()
 
+        system_prompt += followup_instruction_block()
+
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": question})
         return messages
+
+    @staticmethod
+    def split_answer_and_followups(text: str) -> tuple[str, list[str]]:
+        """Split a raw generation into ``(answer, follow_up_questions)``.
+
+        The model is instructed to append ``FOLLOWUP_MARKER`` followed by a JSON
+        array of questions. This strips that block from the answer and parses the
+        questions. If the marker is missing or the block is unparseable, the full
+        text is returned as the answer with an empty follow-up list — never
+        placeholder text.
+        """
+        if not text or FOLLOWUP_MARKER not in text:
+            return (text or "").strip(), []
+
+        answer, _, tail = text.partition(FOLLOWUP_MARKER)
+
+        questions: list[str] = []
+        match = re.search(r"\[.*\]", tail, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, list):
+                    questions = [
+                        str(q).strip() for q in parsed if str(q).strip()
+                    ]
+            except (ValueError, TypeError):
+                questions = []
+
+        return answer.strip(), questions[:4]
 
     @staticmethod
     def source_file_names(chunks: list[DocumentChunk]) -> list[str]:

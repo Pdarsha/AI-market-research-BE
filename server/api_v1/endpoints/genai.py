@@ -381,9 +381,10 @@ def add_chat_message(
         retrieved_context=document_context,
         web_context=web_context,
     )
-    ai_response = rag.generate_response(
+    raw_response = rag.generate_response(
         client, messages=messages, model=settings.LLM_MODEL
     )
+    ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
     assistant_message = crud.chat_message.create(
         db=db,
@@ -413,6 +414,7 @@ def add_chat_message(
                 "used_web_search": used_web,
                 "source_documents": source_documents,
                 "web_sources": web_sources,
+                "follow_up_questions": follow_up_questions,
             },
             "message": "Message added and AI response created successfully.",
         },

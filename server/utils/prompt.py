@@ -1,3 +1,39 @@
+FOLLOWUP_MARKER = "<<<FOLLOW_UP_QUESTIONS>>>"
+
+
+def followup_instruction_block():
+    """Instruction appended to the chat system prompt so every answer is followed
+    by up to 3 AI-generated follow-up questions in a parseable JSON block.
+
+    The questions are derived from the answer the model just wrote (and any
+    document/web context used), not the earlier conversation.
+    """
+    return f"""
+
+========================================
+FOLLOW-UP QUESTIONS (REQUIRED)
+========================================
+
+After you finish the answer above, append 3 to 4 suggested follow-up questions
+that naturally extend the discussion.
+
+Rules for the follow-up questions:
+- Derive them ONLY from the answer you just wrote and the context used to produce
+  it — not from earlier turns in the conversation.
+- They must help the user explore the topic more deeply: e.g. explain a specific
+  finding, compare sections, analyze a trend, clarify a conclusion, explore a
+  recommendation, or investigate a risk or opportunity.
+- Keep each one concise, specific, actionable and conversational.
+- Do NOT repeat the user's original question, and avoid generic or unrelated ones.
+- If you cannot produce meaningful follow-ups, output an empty array [].
+
+Output them on a new line after the marker below — the marker, then a JSON array
+of strings, and nothing after it:
+{FOLLOWUP_MARKER}
+["First follow-up question?", "Second follow-up question?", "Third follow-up question?"]
+"""
+
+
 def web_search_classification_prompt():
     """Lightweight routing prompt: does the question need a live web search?
 
