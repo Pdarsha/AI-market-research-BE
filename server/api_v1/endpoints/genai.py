@@ -63,6 +63,49 @@ def _resolve_or_create_session(
     )
 
 
+_IMAGE_SOURCE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
+
+
+def _document_sources_only(names):
+    """Drop image files from a list of source file names (keep only documents)."""
+    if not names:
+        return names
+    return [n for n in names if not str(n).lower().endswith(_IMAGE_SOURCE_EXTS)]
+
+
+def _resolve_active_document_ids(prior_messages, requested):
+    """Resolve the active document context for the current message.
+
+    File-context rules (backend-managed, independent of what the frontend sends):
+      * Any document in ``requested`` that has NOT appeared earlier in this chat is
+        treated as a NEW upload — the new document(s) become the ONLY active
+        context, replacing whatever was active before (Scenario 1).
+      * If the request introduces no new documents, the most recent active set is
+        reused so follow-up questions keep working on the same file(s) (Scenario 2).
+      * With no prior context, the requested ids are used as-is.
+
+    Returns ``(active_ids, reason)`` where ``reason`` is one of
+    ``"new_upload" | "reuse_active" | "follow_up" | "none"`` (for logging).
+    """
+    requested = list(dict.fromkeys(requested or []))
+
+    seen: set[str] = set()
+    last_active: list[str] = []
+    for msg in prior_messages:
+        if msg.document_ids:
+            seen.update(msg.document_ids)
+            last_active = list(msg.document_ids)
+
+    new_docs = [doc_id for doc_id in requested if doc_id not in seen]
+    if new_docs:
+        return new_docs, "new_upload"
+    if requested:
+        return (last_active or requested), "reuse_active"
+    if last_active:
+        return last_active, "follow_up"
+    return [], "none"
+
+
 @ai_router.post("/chats")
 def create_chat_session(
     title: Optional[str] = None,
@@ -180,7 +223,7 @@ def public_chat_session(
             "id": msg.id,
             "role": msg.role,
             "content": msg.content,
-            "source_documents": msg.source_documents,
+            "source_documents": _document_sources_only(msg.source_documents),
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
         for msg in conversation
@@ -211,20 +254,45 @@ def get_chat_session(
         raise HTTPException(status_code=404, detail="Chat session not found")
 
     conversation = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
-    messages = [
-        {
-            "id": msg.id,
-            "chat_id": msg.chat_id,
-            "role": msg.role,
-            "content": msg.content,
-            "workspace_id": msg.workspace_id,
-            "document_ids": msg.document_ids,
-            "source_documents": msg.source_documents,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
-            "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
-        }
-        for msg in conversation
-    ]
+
+    seen_document_ids: set = set()
+    uploaded_by_message: dict = {}
+    for msg in conversation:
+        ids = msg.document_ids or []
+        uploaded_by_message[msg.id] = [d for d in ids if d not in seen_document_ids]
+        seen_document_ids.update(ids)
+
+    doc_info_cache: dict = {}
+
+    def _doc_info(doc_id):
+        if doc_id not in doc_info_cache:
+            doc = crud.document.get(db, doc_id)
+            doc_info_cache[doc_id] = (
+                {"id": doc.id, "file_name": doc.file_name, "file_format": doc.file_format}
+                if doc
+                else None
+            )
+        return doc_info_cache[doc_id]
+
+    messages = []
+    for msg in conversation:
+        uploaded = uploaded_by_message.get(msg.id, [])
+        attachments = [info for info in (_doc_info(d) for d in uploaded) if info]
+        messages.append(
+            {
+                "id": msg.id,
+                "chat_id": msg.chat_id,
+                "role": msg.role,
+                "content": msg.content,
+                "workspace_id": msg.workspace_id,
+                "document_ids": msg.document_ids,
+                "uploaded_document_ids": uploaded,
+                "attachments": attachments,
+                "source_documents": _document_sources_only(msg.source_documents),
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
+            }
+        )
     return JSONResponse(
         status_code=200,
         content={
@@ -301,10 +369,19 @@ def add_chat_message(
     )
     chat_id = session.id
 
-    document_ids = request.document_ids or []
-
     prior_messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
     history = [{"role": msg.role, "content": msg.content} for msg in prior_messages]
+
+    document_ids, context_reason = _resolve_active_document_ids(
+        prior_messages, request.document_ids
+    )
+    logger.info(
+        "chat.message: chat=%s context=%s active_docs=%s requested=%s",
+        chat_id,
+        context_reason,
+        document_ids,
+        request.document_ids,
+    )
 
     user_message = crud.chat_message.create(
         db=db,
@@ -314,7 +391,7 @@ def add_chat_message(
             role="user",
             user_id=str(current_user.id),
             workspace_id=session.workspace_id,
-            document_ids=request.document_ids,
+            document_ids=document_ids or None,
         ),
     )
 
@@ -327,9 +404,6 @@ def add_chat_message(
     document_context = None
     web_context = None
 
-    # Step 1 & 2: classify the question. The document classifier runs only when
-    # documents are attached; the web-search classifier always runs, since both
-    # document-related and general questions may need up-to-date external info.
     is_document_question = False
     if document_ids:
         is_document_question = rag.classify_requires_document(
@@ -339,7 +413,6 @@ def add_chat_message(
         client, question=request.content, model=settings.LLM_MODEL
     )
 
-    # Step 3a: document RAG retrieval (document-related questions only).
     if is_document_question:
         try:
             document_context, source_documents = rag.retrieve_context(
@@ -356,9 +429,9 @@ def add_chat_message(
             )
             document_context, source_documents = None, None
         document_context = document_context or None
+        source_documents = _document_sources_only(source_documents)
         used_rag = document_context is not None
 
-    # Step 3b: web search (applies to both document-related and general questions).
     if requires_web:
         web_context, web_sources = rag.web_search(request.content)
         web_context = web_context or None
@@ -373,10 +446,9 @@ def add_chat_message(
         used_web,
     )
 
-    # Step 4: build the augmented prompt (document context and/or web results as
-    # available — or a plain prompt when neither) and generate the final answer.
+    llm_history = [] if context_reason == "new_upload" else history
     messages = rag.build_messages(
-        history=history,
+        history=llm_history,
         question=request.content,
         retrieved_context=document_context,
         web_context=web_context,
@@ -394,7 +466,7 @@ def add_chat_message(
             role="assistant",
             user_id=str(current_user.id),
             workspace_id=session.workspace_id,
-            document_ids=request.document_ids,
+            document_ids=document_ids or None,
             source_documents=source_documents,
         ),
     )
@@ -409,7 +481,11 @@ def add_chat_message(
                 "user_message_id": user_message.id,
                 "assistant_message_id": assistant_message.id,
                 "response": ai_response,
-                "document_ids": request.document_ids,
+                "document_ids": document_ids,
+                "active_document_ids": document_ids,
+                "uploaded_document_ids": (
+                    document_ids if context_reason == "new_upload" else []
+                ),
                 "used_documents": used_rag,
                 "used_web_search": used_web,
                 "source_documents": source_documents,

@@ -20,16 +20,6 @@ class WorkspaceUpdate(BaseModel):
     description: Optional[str] = None
 
 
-class WorkspaceResponse(WorkspaceBase):
-    id: str
-    user_id: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
 class DocumentBase(BaseModel):
     text: str
 

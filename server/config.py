@@ -42,10 +42,18 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "5"))
 
+    # -- OCR ---------------------------------------------------------------
+    OCR_ENABLED: bool = os.getenv("OCR_ENABLED", "true").lower() == "true"
+    OCR_ENGINE: str = os.getenv("OCR_ENGINE", "tesseract").strip().lower()
+    OCR_PREPROCESS: bool = os.getenv("OCR_PREPROCESS", "true").lower() == "true"
+    OCR_PDF_RENDER_DPI: int = int(os.getenv("OCR_PDF_RENDER_DPI", "200"))
+
     # -- Re-ranking (two-stage retrieval) --------------------------------
     RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "true").lower() == "true"
     RAG_RERANK_CANDIDATES: int = int(os.getenv("RAG_RERANK_CANDIDATES", "20"))
     RERANK_MODEL: str = os.getenv("RERANK_MODEL", "openai/gpt-4.1-mini")
+    RAG_MAX_CONTEXT_CHUNKS: int = int(os.getenv("RAG_MAX_CONTEXT_CHUNKS", "12"))
+    RAG_HNSW_EF_SEARCH: int = int(os.getenv("RAG_HNSW_EF_SEARCH", "200"))
 
     # -- Web search --------------------------------------------------------
     WEB_SEARCH_ENGINE: str = os.getenv("WEB_SEARCH_ENGINE", "google")

@@ -30,3 +30,8 @@ openai
 xlrd
 tenacity
 google-auth
+PyMuPDF
+opencv-python-headless
+olefile
+rapidocr-onnxruntime
+easyocr

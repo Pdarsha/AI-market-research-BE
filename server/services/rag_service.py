@@ -20,6 +20,7 @@ import re
 from functools import lru_cache
 
 import serpapi
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from server.config import settings
@@ -68,51 +69,150 @@ class RAGService:
         top-k is returned directly.
         """
         top_k = top_k or settings.RAG_TOP_K
+
+        if document_ids and len(document_ids) > top_k:
+            top_k = min(len(document_ids), settings.RAG_MAX_CONTEXT_CHUNKS)
+
         query_embedding = self._embedder.embed_text(query)
 
-        stmt = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
-        if workspace_id:
-            stmt = stmt.filter(DocumentChunk.workspace_id == str(workspace_id))
-        if document_ids:
-            stmt = stmt.filter(DocumentChunk.document_id.in_(document_ids))
+        self._widen_hnsw_search(db)
+        distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+
+        def _scoped():
+            q = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
+            if workspace_id:
+                q = q.filter(DocumentChunk.workspace_id == str(workspace_id))
+            return q
 
         candidate_k = (
             max(top_k, settings.RAG_RERANK_CANDIDATES)
             if settings.RAG_RERANK_ENABLED
             else top_k
         )
-        rows = (
-            stmt.order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
-            .limit(candidate_k)
-            .all()
-        )
 
-        if settings.RAG_RERANK_ENABLED and rows:
-            reranked = get_rerank_service().rerank(
+        if document_ids and len(document_ids) > 1:
+            import math
+
+            per_doc = max(1, math.ceil(candidate_k / len(document_ids)))
+            rows: list[DocumentChunk] = []
+            for doc_id in document_ids:
+                rows.extend(
+                    _scoped()
+                    .filter(DocumentChunk.document_id == doc_id)
+                    .order_by(distance)
+                    .limit(per_doc)
+                    .all()
+                )
+        else:
+            stmt = _scoped()
+            if document_ids:
+                stmt = stmt.filter(DocumentChunk.document_id.in_(document_ids))
+            rows = stmt.order_by(distance).limit(candidate_k).all()
+
+        if not rows:
+            return []
+
+        if settings.RAG_RERANK_ENABLED:
+            ordered = get_rerank_service().rerank(
                 query,
                 rows,
-                top_k=top_k,
+                top_k=len(rows),
                 text_getter=lambda chunk: chunk.content or "",
             )
-            logger.debug(
-                "RAG retrieve: user=%s workspace=%s query_len=%d candidates=%d reranked=%d",
-                user_id,
-                workspace_id,
-                len(query),
-                len(rows),
-                len(reranked),
-            )
-            return reranked
+        else:
+            ordered = rows
 
-        rows = rows[:top_k]
+        final = self._ensure_document_representation(
+            ordered, document_ids=document_ids, top_k=top_k
+        )
         logger.debug(
-            "RAG retrieve: user=%s workspace=%s query_len=%d hits=%d (no rerank)",
+            "RAG retrieve: user=%s workspace=%s attached_docs=%d candidates=%d final=%d",
             user_id,
             workspace_id,
-            len(query),
+            len(document_ids or []),
             len(rows),
+            len(final),
         )
-        return rows
+        return final
+
+    @staticmethod
+    def _ensure_document_representation(
+        ordered_rows: list[DocumentChunk],
+        *,
+        document_ids: list[str],
+        top_k: int,
+    ) -> list[DocumentChunk]:
+        """Pick the final ``top_k`` chunks, guaranteeing that every attached
+        document contributes at least its best chunk (when several are attached).
+
+        Without this, a global top-k lets a many-chunk document fill every slot and
+        silently drop a few-chunk document (e.g. an uploaded image) from the answer
+        context. Slots left after the per-document floor are filled by global rank.
+        """
+        if not ordered_rows:
+            return []
+        if not document_ids or len(document_ids) <= 1:
+            return ordered_rows[:top_k]
+
+        rank = {id(row): index for index, row in enumerate(ordered_rows)}
+        best_by_doc: dict[str, DocumentChunk] = {}
+        for row in ordered_rows:
+            best_by_doc.setdefault(row.document_id, row)
+
+        selected: list[DocumentChunk] = []
+        selected_ids: set[int] = set()
+
+        for doc_id in document_ids:
+            row = best_by_doc.get(doc_id)
+            if row is not None and id(row) not in selected_ids:
+                selected.append(row)
+                selected_ids.add(id(row))
+
+        for row in ordered_rows:
+            if len(selected) >= top_k:
+                break
+            if id(row) not in selected_ids:
+                selected.append(row)
+                selected_ids.add(id(row))
+
+        selected.sort(key=lambda row: rank[id(row)])
+        return selected[:top_k]
+
+    @staticmethod
+    def _widen_hnsw_search(db: Session) -> None:
+        """Raise ``hnsw.ef_search`` for the current transaction (PostgreSQL only).
+
+        HNSW applies the ``WHERE`` filter (user/workspace/document scope) only
+        *after* pulling its ``ef_search`` nearest neighbours from the whole table,
+        so a small default window (40) can miss a specific document's chunks when
+        other documents sit nearer in vector space — the cause of "first upload
+        returns nothing, re-upload works". A wider window restores recall for
+        filtered searches. ``iterative_scan`` (pgvector >= 0.8) makes it exact;
+        it's attempted in a savepoint so older versions degrade gracefully.
+        """
+        try:
+            if db.bind is None or db.bind.dialect.name != "postgresql":
+                return
+        except Exception:
+            return
+
+        try:
+            db.execute(
+                text("SET LOCAL hnsw.ef_search = :ef").bindparams(
+                    ef=int(settings.RAG_HNSW_EF_SEARCH)
+                )
+            )
+        except Exception:
+            logger.debug("rag: could not set hnsw.ef_search", exc_info=True)
+            return
+
+        try:
+            with db.begin_nested():
+                db.execute(
+                    text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
+                )
+        except Exception:
+            logger.debug("rag: hnsw.iterative_scan unavailable", exc_info=True)
 
     @staticmethod
     def build_context(chunks: list[DocumentChunk]) -> str:
