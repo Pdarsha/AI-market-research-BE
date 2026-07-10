@@ -515,9 +515,13 @@ class RAGService:
 
     @classmethod
     def web_search(
-        cls, query: str, max_results: int | None = None
+        cls, query: str, max_results: int | None = None, start_number: int = 1
     ) -> tuple[str, list[dict]]:
         """Run a web search and return ``(context_string, sources)``.
+
+        ``start_number`` is the first citation marker to assign. Document chunks
+        are numbered first ([1]..[n]), so web results continue from ``n + 1`` and
+        the LLM sees ONE unbroken [n] sequence across the whole CONTEXT.
 
         Uses the configured engine (Google by default) and extracts, in priority
         order: the direct-answer widgets (answer box / knowledge graph — where
@@ -550,16 +554,17 @@ class RAGService:
         organic = (results.get("organic_results") or [])[:max_results]
         lines: list[str] = []
         sources: list[dict] = []
-        # Label link-bearing results without [n] markers; those are reserved for
-        # uploaded-document citations in chat responses.
+        # Number link-bearing results with [n] markers, continuing the document
+        # chunk sequence, so the LLM can cite web sources the same way it cites
+        # uploaded documents. CitationService maps the markers back to `sources`.
         for result in organic:
             link = (result.get("link") or "").strip()
             if not link:
                 continue
             title = (result.get("title") or "").strip()
             snippet = (result.get("snippet") or "").strip()
-            number = len(sources) + 1
-            lines.append(f"Web result {number}: {title}\n{snippet}\nURL: {link}")
+            number = start_number + len(sources)
+            lines.append(f"[{number}] {title}\n{snippet}\nURL: {link}")
             sources.append(
                 {
                     "title": title,

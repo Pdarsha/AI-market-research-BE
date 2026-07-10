@@ -338,7 +338,6 @@ def add_chat_message(
     document_context = None
     web_context = None
     retrieved_chunks = None
-    document_citations = []
 
     is_document_question = False
     if document_ids:
@@ -375,7 +374,11 @@ def add_chat_message(
         used_rag = document_context is not None
 
     if requires_web:
-        web_context, web_sources = rag.web_search(request.content)
+        # Web results continue the document chunks' [n] numbering so the LLM sees
+        # one unbroken citation sequence across the whole CONTEXT.
+        web_context, web_sources = rag.web_search(
+            request.content, start_number=len(retrieved_chunks or []) + 1
+        )
         web_context = web_context or None
         used_web = web_context is not None
 
@@ -400,12 +403,20 @@ def add_chat_message(
     )
     ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
-    if retrieved_chunks:
-        ai_response, document_citations = citation_svc.generate_citations(
-            ai_response, retrieved_chunks
+    # The ordered source list must mirror the numbering the LLM saw in the CONTEXT:
+    # document chunks first ([1]..[n]), then web results ([n+1]...). Index i here is
+    # the source the model referenced as [i + 1].
+    cited_sources: list = list(retrieved_chunks or [])
+    if used_web:
+        cited_sources.extend(web_sources or [])
+
+    if cited_sources:
+        ai_response, citations = citation_svc.generate_citations(
+            ai_response, cited_sources
         )
-        citations = document_citations
     else:
+        # Nothing grounded the answer, so any marker the model emitted is a
+        # hallucination — remove it rather than link it to a source that doesn't exist.
         ai_response = strip_citation_markers(ai_response)
 
     assistant_message = crud.chat_message.create(

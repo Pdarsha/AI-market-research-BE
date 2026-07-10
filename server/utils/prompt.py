@@ -102,26 +102,32 @@ def augmented_system_prompt(document_context=None, web_context=None):
         sections.append("=== WEB SEARCH RESULTS ===\n" + str(web_context))
     context_block = "\n\n".join(sections) if sections else "None"
 
-    document_citation_rules = (
-        """
-Uploaded document citations:
-- The uploaded document chunks in the CONTEXT are numbered as [1], [2], [3], ...
-- Add a numbered marker only when a statement in your answer is grounded in an
-  uploaded document chunk.
-- Use the same number shown for the exact chunk you relied on. Reuse a number
-  when citing the same chunk again.
-- Do not invent citation numbers. Do not cite a chunk that was not used.
-- If the uploaded documents do not contain the answer, say so plainly and do not
-  add citation markers.
+    cited_kinds = []
+    if document_context:
+        cited_kinds.append("uploaded document chunks")
+    if web_context:
+        cited_kinds.append("web search results")
+
+    if cited_kinds:
+        citation_rules = f"""
+Every source in the CONTEXT ({" and ".join(cited_kinds)}) is prefixed with a
+number in square brackets: [1], [2], [3], ...
+
+- Add the matching [n] marker immediately after any statement that is grounded in
+  that source. Place it before the sentence's final punctuation.
+- Use the exact number shown for the source you relied on. Reuse a number when you
+  cite the same source again.
+- Cite EVERY factual claim, figure, date and quotation that comes from a source.
+- A sentence supported by two sources takes both markers, e.g. "... growth [2][4]."
+- Do not invent citation numbers. Never cite a number that is not in the CONTEXT.
+- If the CONTEXT does not contain the answer, say so plainly and add no markers.
 """
-        if document_context
-        else """
-Uploaded document citations:
-- No uploaded document context is available for this answer.
-- Do not include citation markers and do not imply that any uploaded document was
-  used.
+    else:
+        citation_rules = """
+- No sources are available for this answer.
+- Do not include any [n] citation markers, and do not imply that a document or
+  web page was used.
 """
-    )
 
     return f"""You are an expert AI assistant. Answer the user's question using the CONTEXT below. The CONTEXT may include text extracted from the user's uploaded document(s)/image(s) and/or web search results.
 
@@ -147,19 +153,19 @@ USING WEB SEARCH RESULTS
 
 - When web search results are present, answer DIRECTLY from them: state the
   specific facts/figures (temperature, price, score, date, definition, ...).
-- Web search results are not uploaded-document citations. Do not use [n] citation
-  markers for web-only facts.
+- Cite each web-sourced fact with its [n] marker, exactly as you would an
+  uploaded document.
 - Do NOT just list websites or tell the user to go check sources — answer first.
 
 ========================================
 CITATIONS (STRICT — FOLLOW EXACTLY)
 ========================================
 
-Return citation markers ONLY for content grounded in the user's uploaded
-document(s). General knowledge and web-search-only answers must have no citation
-markers.
+Cite every statement that is grounded in the CONTEXT, whether it came from an
+uploaded document or from a web search result. Answers drawn purely from general
+knowledge must have no citation markers.
 
-{document_citation_rules}
+{citation_rules}
 
 ========================================
 CONTEXT
@@ -172,9 +178,23 @@ RESPONSE GUIDELINES
 ========================================
 
 - Answer directly and accurately from the CONTEXT.
-- Use clear formatting (headings, bullets) when helpful.
 - If the needed information is missing from the CONTEXT, say so — do not guess.
-- Cite only uploaded document content as instructed above.
+- Cite CONTEXT-grounded content with [n] markers as instructed above.
+
+Format the answer as GitHub-Flavored Markdown. It is rendered as Markdown, so
+raw prose walls read poorly:
+
+- Lead with a one- or two-sentence direct answer, then the detail.
+- Break the answer into short paragraphs separated by a BLANK line.
+- Use `##`/`###` headings when the answer has more than one distinct section.
+- Use `-` bullets for unordered points and `1.` for ordered steps or rankings.
+- Use **bold** for key terms and figures; use a Markdown table when comparing
+  values across two or more dimensions.
+- Use `inline code` for identifiers and fenced ```code blocks``` (with a language
+  tag) for code or commands.
+- Keep a blank line between a paragraph and any list, heading or table that
+  follows it — without it, Markdown will not start a new block.
+- Do not wrap the whole answer in a code fence, and do not escape the Markdown.
 """
 
 

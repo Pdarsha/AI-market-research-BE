@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 
 from server import crud
+from server.utils.markdown import tidy_markdown_spacing
 from server.config import PROJECT_ROOT, settings
 from server.utils.signed_url import create_document_token
 
@@ -242,12 +244,8 @@ def document_sources_only(names):
 
 def strip_citation_markers(answer):
     """Remove stray citation markers from non-document-grounded answers."""
-    import re
-
     rewritten = re.sub(r"\[(\d+)\]", "", answer or "")
-    rewritten = re.sub(r"[ \t]+([.,;:!?])", r"\1", rewritten)
-    rewritten = re.sub(r"[ \t]{2,}", " ", rewritten).strip()
-    return rewritten
+    return tidy_markdown_spacing(rewritten)
 
 
 def resolve_active_document_ids(prior_messages, requested):
