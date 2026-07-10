@@ -1,5 +1,6 @@
 import random
 from datetime import datetime
+import re
 
 from fastapi import HTTPException
 
@@ -46,3 +47,8 @@ async def validate_email_send_otp(db, email, user_id):
         )
     await send_email(email, key)
     return True
+
+def slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:60]
+    return slug or "conversation"
+

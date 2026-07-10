@@ -220,6 +220,43 @@ class RAGService:
         return "\n\n---\n\n".join(chunk.content for chunk in chunks if chunk.content)
 
     @staticmethod
+    def build_context_with_citations(chunks: list[DocumentChunk]) -> str:
+        """Build context string with numbered markers for chunks.
+
+        The chunks are numbered [1], [2], etc., so the LLM can cite them
+        explicitly in its response using these markers. This enables automatic
+        citation mapping through the CitationService.
+
+        Returns:
+            A context string with chunks numbered [1], [2], etc.
+        """
+        if not chunks:
+            return ""
+
+        numbered_chunks = []
+        for i, chunk in enumerate(chunks, start=1):
+            if chunk.content:
+                # Include a numbered marker so the LLM knows which chunk is which
+                numbered_chunks.append(f"[{i}] {chunk.content}")
+
+        return "\n\n---\n\n".join(numbered_chunks)
+
+    @staticmethod
+    def build_context_with_chunks(
+        chunks: list[DocumentChunk],
+    ) -> tuple[str, list[DocumentChunk]]:
+        """Return both context string and the original chunks for citation mapping.
+
+        The chunks are returned separately so the citation service can map LLM-
+        generated citations back to the original retrieved chunks with full metadata.
+
+        Returns:
+            (context_string, chunks_list)
+        """
+        context = "\n\n---\n\n".join(chunk.content for chunk in chunks if chunk.content)
+        return context, chunks
+
+    @staticmethod
     def build_messages(
         *,
         history: list[dict],
@@ -308,6 +345,35 @@ class RAGService:
             workspace_id=workspace_id,
         )
         return self.build_context(chunks), self.source_file_names(chunks)
+
+    def retrieve_context_with_chunks(
+        self,
+        db: Session,
+        *,
+        query: str,
+        user_id: str,
+        top_k: int | None = None,
+        document_ids: list[str],
+        workspace_id: str | None = None,
+    ) -> tuple[str, list[str], list[DocumentChunk]]:
+        """Convenience wrapper returning context, source names, and full chunks.
+
+        Unlike retrieve_context, this also returns the DocumentChunk objects with
+        full metadata, enabling the citation service to map answer text back to
+        the original chunks for citation generation.
+
+        Returns:
+            (context_string, source_file_names, chunks_list)
+        """
+        chunks = self.retrieve(
+            db,
+            query=query,
+            user_id=user_id,
+            top_k=top_k,
+            document_ids=document_ids,
+            workspace_id=workspace_id,
+        )
+        return self.build_context(chunks), self.source_file_names(chunks), chunks
 
     @staticmethod
     def generate_response(client, *, messages: list[dict], model: str) -> str:
@@ -484,13 +550,25 @@ class RAGService:
         organic = (results.get("organic_results") or [])[:max_results]
         lines: list[str] = []
         sources: list[dict] = []
-        for index, result in enumerate(organic, start=1):
+        # Label link-bearing results without [n] markers; those are reserved for
+        # uploaded-document citations in chat responses.
+        for result in organic:
+            link = (result.get("link") or "").strip()
+            if not link:
+                continue
             title = (result.get("title") or "").strip()
             snippet = (result.get("snippet") or "").strip()
-            link = (result.get("link") or "").strip()
-            lines.append(f"[{index}] {title}\n{snippet}\nSource: {link}")
-            if link:
-                sources.append({"title": title, "link": link})
+            number = len(sources) + 1
+            lines.append(f"Web result {number}: {title}\n{snippet}\nURL: {link}")
+            sources.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "snippet": snippet,
+                    "date": result.get("date"),
+                    "source_type": "web",
+                }
+            )
         if lines:
             sections.append("Top results:\n" + "\n\n".join(lines))
 

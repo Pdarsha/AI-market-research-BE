@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -9,50 +8,11 @@ from server.api_v1.deps import get_db
 from server.models.genai import ChatSession
 from server.services.document_processor import get_document_processor
 from server.utils.auth import get_current_user
+from server.utils.helpers import serialize_chat, serialize_document, serialize_workspace
 
 logger = logging.getLogger(__name__)
 
 workspace_router = APIRouter(prefix="/workspaces", tags=["Workspace"])
-
-
-def _serialize_workspace(workspace, chat_count: Optional[int] = None) -> dict:
-    data = {
-        "id": workspace.id,
-        "name": workspace.name,
-        "description": workspace.description,
-        "user_id": workspace.user_id,
-        "created_at": (
-            workspace.created_at.isoformat() if workspace.created_at else None
-        ),
-        "updated_at": (
-            workspace.updated_at.isoformat() if workspace.updated_at else None
-        ),
-    }
-    if chat_count is not None:
-        data["chat_count"] = chat_count
-    return data
-
-
-def _serialize_chat(chat) -> dict:
-    return {
-        "id": chat.id,
-        "title": chat.title,
-        "user_id": chat.user_id,
-        "workspace_id": chat.workspace_id,
-        "created_at": chat.created_at.isoformat() if chat.created_at else None,
-        "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
-    }
-
-
-def _serialize_document(doc) -> dict:
-    return {
-        "id": doc.id,
-        "workspace_id": doc.workspace_id,
-        "file_name": doc.file_name,
-        "file_format": doc.file_format,
-        "storage_path": doc.storage_path,
-        "created_at": doc.created_at.isoformat() if doc.created_at else None,
-    }
 
 
 @workspace_router.post("/create-workspace")
@@ -74,7 +34,7 @@ def create_workspace(
         content={
             "success": True,
             "error": None,
-            "data": _serialize_workspace(workspace, chat_count=0),
+            "data": serialize_workspace(workspace, chat_count=0),
             "message": "Workspace created successfully.",
         },
     )
@@ -96,7 +56,7 @@ def list_workspaces(
             "success": True,
             "error": None,
             "data": [
-                _serialize_workspace(ws, chat_count=len(ws.chats)) for ws in workspaces
+                serialize_workspace(ws, chat_count=len(ws.chats)) for ws in workspaces
             ],
             "message": "Workspaces fetched successfully.",
         },
@@ -126,7 +86,7 @@ def public_workspace(
         "created_at": (
             workspace.created_at.isoformat() if workspace.created_at else None
         ),
-        "files": [_serialize_document(f) for f in files],
+        "files": [serialize_document(f) for f in files],
         "chats": [
             {
                 "id": c.id,
@@ -176,10 +136,10 @@ def get_workspace(
         key=lambda c: c.updated_at or c.created_at,
         reverse=True,
     )
-    data = _serialize_workspace(workspace, chat_count=len(chats))
-    data["chats"] = [_serialize_chat(chat) for chat in chats]
+    data = serialize_workspace(workspace, chat_count=len(chats))
+    data["chats"] = [serialize_chat(chat) for chat in chats]
     data["files"] = [
-        _serialize_document(f)
+        serialize_document(f)
         for f in crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     ]
     return JSONResponse(
@@ -211,7 +171,7 @@ def update_workspace(
         content={
             "success": True,
             "error": None,
-            "data": _serialize_workspace(workspace),
+            "data": serialize_workspace(workspace),
             "message": "Workspace updated successfully.",
         },
     )
@@ -277,7 +237,7 @@ async def upload_docs(
         content={
             "success": True,
             "error": None,
-            "data": _serialize_document(document),
+            "data": serialize_document(document),
             "message": "File uploaded successfully.",
         },
     )
@@ -301,7 +261,7 @@ def list_workspace_docs(
         content={
             "success": True,
             "error": None,
-            "data": [_serialize_document(f) for f in files],
+            "data": [serialize_document(f) for f in files],
             "message": "Workspace files fetched successfully.",
         },
     )
@@ -325,7 +285,7 @@ async def get_workspace_document(
         content={
             "success": True,
             "error": None,
-            "data": _serialize_document(document),
+            "data": serialize_document(document),
             "message": "Document fetched successfully.",
         },
     )

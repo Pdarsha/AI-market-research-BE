@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     RAG_MAX_CONTEXT_CHUNKS: int = int(os.getenv("RAG_MAX_CONTEXT_CHUNKS", "12"))
     RAG_HNSW_EF_SEARCH: int = int(os.getenv("RAG_HNSW_EF_SEARCH", "200"))
 
+    # -- Document viewer / citations --------------------------------------
+    SIGNED_URL_TTL: int = int(os.getenv("SIGNED_URL_TTL", "3600"))
+
     # -- Web search --------------------------------------------------------
     WEB_SEARCH_ENGINE: str = os.getenv("WEB_SEARCH_ENGINE", "google")
     WEB_SEARCH_RESULTS: int = int(os.getenv("WEB_SEARCH_RESULTS", "5"))

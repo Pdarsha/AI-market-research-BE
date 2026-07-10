@@ -20,6 +20,10 @@ class Chunk(BaseModel):
     chunk_index: int
     page_number: int | None = None
     source: str | None = None
+    # Text offsets within the original document for citation highlighting
+    start_offset: int | None = None
+    end_offset: int | None = None
+    section_title: str | None = None
 
 
 class ChunkingService:
@@ -69,6 +73,8 @@ class ChunkingService:
                         chunk_index=index,
                         page_number=page_number,
                         source=source,
+                        start_offset=start,
+                        end_offset=start + len(piece),
                     )
                 )
                 index += 1

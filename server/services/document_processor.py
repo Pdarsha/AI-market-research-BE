@@ -122,6 +122,13 @@ class DocumentProcessor:
                 total_chunks=len(chunks),
                 content=chunk.text,
                 embedding=embedding,
+                # Citation metadata
+                start_offset=chunk.start_offset if hasattr(chunk, 'start_offset') else None,
+                end_offset=chunk.end_offset if hasattr(chunk, 'end_offset') else None,
+                page_number=chunk.page_number if hasattr(chunk, 'page_number') else None,
+                section_title=chunk.section_title if hasattr(chunk, 'section_title') else None,
+                document_path=document.storage_path,
+                document_url=document.storage_path,
             )
             for chunk, embedding in zip(chunks, embeddings)
         ]

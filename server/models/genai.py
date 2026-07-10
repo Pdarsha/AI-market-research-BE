@@ -68,6 +68,9 @@ class ChatMessage(Base):
     source_documents = Column(
         JSON, nullable=True
     )  # e.g. file names used to ground the answer
+    citations = Column(
+        JSON, nullable=True
+    )
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

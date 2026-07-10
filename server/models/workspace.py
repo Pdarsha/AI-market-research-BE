@@ -76,6 +76,9 @@ class DocumentChunk(Base):
     the ``embedding`` column holds the 1536-dim vector for similarity search.
     Foreign keys use ``ON DELETE CASCADE`` so deleting a document (or its
     workspace) also removes the associated embeddings.
+
+    Citation metadata fields enable the frontend Citation View to highlight
+    retrieved content within the original document.
     """
 
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
@@ -97,6 +100,18 @@ class DocumentChunk(Base):
     total_chunks = Column(Integer)
     content = Column(Text)
     embedding = Column(Vector(EMBEDDING_DIM))
+
+    # Citation metadata: text offsets within the original chunk for highlighting
+    start_offset = Column(Integer, nullable=True)
+    end_offset = Column(Integer, nullable=True)
+
+    # Citation metadata: document structure information
+    page_number = Column(Integer, nullable=True)
+    section_title = Column(String, nullable=True)
+
+    # Citation metadata: references to original document location
+    document_path = Column(String, nullable=True)
+    document_url = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

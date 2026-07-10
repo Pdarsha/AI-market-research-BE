@@ -14,7 +14,7 @@ def followup_instruction_block():
 FOLLOW-UP QUESTIONS (REQUIRED)
 ========================================
 
-After you finish the answer above, append 3 to 4 suggested follow-up questions
+After you finish the answer above, up to 3 suggested follow-up questions
 that naturally extend the discussion.
 
 Rules for the follow-up questions:
@@ -102,7 +102,28 @@ def augmented_system_prompt(document_context=None, web_context=None):
         sections.append("=== WEB SEARCH RESULTS ===\n" + str(web_context))
     context_block = "\n\n".join(sections) if sections else "None"
 
-    return f"""You are an expert AI assistant. Answer the user's question using the CONTEXT below. The CONTEXT is the text extracted from the user's uploaded document(s)/image(s) (including text read from images via OCR) and/or from a web search.
+    document_citation_rules = (
+        """
+Uploaded document citations:
+- The uploaded document chunks in the CONTEXT are numbered as [1], [2], [3], ...
+- Add a numbered marker only when a statement in your answer is grounded in an
+  uploaded document chunk.
+- Use the same number shown for the exact chunk you relied on. Reuse a number
+  when citing the same chunk again.
+- Do not invent citation numbers. Do not cite a chunk that was not used.
+- If the uploaded documents do not contain the answer, say so plainly and do not
+  add citation markers.
+"""
+        if document_context
+        else """
+Uploaded document citations:
+- No uploaded document context is available for this answer.
+- Do not include citation markers and do not imply that any uploaded document was
+  used.
+"""
+    )
+
+    return f"""You are an expert AI assistant. Answer the user's question using the CONTEXT below. The CONTEXT may include text extracted from the user's uploaded document(s)/image(s) and/or web search results.
 
 ========================================
 GROUNDING RULES (STRICT)
@@ -125,9 +146,20 @@ USING WEB SEARCH RESULTS
 ========================================
 
 - When web search results are present, answer DIRECTLY from them: state the
-  specific facts/figures (temperature, price, score, date, definition, …).
-- Do NOT just list websites or tell the user to go check sources. You may cite a
-  source after the answer, but the answer comes first.
+  specific facts/figures (temperature, price, score, date, definition, ...).
+- Web search results are not uploaded-document citations. Do not use [n] citation
+  markers for web-only facts.
+- Do NOT just list websites or tell the user to go check sources — answer first.
+
+========================================
+CITATIONS (STRICT — FOLLOW EXACTLY)
+========================================
+
+Return citation markers ONLY for content grounded in the user's uploaded
+document(s). General knowledge and web-search-only answers must have no citation
+markers.
+
+{document_citation_rules}
 
 ========================================
 CONTEXT
@@ -142,6 +174,7 @@ RESPONSE GUIDELINES
 - Answer directly and accurately from the CONTEXT.
 - Use clear formatting (headings, bullets) when helpful.
 - If the needed information is missing from the CONTEXT, say so — do not guess.
+- Cite only uploaded document content as instructed above.
 """
 
 
