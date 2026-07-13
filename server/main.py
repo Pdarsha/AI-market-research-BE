@@ -21,6 +21,14 @@ async def app_startup():
 async def lifespan(app: FastAPI):
 
     await app_startup()
+
+    # Pre-load OCR engines in the background so the first uploaded document
+    # doesn't pay model-load latency. Best-effort; never blocks startup.
+    import threading
+
+    from server.services.ocr_service import warm_up_ocr
+
+    threading.Thread(target=warm_up_ocr, name="ocr-warmup", daemon=True).start()
     yield
 
 

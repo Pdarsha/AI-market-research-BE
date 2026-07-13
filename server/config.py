@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     OCR_ENGINE: str = os.getenv("OCR_ENGINE", "tesseract").strip().lower()
     OCR_PREPROCESS: bool = os.getenv("OCR_PREPROCESS", "true").lower() == "true"
     OCR_PDF_RENDER_DPI: int = int(os.getenv("OCR_PDF_RENDER_DPI", "200"))
+    OCR_MAX_WORKERS: int = int(os.getenv("OCR_MAX_WORKERS", "0"))
+    OCR_REC_BATCH: int = int(os.getenv("OCR_REC_BATCH", "6"))
+    OCR_CLS_BATCH: int = int(os.getenv("OCR_CLS_BATCH", "24"))
+    OCR_MEM_ARENA: bool = os.getenv("OCR_MEM_ARENA", "false").lower() == "true"
 
     # -- Re-ranking (two-stage retrieval) --------------------------------
     RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "true").lower() == "true"

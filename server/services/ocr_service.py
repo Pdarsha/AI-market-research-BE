@@ -35,6 +35,9 @@ import platform
 import re
 import shutil
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from io import BytesIO, StringIO
 from typing import Callable
@@ -106,12 +109,34 @@ def _ocr_image_bytes(content: bytes) -> str:
         logger.warning("OCR: could not decode image (corrupted/unsupported); skipped")
         return ""
 
+    return _ocr_image_obj(image)
+
+
+def _ocr_image_obj(image) -> str:
+    """Dispatch an image (raw bytes, PIL image, or RGB ndarray) to the engine.
+
+    Separated from :func:`_ocr_image_bytes` so in-memory renders (PDF pages) skip
+    the encode-to-PNG -> decode-from-PNG round trip entirely. Raw bytes (e.g.
+    DOCX image blobs) are decoded here, inside the calling (worker) thread, so
+    decoding is parallelised along with the OCR itself.
+    """
+    if isinstance(image, (bytes, bytearray)):
+        return _ocr_image_bytes(bytes(image))
+
+    if not settings.OCR_ENABLED:
+        return ""
+
     engine = settings.OCR_ENGINE or "tesseract"
-    logging.info("OCR: using engine '%s' for image bytes", engine)
+    logger.debug("OCR: using engine '%s'", engine)
     if engine == "rapidocr":
         return _ocr_with_rapidocr(image)
     if engine == "easyocr":
         return _ocr_with_easyocr(image)
+    # Tesseract's API wants a PIL image; convert only if given an array.
+    if not hasattr(image, "convert"):
+        from PIL import Image
+
+        image = Image.fromarray(image)
     return _ocr_with_tesseract(image)
 
 
@@ -140,12 +165,224 @@ def _ocr_with_tesseract(image) -> str:
         return ""
 
 
-@lru_cache(maxsize=1)
-def _get_rapidocr():
-    """Load the RapidOCR engine once (ONNX-based, cross-platform, pip-only)."""
+# Per-thread OCR engines. Each worker thread owns its RapidOCR instance (ONNX
+# sessions are only a few tens of MB), which avoids any shared-state races in
+# the RapidOCR wrapper. The pool is persistent (module lifetime), so each
+# worker loads its engine exactly once per process — not once per document.
+_ocr_thread_state = threading.local()
+_engine_patch_lock = threading.Lock()
+
+
+def _build_rapidocr(intra_threads=None):
+    """Construct a tuned RapidOCR engine.
+
+    Two session-level tunings are injected through the ``SessionOptions``
+    factory the library's ``utils`` module calls during construction (swapped
+    under a lock, then restored):
+
+    * ``intra_op_num_threads`` cap for pool workers (workers x intra ~= cores).
+      Without it every session threads across ALL cores, so N parallel
+      inferences spawn N x cores threads and thrash the CPU — measured *slower*
+      than sequential.
+    * keep the CPU **memory arena** enabled. The library hard-disables it
+      (``enable_cpu_mem_arena = False``), forcing fresh allocations on every
+      inference; pooled buffers are pure throughput with zero effect on
+      results. Implemented as a property override that ignores the library's
+      ``False`` assignment. Toggle with ``OCR_MEM_ARENA=false`` to trade the
+      speed back for lower memory.
+
+    After construction, the recognition/classification batch sizes are raised
+    (``OCR_REC_BATCH``/``OCR_CLS_BATCH``): text-dense pages produce dozens of
+    line crops, and larger batches mean fewer ONNX calls for the same crops.
+    """
     from rapidocr_onnxruntime import RapidOCR
 
-    return RapidOCR()
+    keep_arena = getattr(settings, "OCR_MEM_ARENA", True)
+    engine = None
+    if intra_threads or keep_arena:
+        try:
+            import onnxruntime as ort
+            from rapidocr_onnxruntime import utils as rapid_utils
+
+            base_property = type(ort.SessionOptions()).enable_cpu_mem_arena
+
+            class _TunedSessionOptions(ort.SessionOptions):
+                if keep_arena:
+                    @property
+                    def enable_cpu_mem_arena(self):
+                        return base_property.__get__(self)
+
+                    @enable_cpu_mem_arena.setter
+                    def enable_cpu_mem_arena(self, value):
+                        base_property.__set__(self, True)  # ignore disable
+
+            def _tuned_session_options():
+                options = _TunedSessionOptions()
+                if intra_threads:
+                    options.intra_op_num_threads = int(intra_threads)
+                return options
+
+            with _engine_patch_lock:
+                original = rapid_utils.SessionOptions
+                rapid_utils.SessionOptions = _tuned_session_options
+                try:
+                    engine = RapidOCR()
+                finally:
+                    rapid_utils.SessionOptions = original
+        except Exception:
+            logger.warning(
+                "OCR: session tuning unavailable; using library defaults",
+                exc_info=True,
+            )
+    if engine is None:
+        engine = RapidOCR()
+
+    # Batch-size tuning (per-thread engine, so plain attribute writes are safe).
+    try:
+        rec_batch = int(getattr(settings, "OCR_REC_BATCH", 0) or 0)
+        if rec_batch > 0 and hasattr(engine, "text_recognizer"):
+            engine.text_recognizer.rec_batch_num = rec_batch
+        cls_batch = int(getattr(settings, "OCR_CLS_BATCH", 0) or 0)
+        if cls_batch > 0 and getattr(engine, "text_cls", None) is not None:
+            engine.text_cls.cls_batch_num = cls_batch
+    except Exception:
+        logger.debug("OCR: batch tuning skipped", exc_info=True)
+    return engine
+
+
+def _get_rapidocr():
+    """Return this thread's RapidOCR engine, creating it on first use.
+
+    Pool worker threads (stamped by the pool initializer) get intra-op-capped
+    sessions; the main thread keeps onnxruntime's default thread count so
+    single-image latency is unchanged.
+    """
+    engine = getattr(_ocr_thread_state, "rapidocr", None)
+    if engine is None:
+        engine = _build_rapidocr(
+            getattr(_ocr_thread_state, "intra_op_threads", None)
+        )
+        _ocr_thread_state.rapidocr = engine
+    return engine
+
+
+def warm_up_ocr() -> None:
+    """Pre-load the OCR engines so the first document doesn't pay model-load
+    latency (one engine per pool worker + the main thread's).
+
+    Intended to be called from app startup in a background thread; entirely
+    best-effort — any failure just means the first document loads lazily as
+    before.
+    """
+    try:
+        if not settings.OCR_ENABLED or settings.OCR_ENGINE != "rapidocr":
+            return
+        pool = _get_ocr_pool()
+        size = pool._max_workers
+        barrier = threading.Barrier(size, timeout=60)
+
+        def _load_engine():
+            _get_rapidocr()
+            try:
+                barrier.wait()  # hold the thread so every worker builds its own
+            except Exception:
+                pass
+
+        for future in [pool.submit(_load_engine) for _ in range(size)]:
+            future.result(timeout=120)
+        _get_rapidocr()  # main-thread engine
+        logger.info("OCR: %d worker engine(s) + main engine warmed up", size)
+    except Exception:
+        logger.debug("OCR warm-up skipped", exc_info=True)
+
+
+def _auto_pool_size() -> int:
+    """Auto worker count: min(4, cores/2), bounded by available memory.
+
+    Each worker thread owns a RapidOCR engine, so on memory-constrained hosts
+    spawning the full CPU-based worker count can OOM the process. Best-effort
+    read of Linux MemAvailable caps the pool; the per-worker budget is larger
+    when the ONNX memory arena is enabled (pooled buffers raise steady-state
+    RSS per session — measured OOM at 4 arena workers in ~2GB free). On other
+    platforms (or any error) the CPU-based size is used unchanged.
+    """
+    cpu = os.cpu_count() or 4
+    size = max(1, min(4, cpu // 2 or 1))
+    per_worker_mb = 700 if getattr(settings, "OCR_MEM_ARENA", True) else 400
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    available_mb = int(line.split()[1]) // 1024
+                    size = max(1, min(size, available_mb // per_worker_mb))
+                    break
+    except Exception:
+        pass
+    return size
+
+
+def _ocr_worker_count(task_count: int) -> int:
+    """Concurrency for a batch of OCR tasks.
+
+    OCR is CPU-bound, but every heavy step (onnxruntime inference, OpenCV, PIL
+    decode) releases the GIL, so a *thread* pool gives real parallelism without
+    the pickling/startup cost of processes. Capped at 4 by default: each
+    worker's inference is itself multi-threaded (intra-op), so workers x intra
+    is sized to ~= the core count.
+    """
+    if task_count <= 1:
+        return 1
+    configured = getattr(settings, "OCR_MAX_WORKERS", 0)
+    if configured and configured > 0:
+        return max(1, min(configured, task_count))
+    return min(task_count, _auto_pool_size())
+
+
+@lru_cache(maxsize=1)
+def _get_ocr_pool() -> ThreadPoolExecutor:
+    """Persistent OCR worker pool (created once, reused for every document).
+
+    The initializer stamps each worker thread with its intra-op thread budget
+    *before* the thread ever builds an engine, so workers x intra ~= cpu cores.
+    A persistent pool also means worker engines are loaded once per process
+    instead of once per uploaded document.
+    """
+    cpu = os.cpu_count() or 4
+    configured = getattr(settings, "OCR_MAX_WORKERS", 0)
+    size = configured if configured > 0 else _auto_pool_size()
+    intra = max(1, cpu // size)
+
+    def _init_worker():
+        _ocr_thread_state.intra_op_threads = intra
+
+    return ThreadPoolExecutor(
+        max_workers=size, thread_name_prefix="ocr", initializer=_init_worker
+    )
+
+
+def _run_parallel_ocr(items: list[tuple]) -> dict:
+    """OCR ``[(key, image/array/bytes), ...]`` concurrently; return ``{key: text}``.
+
+    Results are keyed (not ordered) so callers reassemble in their own document
+    order regardless of completion order. Each task is best-effort: a failure
+    yields ``""`` for that key and never aborts the batch.
+    """
+    if not items:
+        return {}
+
+    if _ocr_worker_count(len(items)) == 1:
+        return {key: _ocr_image_obj(payload) for key, payload in items}
+
+    pool = _get_ocr_pool()
+    futures = {key: pool.submit(_ocr_image_obj, payload) for key, payload in items}
+    results: dict = {}
+    for key, future in futures.items():
+        try:
+            results[key] = future.result()
+        except Exception:
+            logger.exception("OCR: parallel task failed for %s; skipped", key)
+            results[key] = ""
+    return results
 
 
 def _preprocess_for_ocr(image):
@@ -160,7 +397,12 @@ def _preprocess_for_ocr(image):
     """
     import numpy as np
 
-    rgb = np.array(image.convert("RGB"))
+    # Accept a PIL image OR a ready RGB ndarray (PDF pages arrive as raw arrays
+    # straight from the renderer — no PNG encode/decode round-trip).
+    if hasattr(image, "convert"):
+        rgb = np.array(image.convert("RGB"))
+    else:
+        rgb = image
     if not settings.OCR_PREPROCESS:
         return rgb
 
@@ -188,7 +430,8 @@ def _preprocess_for_ocr(image):
 
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        if float(gray.std()) > 60.0:
+        std = float(gray.std())
+        if std > 60.0:
             _, binary = cv2.threshold(
                 gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
             )
@@ -197,12 +440,12 @@ def _preprocess_for_ocr(image):
                 gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
             )
 
-        logger.info(
+        logger.debug(
             "OCR preprocess: %dx%d -> %s (threshold=%s)",
             width,
             height,
             binary.shape,
-            "otsu" if float(gray.std()) > 60.0 else "adaptive",
+            "otsu" if std > 60.0 else "adaptive",
         )
         return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
     except Exception:
@@ -220,14 +463,35 @@ def _ocr_with_rapidocr(image) -> str:
         )
         return ""
     try:
+        started = time.perf_counter()
         processed = _preprocess_for_ocr(image)
-        logger.info("OCR: running RapidOCR on preprocessed image")
-        result, _ = engine(processed)
-        if not result:
-            logger.info("OCR: RapidOCR found no text")
-            return ""
-        text = "\n".join(line[1] for line in result).strip()
-        logger.info("OCR: RapidOCR extracted %d chars", len(text))
+        preprocess_ms = (time.perf_counter() - started) * 1000
+
+        infer_started = time.perf_counter()
+        result, elapse = engine(processed)
+        infer_ms = (time.perf_counter() - infer_started) * 1000
+
+        # RapidOCR reports per-stage seconds [det, cls, rec] — logged so real
+        # documents show which stage dominates (guides further tuning).
+        det_ms = cls_ms = rec_ms = 0.0
+        if isinstance(elapse, (list, tuple)) and len(elapse) == 3:
+            det_ms, cls_ms, rec_ms = (float(v) * 1000 for v in elapse)
+
+        text = (
+            "\n".join(line[1] for line in result).strip() if result else ""
+        )
+        logger.info(
+            "OCR: rapidocr preprocess=%.0fms infer=%.0fms "
+            "(det=%.0f cls=%.0f rec=%.0f) lines=%d chars=%d [%s]",
+            preprocess_ms,
+            infer_ms,
+            det_ms,
+            cls_ms,
+            rec_ms,
+            len(result) if result else 0,
+            len(text),
+            threading.current_thread().name,
+        )
         return text
     except Exception:
         logger.exception("OCR: rapidocr failed on an image; skipped")
@@ -254,7 +518,10 @@ def _ocr_with_easyocr(image) -> str:
     try:
         import numpy as np
 
-        lines = reader.readtext(np.array(image.convert("RGB")), detail=0)
+        array = (
+            np.array(image.convert("RGB")) if hasattr(image, "convert") else image
+        )
+        lines = reader.readtext(array, detail=0)
         return "\n".join(lines).strip()
     except Exception:
         logger.exception("OCR: easyocr failed on an image; skipped")
@@ -312,35 +579,39 @@ def _extract_docx(content: bytes) -> str:
             except Exception:
                 continue
 
-    parts: list[str] = []
-    ocr_done: set[str] = set()
-    images_detected = 0
-
+    # Phase 1: walk the document once, recording reading order as a sequence of
+    # text/image entries (no OCR yet).
+    entries: list[tuple[str, str]] = []  # ("text", paragraph) | ("image", rid)
+    ocr_seen: set[str] = set()
     for para in doc.paragraphs:
         if para.text.strip():
-            parts.append(para.text)
+            entries.append(("text", para.text))
         for rid in _docx_paragraph_image_rids(para):
-            blob = rid_to_blob.get(rid)
-            if blob is None or rid in ocr_done:
-                continue
-            ocr_done.add(rid)
-            images_detected += 1
-            text = _ocr_image_bytes(blob)
-            if text:
-                parts.append(text)
+            if rid in rid_to_blob and rid not in ocr_seen:
+                ocr_seen.add(rid)
+                entries.append(("image", rid))
+    for rid in rid_to_blob:  # images not anchored to a body paragraph
+        if rid not in ocr_seen:
+            ocr_seen.add(rid)
+            entries.append(("image", rid))
 
-    for rid, blob in rid_to_blob.items():
-        if rid in ocr_done:
-            continue
-        images_detected += 1
-        text = _ocr_image_bytes(blob)
-        if text:
-            parts.append(text)
+    # Phase 2: OCR every embedded image concurrently (keyed by rid), then
+    # Phase 3: assemble in the recorded order — output identical to sequential.
+    started = time.perf_counter()
+    ocr_texts = _run_parallel_ocr(
+        [(rid, rid_to_blob[rid]) for kind, rid in entries if kind == "image"]
+    )
+    parts = [
+        value if kind == "text" else ocr_texts.get(value, "")
+        for kind, value in entries
+    ]
+    merged = "\n".join(part for part in parts if part)
 
-    merged = "\n".join(parts)
     logger.info(
-        "DOCX: %d embedded image(s) detected; merged text length=%d chars",
-        images_detected,
+        "DOCX: %d embedded image(s) OCR'd in %.0fms (workers=%d); merged=%d chars",
+        len(ocr_texts),
+        (time.perf_counter() - started) * 1000,
+        _ocr_worker_count(len(ocr_texts)),
         len(merged),
     )
     return merged
@@ -531,17 +802,45 @@ def _merge_texts(primary: str, secondary: str) -> str:
     return primary + "\n" + "\n".join(new_lines)
 
 
+def _pixmap_to_rgb_array(pix):
+    """Convert a PyMuPDF pixmap to an RGB ndarray **in memory**.
+
+    Replaces the old ``pix.tobytes("png")`` -> ``PIL.Image.open`` round trip,
+    which zlib-compressed every rendered page to PNG only to immediately decode
+    it back to pixels (~0.3-0.8s and ~2x memory per page, pure waste).
+    """
+    import numpy as np
+
+    array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+        pix.height, pix.width, pix.n
+    )
+    if pix.n >= 4:
+        array = array[:, :, :3]
+    elif pix.n == 1:
+        array = np.repeat(array, 3, axis=2)
+    return array.copy()
+
+
 def _extract_pdf_with_fitz(fitz, content: bytes) -> str:
     """Hybrid per-page extraction: native text layer merged with OCR of the
     rendered page.
 
-    For each page we take the selectable text, then rasterise the page and OCR it
-    (this captures embedded images, charts, and scanned pages — anything that is
-    visually text but not in the text layer). The two are merged per page,
-    preserving reading order. Pages that have a text layer and no images are not
-    rendered, to avoid needless OCR work.
+    Optimised two-phase pipeline:
+
+    * **Phase 1 (sequential, cheap):** read each page's text layer and, only for
+      pages that need OCR (no text layer, or embedded images), render the page
+      straight to an in-memory RGB array. Sequential because PyMuPDF documents
+      are not thread-safe; rendering is ~100ms/page vs ~10s/page for OCR.
+      Pages with selectable text and no images are never rendered or OCR'd.
+    * **Phase 2 (parallel):** OCR all rendered pages concurrently (thread pool;
+      onnxruntime/OpenCV/PIL release the GIL). Results are keyed by page index.
+    * **Phase 3:** merge text + OCR per page and join in page order, so the
+      output is byte-identical in structure to the sequential version.
     """
-    parts: list[str] = []
+    total_started = time.perf_counter()
+    pages: list[tuple[int, str]] = []  # (page_index, native_text)
+    ocr_jobs: list[tuple[int, object]] = []  # (page_index, rgb_array)
+
     with fitz.open(stream=content, filetype="pdf") as doc:
         if getattr(doc, "needs_pass", False):
             raise _PasswordProtected("Password-protected PDF is not supported.")
@@ -550,30 +849,55 @@ def _extract_pdf_with_fitz(fitz, content: bytes) -> str:
             page = doc.load_page(page_index)
             text = (page.get_text() or "").strip()
 
-            # OCR the rendered page when it has no text layer (scanned) or carries
-            # embedded images/graphics whose text the layer won't include.
             try:
                 has_images = bool(page.get_images(full=True))
             except Exception:
                 has_images = False
 
-            page_text = text
-            if not text or has_images:
+            pages.append((page_index, text))
+
+            # OCR only image-bearing or scanned pages — and skip rendering
+            # altogether when OCR is disabled (output is unchanged either way).
+            if (not text or has_images) and settings.OCR_ENABLED:
                 try:
                     pix = page.get_pixmap(dpi=settings.OCR_PDF_RENDER_DPI)
-                    ocr_text = _ocr_image_bytes(pix.tobytes("png"))
+                    ocr_jobs.append((page_index, _pixmap_to_rgb_array(pix)))
+                    pix = None  # release pixmap buffer promptly
                 except Exception:
                     logger.exception(
-                        "PDF: render/OCR failed on page %d; continuing", page_index
+                        "PDF: render failed on page %d; continuing", page_index
                     )
-                    ocr_text = ""
-                if ocr_text:
-                    page_text = _merge_texts(text, ocr_text) if text else ocr_text
 
-            if page_text.strip():
-                parts.append(page_text)
+    render_ms = (time.perf_counter() - total_started) * 1000
 
-    return "\n".join(parts)
+    ocr_started = time.perf_counter()
+    ocr_results = _run_parallel_ocr(ocr_jobs)
+    ocr_ms = (time.perf_counter() - ocr_started) * 1000
+
+    merge_started = time.perf_counter()
+    parts: list[str] = []
+    for page_index, text in pages:
+        ocr_text = ocr_results.get(page_index, "")
+        page_text = text
+        if ocr_text:
+            page_text = _merge_texts(text, ocr_text) if text else ocr_text
+        if page_text.strip():
+            parts.append(page_text)
+    merged = "\n".join(parts)
+    merge_ms = (time.perf_counter() - merge_started) * 1000
+
+    logger.info(
+        "PDF extract: pages=%d ocr_pages=%d workers=%d | load+render=%.0fms "
+        "ocr=%.0fms merge=%.0fms total=%.0fms",
+        len(pages),
+        len(ocr_jobs),
+        _ocr_worker_count(len(ocr_jobs)),
+        render_ms,
+        ocr_ms,
+        merge_ms,
+        (time.perf_counter() - total_started) * 1000,
+    )
+    return merged
 
 
 def _extract_pdf_text_only(content: bytes) -> str:
@@ -663,14 +987,50 @@ class OCRService:
         """Return the canonical stored ``file_format`` for ``filename``."""
         return self._EXTRACTORS[self.detect_extension(filename)][0]
 
+    _CACHE_MAX_ENTRIES = 32
+    _extract_cache: "dict[tuple, str]" = {}
+    _extract_cache_lock = threading.Lock()
+
+    @staticmethod
+    def _cache_key(ext: str, content: bytes) -> tuple:
+        import hashlib
+
+        return (
+            hashlib.sha256(content).hexdigest(),
+            ext,
+            settings.OCR_ENABLED,
+            settings.OCR_ENGINE,
+            settings.OCR_PREPROCESS,
+            settings.OCR_PDF_RENDER_DPI,
+            settings.OCR_REC_BATCH,
+        )
+
     def extract_text(self, filename: str, content: bytes) -> str:
         """Extract and return plain text from ``content`` for ``filename``."""
         ext = self.detect_extension(filename)
+
+        key = self._cache_key(ext, content)
+        with self._extract_cache_lock:
+            cached = self._extract_cache.get(key)
+        if cached is not None:
+            logger.info(
+                "Extraction cache HIT for %s (%d chars) — OCR skipped",
+                filename,
+                len(cached),
+            )
+            return cached
+
         _, extractor = self._EXTRACTORS[ext]
         try:
             text = extractor(content)
         except _PasswordProtected as exc:
             raise ValueError(str(exc)) from exc
+
+        with self._extract_cache_lock:
+            if len(self._extract_cache) >= self._CACHE_MAX_ENTRIES:
+                self._extract_cache.pop(next(iter(self._extract_cache)))
+            self._extract_cache[key] = text
+
         logger.debug("Extracted %d chars from %s (%s)", len(text), filename, ext)
         return text
 
