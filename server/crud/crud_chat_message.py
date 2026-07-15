@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from server.crud.base import CRUDBase
 from server.models.genai import ChatMessage
 from server.schemas.genai import ChatMessageCreate, ChatMessageUpdate
+from server.utils.source_attribution import cited_document_names
 
 
 class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate]):
@@ -59,16 +60,11 @@ class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate
         """
         latest = (
             db.query(self.model)
-            .filter(
-                self.model.chat_id == chat_id,
-                self.model.source_documents.isnot(None),
-            )
+            .filter(self.model.chat_id == chat_id)
             .order_by(desc(self.model.created_at))
             .first()
         )
-        if latest and latest.source_documents:
-            return latest.source_documents
-        return None
+        return cited_document_names(latest.citations) if latest else None
 
 
 chat_message = CRUDChatMessage(ChatMessage)

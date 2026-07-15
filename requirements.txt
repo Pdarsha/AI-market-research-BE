@@ -27,6 +27,7 @@ openpyxl
 pytesseract
 Pillow
 openai
+mcp
 xlrd
 tenacity
 google-auth

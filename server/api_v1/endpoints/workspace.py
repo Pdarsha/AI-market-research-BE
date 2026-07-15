@@ -9,6 +9,10 @@ from server.models.genai import ChatSession
 from server.services.document_processor import get_document_processor
 from server.utils.auth import get_current_user
 from server.utils.helpers import serialize_chat, serialize_document, serialize_workspace
+from server.utils.source_attribution import (
+    cited_document_names,
+    source_attribution_from_citations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +102,9 @@ def public_workspace(
                         "id": m.id,
                         "role": m.role,
                         "content": m.content,
-                        "source_documents": m.source_documents,
+                        "source_documents": cited_document_names(m.citations),
+                        "citations": m.citations,
+                        "source_attribution": source_attribution_from_citations(m.citations),
                         "created_at": (
                             m.created_at.isoformat() if m.created_at else None
                         ),

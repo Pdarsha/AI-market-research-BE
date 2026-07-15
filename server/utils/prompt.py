@@ -86,7 +86,9 @@ NO
 """
 
 
-def augmented_system_prompt(document_context=None, web_context=None):
+def augmented_system_prompt(
+    document_context=None, web_context=None, financial_news_context=None, sec_context=None, roic_context=None
+):
     """System prompt that grounds the answer in whatever context is available.
 
     Either/both of ``document_context`` (RAG chunks) and ``web_context`` (web
@@ -100,6 +102,12 @@ def augmented_system_prompt(document_context=None, web_context=None):
         )
     if web_context:
         sections.append("=== WEB SEARCH RESULTS ===\n" + str(web_context))
+    if financial_news_context:
+        sections.append("=== LIVE FINANCIAL NEWS (ALPHA VANTAGE) ===\n" + str(financial_news_context))
+    if sec_context:
+        sections.append("=== OFFICIAL SEC EDGAR COMPANY FACTS ===\n" + str(sec_context))
+    if roic_context:
+        sections.append("=== ROIC.AI COMPANY DATA ===\n" + str(roic_context))
     context_block = "\n\n".join(sections) if sections else "None"
 
     cited_kinds = []
@@ -107,6 +115,12 @@ def augmented_system_prompt(document_context=None, web_context=None):
         cited_kinds.append("uploaded document chunks")
     if web_context:
         cited_kinds.append("web search results")
+    if financial_news_context:
+        cited_kinds.append("live financial-news articles")
+    if sec_context:
+        cited_kinds.append("official SEC EDGAR company facts")
+    if roic_context:
+        cited_kinds.append("Roic.ai company data")
 
     if cited_kinds:
         citation_rules = f"""
@@ -156,6 +170,28 @@ USING WEB SEARCH RESULTS
 - Cite each web-sourced fact with its [n] marker, exactly as you would an
   uploaded document.
 - Do NOT just list websites or tell the user to go check sources — answer first.
+
+========================================
+USING LIVE FINANCIAL NEWS
+========================================
+
+- Clearly distinguish uploaded-document information from live Alpha Vantage news.
+- When both are present, combine them into one answer and explain meaningful
+  conflicts (for example, an older report versus current sentiment).
+- Do not infer facts not present in the supplied articles.
+
+========================================
+USING SEC EDGAR DATA
+========================================
+
+- SEC EDGAR facts are official reported data. Clearly identify them as SEC data.
+- State the reporting period and filing form when present; do not call a filing
+  "latest" unless that is supported by the supplied reporting date.
+- When comparing SEC data with uploaded material or live news, explain any
+  differences as reporting-period or source differences when appropriate.
+- For company comparisons, state both reporting periods and filing types. Give
+  absolute and percentage differences only when the values use the same unit;
+  call out different fiscal calendars instead of implying a direct alignment.
 
 ========================================
 CITATIONS (STRICT — FOLLOW EXACTLY)
@@ -244,6 +280,60 @@ Question:
 "What is a decorator?"
 Answer:
 NO
+"""
+
+
+def financial_news_classification_prompt():
+    """Routing prompt for Alpha Vantage news; answer format is intentionally tiny."""
+    return """You route questions to a live financial-news tool.
+
+Return exactly one line in this format: YES:TICKER or NO.
+Use YES only when the user asks about current/recent financial news, earnings,
+market sentiment, or a publicly traded company. TICKER must be the primary US
+stock ticker where it is clear; otherwise return NO. Do not use the tool for
+general investing education or historical facts.
+
+Examples:
+Latest Apple news -> YES:AAPL
+Nvidia market sentiment -> YES:NVDA
+Summarize my uploaded annual report -> NO
+Compare my Tesla report with today's Tesla news -> YES:TSLA
+"""
+
+
+def sec_edgar_classification_prompt():
+    """Routing prompt for official SEC company facts."""
+    return """You route questions to the SEC EDGAR company-facts tool.
+
+Return exactly one line in this format: YES:TICKER or YES:TICKER,TICKER or NO.
+Use YES for requests for SEC filings, reported revenue, net income, assets,
+liabilities, cash flow, EPS, balance sheets, or financial statements of a US
+public company. TICKER must be the primary US ticker where it is clear.
+Use NO for live news, market sentiment, stock prices, or general investing advice.
+
+Examples:
+What is Apple's revenue? -> YES:AAPL
+Show Microsoft's latest financial statements -> YES:MSFT
+Compare my Tesla annual report with the latest SEC filing -> YES:TSLA
+Compare Apple and Microsoft revenue -> YES:AAPL,MSFT
+Latest Tesla news -> NO
+"""
+
+
+def roic_ai_classification_prompt():
+    return """You route company discovery and earnings-transcript questions to Roic.ai.
+Return only YES:TICKER or NO. Use YES for earnings calls, earnings transcripts,
+conference calls, management commentary, CEO/CFO remarks, forward guidance,
+outlook, production plans, or management discussion during a call. Also use YES
+for company lookup/search or Roic.ai company data. Use NO for official SEC facts,
+live news, stock prices, or general education.
+Examples:
+Find Apple on Roic.ai -> YES:AAPL
+Show Tesla earnings transcripts -> YES:TSLA
+What did Apple's CEO say during the latest earnings call? -> YES:AAPL
+What guidance did Microsoft provide? -> YES:MSFT
+Summarize Nvidia's latest conference call. -> YES:NVDA
+What is Nvidia's SEC revenue? -> NO
 """
 
 

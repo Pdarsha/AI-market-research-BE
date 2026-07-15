@@ -25,6 +25,24 @@ class Settings(BaseSettings):
 
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
     SERPAPI_KEY: str = os.getenv("SERPAPI_KEY")
+    ALPHA_VANTAGE_API_KEY: str = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+    ALPHA_VANTAGE_NEWS_CACHE_TTL: int = int(
+        os.getenv("ALPHA_VANTAGE_NEWS_CACHE_TTL", "600")
+    )
+    ALPHA_VANTAGE_NEWS_MAX_RESULTS: int = int(
+        os.getenv("ALPHA_VANTAGE_NEWS_MAX_RESULTS", "10")
+    )
+    SEC_EDGAR_USER_AGENT: str = os.getenv(
+        "SEC_EDGAR_USER_AGENT", "CapitalEdgeAI/1.0 (support@example.com)"
+    )
+    SEC_EDGAR_MAPPING_CACHE_TTL: int = int(
+        os.getenv("SEC_EDGAR_MAPPING_CACHE_TTL", "86400")
+    )
+    SEC_EDGAR_FACTS_CACHE_TTL: int = int(
+        os.getenv("SEC_EDGAR_FACTS_CACHE_TTL", "43200")
+    )
+    ROIC_API_KEY: str = os.getenv("ROIC_API_KEY", "")
+    ROIC_CACHE_TTL: int = int(os.getenv("ROIC_CACHE_TTL", "3600"))
 
     LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
 

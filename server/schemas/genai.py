@@ -56,21 +56,35 @@ class ChatMessageRequest(BaseModel):
 
 
 class CitationMetadata(BaseModel):
-    """Citation metadata for a single retrieved chunk.
-
-    Contains all information needed by the Citation View to display and
-    highlight the original document.
-    """
-    id: int
-    document_id: str
+    """Provider-neutral citation schema; legacy fields remain optional."""
+    id: str
+    type: Optional[str] = None
+    provider: Optional[str] = None
+    description: Optional[str] = None
+    navigable: bool = False
+    navigation_type: Optional[str] = None
+    navigation_target: Optional[str] = None
+    navigation_reason: Optional[str] = None
+    metadata: Optional[dict] = None
+    reference_index: Optional[int] = None
+    document_id: Optional[str] = None
     document_name: Optional[str] = None
     document_url: Optional[str] = None
     page_number: Optional[int] = None
-    chunk_id: str
-    highlight_text: str
+    chunk_id: Optional[str] = None
+    highlight_text: Optional[str] = None
     section_title: Optional[str] = None
     start_offset: Optional[int] = None
     end_offset: Optional[int] = None
+    title: Optional[str] = None
+    source_type: Optional[str] = None
+    source_name: Optional[str] = None
+    url: Optional[str] = None
+    page: Optional[int] = None
+    excerpt: Optional[str] = None
+    section: Optional[str] = None
+    published_date: Optional[str] = None
+    ticker: Optional[str] = None
 
     class Config:
         from_attributes = True

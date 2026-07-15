@@ -32,7 +32,10 @@ from server.utils.prompt import (
     ai_assistent,
     augmented_system_prompt,
     classification_prompt,
+    financial_news_classification_prompt,
     followup_instruction_block,
+    sec_edgar_classification_prompt,
+    roic_ai_classification_prompt,
     web_search_classification_prompt,
 )
 
@@ -263,6 +266,9 @@ class RAGService:
         question: str,
         retrieved_context: str | None = None,
         web_context: str | None = None,
+        financial_news_context: str | None = None,
+        sec_context: str | None = None,
+        roic_context: str | None = None,
     ) -> list[dict]:
         """Prompt generation.
 
@@ -277,9 +283,19 @@ class RAGService:
         every answer is followed by a parseable list of suggested follow-ups
         (see :meth:`split_answer_and_followups`).
         """
-        if retrieved_context is not None or web_context is not None:
+        if (
+            retrieved_context is not None
+            or web_context is not None
+            or financial_news_context is not None
+            or sec_context is not None
+            or roic_context is not None
+        ):
             system_prompt = augmented_system_prompt(
-                document_context=retrieved_context, web_context=web_context
+                document_context=retrieved_context,
+                web_context=web_context,
+                financial_news_context=financial_news_context,
+                sec_context=sec_context,
+                roic_context=roic_context,
             )
         else:
             system_prompt = ai_assistent()
@@ -460,6 +476,265 @@ class RAGService:
                 "rag.classify_web: classification failed; defaulting to no web search"
             )
             return False
+
+    @staticmethod
+    def classify_financial_news_ticker(
+        client, question: str, model: str
+    ) -> str | None:
+        """Return the ticker for a live-finance question, or ``None``.
+
+        This is deliberately separate from generic web-search routing so a finance
+        question uses the Alpha Vantage tool instead of an unrelated web search.
+        """
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": financial_news_classification_prompt()},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=16,
+                temperature=0,
+            )
+            answer = (completion.choices[0].message.content or "").strip().upper()
+            match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
+            ticker = match.group(1) if match else None
+            logger.info("rag.classify_finance: ticker=%s question_len=%d", ticker, len(question))
+            return ticker
+        except Exception:
+            logger.exception("rag.classify_finance: classification failed; skipping finance news")
+            return None
+
+    @staticmethod
+    def classify_roic_ai_query(client, question: str, model: str) -> str | None:
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": roic_ai_classification_prompt()}, {"role": "user", "content": question}],
+                max_tokens=16,
+                temperature=0,
+            )
+            answer = (completion.choices[0].message.content or "").strip().upper()
+            match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
+            return match.group(1) if match else None
+        except Exception:
+            logger.exception("rag.classify_roic: classification failed")
+            return None
+
+    @staticmethod
+    def is_earnings_transcript_query(question: str) -> bool:
+        """Recognize transcript intent even when the lightweight planner misses it."""
+        normalized = question.lower()
+        phrases = (
+            "earnings call", "earnings transcript", "conference call",
+            "management commentary", "management say", "management said",
+            "ceo say", "ceo said", "cfo say", "cfo said", "guidance",
+            "forward guidance", "management discussion",
+        )
+        return any(phrase in normalized for phrase in phrases)
+
+    @staticmethod
+    def transcript_company_query(question: str) -> str:
+        """Return a company-like Roic lookup term; keep the query as a fallback."""
+        ticker = re.search(r"\$([A-Za-z]{1,10})\b", question)
+        if ticker:
+            return ticker.group(1).upper()
+        companies = (
+            "Apple", "Microsoft", "Tesla", "Nvidia", "Amazon", "Meta",
+            "Alphabet", "Google", "Netflix", "AMD", "Intel",
+        )
+        for company in companies:
+            if re.search(rf"\b{re.escape(company)}\b", question, re.IGNORECASE):
+                return company
+        return question
+
+    @staticmethod
+    def build_roic_context(data: dict, *, start_number: int, query: str = "") -> tuple[str, list[dict]]:
+        if data.get("error") or not data.get("results"):
+            return "", []
+        lines, sources = [], []
+        for result in data["results"]:
+            number = start_number + len(sources)
+            title = result.get("company") or result.get("ticker")
+            details = [f"[{number}] {title}", f"Ticker: {result.get('ticker')}", f"Exchange: {result.get('exchange') or 'Unknown'}"]
+            lines.append("\n".join(details))
+            sources.append({"title": title, "link": None, "snippet": "Roic.ai company search result.", "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": result.get("ticker")})
+        transcript = data.get("latest_transcript")
+        if transcript:
+            terms = {word for word in re.findall(r"[a-z]{4,}", query.lower())} - {"what", "about", "latest", "management", "company"}
+            paragraphs = [p.strip() for p in transcript["content"].split("\n\n") if p.strip()]
+            relevant = [p for p in paragraphs if any(term in p.lower() for term in terms)]
+            excerpt = "\n\n".join((relevant or paragraphs)[:8])[:12000]
+            number = start_number + len(sources)
+            lines.append(f"[{number}] Latest earnings-call transcript — {transcript['ticker']} Q{transcript.get('quarter')} {transcript.get('year')}\nDate: {transcript.get('date')}\n{excerpt}")
+            sources.append({"title": f"Roic.ai earnings-call transcript — {transcript['ticker']}", "link": None, "snippet": excerpt[:500], "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": transcript["ticker"], "navigation_type": "api", "navigation_target": f"/v1/citations/roic/transcript/{transcript['ticker']}"})
+        return "\n\n".join(lines), sources
+
+    @staticmethod
+    def classify_sec_edgar_ticker(client, question: str, model: str) -> str | None:
+        """Backward-compatible single-ticker SEC router."""
+        tickers = RAGService.classify_sec_edgar_tickers(client, question, model)
+        return tickers[0] if tickers else None
+
+    @staticmethod
+    def classify_sec_edgar_tickers(client, question: str, model: str) -> list[str]:
+        """Return one or two tickers for SEC questions, including comparisons."""
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": sec_edgar_classification_prompt()},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=16,
+                temperature=0,
+            )
+            answer = (completion.choices[0].message.content or "").strip().upper()
+            match = re.fullmatch(
+                r"YES:([A-Z][A-Z0-9.\-]{0,9}(?:,[A-Z][A-Z0-9.\-]{0,9})?)", answer
+            )
+            tickers = match.group(1).split(",") if match else []
+            logger.info("rag.classify_sec: tickers=%s question_len=%d", tickers, len(question))
+            return tickers[:2]
+        except Exception:
+            logger.exception("rag.classify_sec: classification failed; skipping SEC retrieval")
+            return []
+
+    @staticmethod
+    def sec_request_options(question: str) -> dict:
+        """Derive deterministic SEC tool options from an already-routed query."""
+        lowered = question.lower()
+        years_match = re.search(r"last\s+(\d+)\s+years?", lowered)
+        word_years = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+        if not years_match:
+            years_match = re.search(r"last\s+(one|two|three|four|five)\s+years?", lowered)
+        years = None
+        if years_match:
+            value = years_match.group(1)
+            years = int(value) if value.isdigit() else word_years[value]
+
+        if years or any(term in lowered for term in ("annual", "10-k", "yearly")):
+            period = "annual"
+        elif any(term in lowered for term in ("quarter", "quarterly", "10-q")):
+            period = "quarterly"
+        else:
+            period = "latest"
+
+        metrics: list[str] = []
+        if "revenue" in lowered or "sales" in lowered:
+            metrics.append("revenue")
+        if "net income" in lowered or "profit" in lowered:
+            metrics.append("net_income")
+        if "balance sheet" in lowered:
+            metrics.extend(["assets", "liabilities", "shareholders_equity"])
+        else:
+            if "assets" in lowered:
+                metrics.append("assets")
+            if "liabilities" in lowered:
+                metrics.append("liabilities")
+            if "equity" in lowered:
+                metrics.append("shareholders_equity")
+        if "cash flow" in lowered:
+            metrics.extend(["operating_cash_flow", "investing_cash_flow", "financing_cash_flow"])
+        elif "cash" in lowered:
+            metrics.append("cash_and_equivalents")
+        if "eps" in lowered or "earnings per share" in lowered:
+            metrics.extend(["basic_eps", "diluted_eps"])
+        return {"period": period, "metrics": list(dict.fromkeys(metrics)) or None, "years": years}
+
+    @staticmethod
+    def build_financial_news_context(
+        news: dict, *, start_number: int
+    ) -> tuple[str, list[dict]]:
+        """Make normalized Alpha Vantage news compact and citation-addressable."""
+        lines: list[str] = []
+        sources: list[dict] = []
+        for article in news.get("articles") or []:
+            url = (article.get("url") or "").strip()
+            if not url:
+                continue
+            number = start_number + len(sources)
+            title = article.get("title") or "Untitled article"
+            summary = article.get("summary") or ""
+            details = [
+                f"[{number}] {title}",
+                summary,
+                f"Publisher: {article.get('publisher') or 'Alpha Vantage'}",
+                f"Published: {article.get('published_at') or 'Unknown'}",
+                f"Sentiment: {article.get('sentiment') or 'Unknown'}"
+                + (
+                    f" ({article['sentiment_score']})"
+                    if article.get("sentiment_score") is not None
+                    else ""
+                ),
+                f"URL: {url}",
+            ]
+            lines.append("\n".join(details))
+            sources.append(
+                {
+                    "title": title,
+                    "link": url,
+                    "snippet": summary,
+                    "date": article.get("published_at"),
+                    "publisher": article.get("publisher") or "Alpha Vantage",
+                    "source_type": "financial_news",
+                    "ticker": news.get("ticker"),
+                }
+            )
+        return "\n\n".join(lines), sources
+
+    @staticmethod
+    def build_sec_context(sec_data: dict, *, start_number: int) -> tuple[str, list[dict]]:
+        """Format normalized SEC facts as one cited, compact context block."""
+        if sec_data.get("error"):
+            return "", []
+        financials = sec_data.get("financials") or {}
+        lines = [
+            f"[{start_number}] Company: {sec_data.get('company')}",
+            f"Ticker: {sec_data.get('ticker')}",
+            f"CIK: {sec_data.get('cik')}",
+            f"Report: {sec_data.get('report_type')} ended {sec_data.get('period_end')}",
+            f"Filed: {sec_data.get('filed_date')}",
+        ]
+        has_financials = False
+        for name, data in financials.items():
+            if not data:
+                continue
+            has_financials = True
+            label = name.replace("_", " ").title()
+            if "history" in data:
+                values = [
+                    f"{item['period_end']}: {item['value']} {item['currency']}"
+                    for item in data["history"]
+                ]
+                lines.append(f"{label}: " + "; ".join(values))
+            else:
+                lines.append(f"{label}: {data['value']} {data['currency']}")
+        if not has_financials:
+            return "", []
+        cik = sec_data.get("cik")
+        return "\n".join(lines), [{
+            "title": f"SEC EDGAR company facts — {sec_data.get('company')}",
+            "link": f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
+            "snippet": "Official SEC XBRL company facts.",
+            "publisher": "SEC EDGAR",
+            "source_type": "sec_edgar",
+            "ticker": sec_data.get("ticker"),
+        }]
+
+    @staticmethod
+    def build_sec_contexts(sec_results: list[dict], *, start_number: int) -> tuple[str, list[dict]]:
+        """Build separate, sequentially cited SEC blocks for each company."""
+        contexts: list[str] = []
+        sources: list[dict] = []
+        for result in sec_results:
+            context, result_sources = RAGService.build_sec_context(
+                result, start_number=start_number + len(sources)
+            )
+            if context:
+                contexts.append(context)
+                sources.extend(result_sources)
+        return "\n\n---\n\n".join(contexts), sources
 
     @staticmethod
     def _format_scalar_fields(data: dict, skip: tuple[str, ...]) -> str:

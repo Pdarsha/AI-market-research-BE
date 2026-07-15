@@ -23,9 +23,12 @@ from server.services.document_processor import (
     get_document_processor,
 )
 from server.services.embedding_service import EmbeddingService, get_embedding_service
+from server.services.financial_news_mcp import FinancialNewsMCPTool, financial_news
 from server.services.ocr_service import OCRService, get_ocr_service
 from server.services.rag_service import RAGService, get_rag_service
 from server.services.rerank_service import RerankService, get_rerank_service
+from server.services.sec_edgar_mcp import SECEDGARClient, sec_company_facts
+from server.services.roic_ai_mcp import RoicAIMCPTool, roic_ai
 
 __all__ = [
     "Chunk",
@@ -35,10 +38,16 @@ __all__ = [
     "get_document_processor",
     "EmbeddingService",
     "get_embedding_service",
+    "FinancialNewsMCPTool",
+    "financial_news",
     "OCRService",
     "get_ocr_service",
     "RAGService",
     "get_rag_service",
     "RerankService",
     "get_rerank_service",
+    "SECEDGARClient",
+    "sec_company_facts",
+    "RoicAIMCPTool",
+    "roic_ai",
 ]

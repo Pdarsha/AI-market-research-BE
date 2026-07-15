@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,13 +11,20 @@ from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.config import settings
 from server.services.citation_service import get_citation_service
+from server.services.financial_news_mcp import financial_news
 from server.services.rag_service import get_rag_service
+from server.services.sec_edgar_mcp import sec_company_facts
+from server.services.roic_ai_mcp import roic_ai
 from server.utils.auth import get_current_user
 from server.utils.helpers import (
     document_sources_only,
     resolve_active_document_ids,
     resolve_or_create_session,
     strip_citation_markers,
+)
+from server.utils.source_attribution import (
+    cited_document_names,
+    source_attribution_from_citations,
 )
 
 client = OpenAI(
@@ -150,7 +159,9 @@ def public_chat_session(
             "id": msg.id,
             "role": msg.role,
             "content": msg.content,
-            "source_documents": document_sources_only(msg.source_documents),
+            "source_documents": document_sources_only(cited_document_names(msg.citations)),
+            "citations": msg.citations,
+            "source_attribution": source_attribution_from_citations(msg.citations),
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
         for msg in conversation
@@ -219,8 +230,9 @@ def get_chat_session(
                 "document_ids": msg.document_ids,
                 "uploaded_document_ids": uploaded,
                 "attachments": attachments,
-                "source_documents": document_sources_only(msg.source_documents),
+                "source_documents": document_sources_only(cited_document_names(msg.citations)),
                 "citations": msg.citations,
+                "source_attribution": source_attribution_from_citations(msg.citations),
                 "created_at": msg.created_at.isoformat() if msg.created_at else None,
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }
@@ -335,6 +347,15 @@ def add_chat_message(
     source_documents = None
     citations = []
     web_sources = None
+    financial_news_response = None
+    financial_context = None
+    financial_sources: list[dict] = []
+    sec_company_facts_response = None
+    sec_context = None
+    sec_sources: list[dict] = []
+    roic_response = None
+    roic_context = None
+    roic_sources: list[dict] = []
     document_context = None
     web_context = None
     retrieved_chunks = None
@@ -344,51 +365,170 @@ def add_chat_message(
         is_document_question = rag.classify_requires_document(
             client, question=request.content, model=settings.LLM_MODEL
         )
-    requires_web = rag.classify_requires_web_search(
+
+    sec_tickers = rag.classify_sec_edgar_tickers(
+        client, question=request.content, model=settings.LLM_MODEL
+    )
+    sec_ticker = sec_tickers[0] if sec_tickers else None
+    sec_options = rag.sec_request_options(request.content) if sec_tickers else {}
+    roic_query = None if sec_tickers else rag.classify_roic_ai_query(
+        client, question=request.content, model=settings.LLM_MODEL
+    )
+    if not roic_query and not sec_tickers and rag.is_earnings_transcript_query(request.content):
+        # Transcript language has a deterministic meaning; active workspace
+        # documents must not silently convert it into a document-only request.
+        roic_query = rag.transcript_company_query(request.content)
+        logger.info("chat.message: transcript intent fallback routed to Roic query=%r", roic_query)
+    financial_ticker = None if (sec_tickers or roic_query) else rag.classify_financial_news_ticker(
+        client, question=request.content, model=settings.LLM_MODEL
+    )
+    explicit_document_request = any(
+        term in request.content.lower()
+        for term in (
+            "my document", "uploaded document", "uploaded file", "uploaded report",
+            "my report", "this report", "this pdf", "this file", "annual report",
+            "page ", "compare my", "compare the report", "compare with my",
+        )
+    )
+    if (sec_tickers or roic_query or financial_ticker) and not explicit_document_request:
+        # Attached files remain available as conversation state, but external
+        # intents do not retrieve or cite them unless the user asks for a hybrid comparison.
+        is_document_question = False
+    if not financial_ticker:
+        finance_words = {"article", "articles", "earnings", "financial", "market", "news", "sentiment"}
+        if any(word in request.content.lower() for word in finance_words):
+            for message in reversed(prior_messages):
+                for citation in message.citations or []:
+                    if citation.get("source_type") == "financial_news" and citation.get("ticker"):
+                        financial_ticker = citation["ticker"]
+                        break
+                if financial_ticker:
+                    break
+    # Finance queries use Alpha Vantage. Other live-information questions retain
+    # the existing generic web-search flow unchanged.
+    requires_web = not (financial_ticker or sec_ticker or roic_query) and rag.classify_requires_web_search(
         client, question=request.content, model=settings.LLM_MODEL
     )
 
-    if is_document_question:
+    def retrieve_documents():
+        """Retrieve document context without allowing a retrieval failure to fail chat."""
         try:
-            _, source_documents, retrieved_chunks = rag.retrieve_context_with_chunks(
+            _, sources, chunks = rag.retrieve_context_with_chunks(
                 db,
                 query=request.content,
                 user_id=str(current_user.id),
                 document_ids=document_ids,
                 top_k=3,
             )
-            # Build context with numbered citations so LLM can cite chunks
-            document_context = (
-                rag.build_context_with_citations(retrieved_chunks)
-                if retrieved_chunks
-                else None
-            )
+            return sources, chunks
         except Exception:
             logger.exception(
                 "chat.message: document retrieval failed; skipping RAG (chat=%s)",
                 chat_id,
             )
-            document_context, source_documents, retrieved_chunks = None, None, None
-        document_context = document_context or None
+            return None, None
+
+    def retrieve_financial_news():
+        return asyncio.run(
+            financial_news(
+                financial_ticker, limit=settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS
+            )
+        )
+
+    def retrieve_sec_company_facts():
+        async def _retrieve_all():
+            return await asyncio.gather(
+                *(sec_company_facts(ticker=ticker, **sec_options) for ticker in sec_tickers)
+            )
+        return asyncio.run(_retrieve_all())
+
+    def retrieve_roic_ai():
+        return asyncio.run(roic_ai(query=roic_query, transcript=True))
+
+    if is_document_question and (financial_ticker or sec_tickers or roic_query):
+        # Hybrid queries retrieve document context and the selected MCP source
+        # concurrently; neither source waits for the other.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            document_future = executor.submit(retrieve_documents)
+            mcp_future = executor.submit(
+                retrieve_sec_company_facts if sec_tickers else (retrieve_roic_ai if roic_query else retrieve_financial_news)
+            )
+            source_documents, retrieved_chunks = document_future.result()
+            if sec_tickers:
+                sec_company_facts_response = mcp_future.result()
+            elif roic_query:
+                roic_response = mcp_future.result()
+            else:
+                financial_news_response = mcp_future.result()
+    elif is_document_question:
+        source_documents, retrieved_chunks = retrieve_documents()
+    elif financial_ticker:
+        financial_news_response = retrieve_financial_news()
+    elif sec_tickers:
+        sec_company_facts_response = retrieve_sec_company_facts()
+    elif roic_query:
+        roic_response = retrieve_roic_ai()
+
+    if retrieved_chunks:
+        document_context = rag.build_context_with_citations(retrieved_chunks) or None
+    if source_documents:
         source_documents = document_sources_only(source_documents)
-        used_rag = document_context is not None
+    used_rag = document_context is not None
+
+    if financial_news_response:
+        financial_context, financial_sources = rag.build_financial_news_context(
+            financial_news_response, start_number=len(retrieved_chunks or []) + 1
+        )
+        financial_context = financial_context or None
+    if sec_company_facts_response:
+        sec_results = (
+            sec_company_facts_response
+            if isinstance(sec_company_facts_response, list)
+            else [sec_company_facts_response]
+        )
+        sec_context, sec_sources = rag.build_sec_contexts(
+            sec_results,
+            start_number=len(retrieved_chunks or []) + len(financial_sources) + 1,
+        )
+        sec_context = sec_context or None
+        if sec_context is None:
+            error_messages = [
+                result.get("error", {}).get("message")
+                for result in sec_results
+                if result.get("error", {}).get("message")
+            ]
+            sec_context = "SEC EDGAR data is unavailable: " + (
+                "; ".join(error_messages) or "no validated facts were returned."
+            )
+    if roic_response:
+        roic_context, roic_sources = rag.build_roic_context(
+            roic_response,
+            start_number=len(retrieved_chunks or []) + len(financial_sources) + len(sec_sources) + 1,
+            query=request.content,
+        )
+        roic_context = roic_context or None
 
     if requires_web:
         # Web results continue the document chunks' [n] numbering so the LLM sees
         # one unbroken citation sequence across the whole CONTEXT.
         web_context, web_sources = rag.web_search(
-            request.content, start_number=len(retrieved_chunks or []) + 1
+            request.content,
+            start_number=(
+                len(retrieved_chunks or []) + len(financial_sources) + len(sec_sources) + len(roic_sources) + 1
+            ),
         )
         web_context = web_context or None
         used_web = web_context is not None
 
     logger.info(
-        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s",
+        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s finance=%s sec=%s",
         chat_id,
         getattr(current_user, "id", None),
         len(document_ids),
         used_rag,
         used_web,
+        financial_ticker,
+        sec_tickers,
     )
 
     llm_history = [] if context_reason == "new_upload" else history
@@ -397,6 +537,9 @@ def add_chat_message(
         question=request.content,
         retrieved_context=document_context,
         web_context=web_context,
+        financial_news_context=financial_context,
+        sec_context=sec_context,
+        roic_context=roic_context,
     )
     raw_response = rag.generate_response(
         client, messages=messages, model=settings.LLM_MODEL
@@ -404,9 +547,12 @@ def add_chat_message(
     ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
     # The ordered source list must mirror the numbering the LLM saw in the CONTEXT:
-    # document chunks first ([1]..[n]), then web results ([n+1]...). Index i here is
-    # the source the model referenced as [i + 1].
+    # Document chunks, financial-news articles, and web results are retained in
+    # the exact numbered order shown to the LLM. Index i maps marker [i + 1].
     cited_sources: list = list(retrieved_chunks or [])
+    cited_sources.extend(financial_sources)
+    cited_sources.extend(sec_sources)
+    cited_sources.extend(roic_sources)
     if used_web:
         cited_sources.extend(web_sources or [])
 
@@ -418,6 +564,9 @@ def add_chat_message(
         # Nothing grounded the answer, so any marker the model emitted is a
         # hallucination — remove it rather than link it to a source that doesn't exist.
         ai_response = strip_citation_markers(ai_response)
+
+    source_documents = document_sources_only(cited_document_names(citations)) or None
+    source_attribution = source_attribution_from_citations(citations)
 
     assistant_message = crud.chat_message.create(
         db=db,
@@ -452,7 +601,11 @@ def add_chat_message(
                 "used_web_search": used_web,
                 "source_documents": source_documents,
                 "citations": citations,
+                "source_attribution": source_attribution,
                 "web_sources": web_sources,
+                "financial_news": financial_news_response,
+                "sec_company_facts": sec_company_facts_response,
+                "roic_ai": roic_response,
                 "follow_up_questions": follow_up_questions,
             },
             "message": "Message added and AI response created successfully.",

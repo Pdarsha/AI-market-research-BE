@@ -14,6 +14,7 @@ Page numbers and highlight rectangles are derived at read time from the PDF
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -25,6 +26,7 @@ from server.api_v1.deps import get_db
 from server.models.workspace import DocumentChunk
 from server.schemas.documents import ConversationExportRequest
 from server.services.pdf_export_service import conversation_to_pdf
+from server.services.roic_ai_mcp import roic_ai
 from server.utils.auth import get_current_user
 from server.utils.common import slugify
 from server.utils.helpers import (
@@ -45,6 +47,19 @@ citations_router = APIRouter(prefix="/citations", tags=["Citations"])
 # --------------------------------------------------------------------------- #
 # Citation details                                                            #
 # --------------------------------------------------------------------------- #
+
+
+@citations_router.get("/roic/transcript/{ticker}")
+def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
+    """API navigation target for a Roic.ai earnings-transcript citation."""
+    result = asyncio.run(roic_ai(query=ticker, limit=1, transcript=True))
+    transcript = result.get("latest_transcript")
+    if result.get("error") or not transcript:
+        raise HTTPException(status_code=404, detail="Roic.ai transcript not available")
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "error": None, "data": transcript, "message": "Roic.ai transcript fetched successfully."},
+    )
 
 
 @citations_router.get("/{citation_id}")
