@@ -18,6 +18,7 @@ import json
 import logging
 import re
 from functools import lru_cache
+from typing import Any
 
 import serpapi
 from sqlalchemy import text
@@ -27,6 +28,7 @@ from server.config import settings
 from server.models.workspace import DocumentChunk
 from server.services.embedding_service import EmbeddingService, get_embedding_service
 from server.services.rerank_service import get_rerank_service
+from server.services.financial_news_mcp import FinancialNewsMCPTool
 from server.utils.prompt import (
     FOLLOWUP_MARKER,
     ai_assistent,
@@ -550,15 +552,251 @@ class RAGService:
 
     @staticmethod
     def build_roic_context(data: dict, *, start_number: int, query: str = "") -> tuple[str, list[dict]]:
-        if data.get("error") or not data.get("results"):
-            return "", []
         lines, sources = [], []
-        for result in data["results"]:
+        
+        results = data.get("results") or []
+        resolved_ticker = results[0].get("ticker") if results else None
+        
+        roic_metrics_keywords = [
+            "gross margin", "gross profit margin", "gross%", "gross_margin", "grossmargin", "gross margins", "gross profit margins",
+            "operating margin", "operating profit margin", "ebit margin", "ebit_margin", "oper_margin", "operating_margin", "operatingmargin", "operating_profit_margin", "ebitmargin", "operating margins", "operating profit margins", "ebit margins",
+            "ebitda margin", "ebitda_margin", "ebitdamargin", "ebitda margins",
+            "ebitda", "ebitdavalue",
+            "net margin", "net profit margin", "net_margin", "netmargin", "net profit margins", "net margins", "profit margin", "profit margins",
+            "roic", "return_on_inv_capital", "returnoninvestedcapital", "return on invested capital",
+            "roe", "return_com_eqy", "returnonequity", "return on equity",
+            "roa", "return_on_asset", "returnonassets", "return on assets",
+            "return on capital", "return_on_cap", "return on capitals",
+            "free cash flow", "free_cash_flow", "cf_free_cash_flow", "fcf", "free cash flows",
+            "fcf yield", "fcf_yield", "fcf yields",
+            "pe ratio", "p/e ratio", "p/e", "pe", "pe_ratio", "pe ratios", "p/e ratios",
+            "ev/ebitda", "ev / ebitda", "ev_to_ttm_ebitda",
+            "price/sales", "price / sales", "p/s", "p/s ratio", "pr_to_sales_ratio", "price/sales ratio", "price/sales ratios",
+            "enterprise value", "enterprise_value", "enterprise values",
+            "market cap", "market_cap", "market capitalization", "market caps",
+            "current ratio", "current_ratio", "cur_ratio", "current ratios",
+            "quick ratio", "quick_ratio", "quick ratios",
+            "debt/equity", "debt to equity", "debt-to-equity", "tot_debt_to_tot_eqy", "debt/equity ratio", "debt/equity ratios",
+            "asset turnover", "asset_turnover", "asset turnovers",
+            "inventory turnover", "inventory_turnover", "invent_turn", "inventory turnovers",
+            "revenue growth", "revenue_growth", "revenue growths",
+            "ebitda growth", "ebitda_growth", "ebitda growths",
+            "eps growth", "eps_growth", "eps growths"
+        ]
+        query_lower = query.lower()
+        has_roic_metric = any(keyword in query_lower for keyword in roic_metrics_keywords)
+        
+        metrics = data.get("metrics")
+        
+        api_aliases = {
+            "gross_margin": ["gross_margin", "grossMargin", "gross_profit_margin", "gross%"],
+            "oper_margin": ["oper_margin", "operating_margin", "operatingMargin", "operating_profit_margin", "ebit_margin", "EBITMargin", "ebitmargin"],
+            "ebitda_margin": ["ebitda_margin", "ebitdaMargin", "ebitda_profit_margin"],
+            "profit_margin": ["profit_margin", "profitMargin", "net_margin", "netMargin", "net_profit_margin"],
+            "return_on_inv_capital": ["return_on_inv_capital", "returnOnInvCapital", "roic", "ROIC"],
+            "return_com_eqy": ["return_com_eqy", "returnComEqy", "roe", "ROE"],
+            "return_on_asset": ["return_on_asset", "returnOnAsset", "roa", "ROA"],
+            "return_on_cap": ["return_on_cap", "returnOnCap", "return_on_capital"],
+            "cf_free_cash_flow": ["cf_free_cash_flow", "cfFreeCashFlow", "free_cash_flow", "freeCashFlow"],
+            "fcf_yield": ["fcf_yield", "fcfYield", "free_cash_flow_yield"],
+            "pe_ratio": ["pe_ratio", "peRatio", "p_e_ratio", "pe", "PE"],
+            "ev_to_ttm_ebitda": ["ev_to_ttm_ebitda", "evToTtmEbitda", "ev_ebitda", "evEbitda", "ev/ebitda"],
+            "pr_to_sales_ratio": ["pr_to_sales_ratio", "prToSalesRatio", "price_sales", "priceSales", "price/sales"],
+            "enterprise_value": ["enterprise_value", "enterpriseValue", "ev", "EV"],
+            "market_cap": ["market_cap", "marketCap", "market_capitalization", "marketCapitalization"],
+            "cur_ratio": ["cur_ratio", "curRatio", "current_ratio", "currentRatio"],
+            "quick_ratio": ["quick_ratio", "quickRatio"],
+            "tot_debt_to_tot_eqy": ["tot_debt_to_tot_eqy", "totDebtToTotEqy", "debt_equity", "debtEquity", "debt/equity"],
+            "asset_turnover": ["asset_turnover", "assetTurnover"],
+            "invent_turn": ["invent_turn", "inventTurn", "inventory_turnover", "inventoryTurnover"],
+            "revenue_growth": ["revenue_growth", "revenueGrowth", "sales_growth", "salesGrowth"],
+            "ebitda_growth": ["ebitda_growth", "ebitdaGrowth"],
+            "eps_growth": ["eps_growth", "epsGrowth"],
+            "ebitda": ["ebitda", "EBITDA", "EBITDAValue", "ebitdaValue"]
+        }
+
+        def get_metric_val(record: dict, key: str) -> tuple[Any, str | None]:
+            if record.get(key) is not None:
+                return record[key], key
+            for alias in api_aliases.get(key, []):
+                if record.get(alias) is not None:
+                    return record[alias], alias
+                for k, v in record.items():
+                    if k.lower() == alias.lower() and v is not None:
+                        return v, k
+            return None, None
+
+        metric_keywords_map = {
+            ("gross margin", "gross profit margin", "gross%", "gross_margin", "grossmargin", "gross margins", "gross profit margins"): "gross_margin",
+            ("operating margin", "operating profit margin", "ebit margin", "ebit_margin", "oper_margin", "operating_margin", "operatingmargin", "operating_profit_margin", "ebitmargin", "operating margins", "operating profit margins", "ebit margins"): "oper_margin",
+            ("ebitda margin", "ebitda_margin", "ebitdamargin", "ebitda margins"): "ebitda_margin",
+            ("net margin", "net profit margin", "net_margin", "netmargin", "net profit margins", "net margins", "profit margin", "profit margins"): "profit_margin",
+            ("roic", "return_on_inv_capital", "returnoninvestedcapital", "return on invested capital"): "return_on_inv_capital",
+            ("roe", "return_com_eqy", "returnonequity", "return on equity"): "return_com_eqy",
+            ("roa", "return_on_asset", "returnonassets", "return on assets"): "return_on_asset",
+            ("return on capital", "return_on_cap", "return on capitals"): "return_on_cap",
+            ("free cash flow", "free_cash_flow", "cf_free_cash_flow", "fcf", "free cash flows"): "cf_free_cash_flow",
+            ("fcf yield", "fcf_yield", "fcf yields"): "fcf_yield",
+            ("pe ratio", "p/e ratio", "p/e", "pe", "pe_ratio", "pe ratios", "p/e ratios"): "pe_ratio",
+            ("ev/ebitda", "ev / ebitda", "ev_to_ttm_ebitda"): "ev_to_ttm_ebitda",
+            ("price/sales", "price / sales", "p/s", "p/s ratio", "pr_to_sales_ratio", "price/sales ratio", "price/sales ratios"): "pr_to_sales_ratio",
+            ("enterprise value", "enterprise_value", "enterprise values"): "enterprise_value",
+            ("market cap", "market_cap", "market capitalization", "market caps"): "market_cap",
+            ("current ratio", "current_ratio", "cur_ratio", "current ratios"): "cur_ratio",
+            ("quick ratio", "quick_ratio", "quick ratios"): "quick_ratio",
+            ("debt/equity", "debt to equity", "debt-to-equity", "tot_debt_to_tot_eqy", "debt/equity ratio", "debt/equity ratios"): "tot_debt_to_tot_eqy",
+            ("asset turnover", "asset_turnover", "asset turnovers"): "asset_turnover",
+            ("inventory turnover", "inventory_turnover", "invent_turn", "inventory turnovers"): "invent_turn",
+            ("revenue growth", "revenue_growth", "revenue growths"): "revenue_growth",
+            ("ebitda growth", "ebitda_growth", "ebitda growths"): "ebitda_growth",
+            ("eps growth", "eps_growth", "eps growths"): "eps_growth",
+            ("ebitda", "ebitdavalue"): "ebitda"
+        }
+
+        requested_and_missing = False
+        resolved_details = []
+        if has_roic_metric:
+            for terms, key in metric_keywords_map.items():
+                if any(term in query_lower for term in terms):
+                    has_metric = False
+                    field_found = None
+                    if metrics:
+                        sorted_years = sorted(metrics.keys(), key=int, reverse=True)
+                        for fy in sorted_years:
+                            record = metrics[fy]
+                            val, field_name = get_metric_val(record, key)
+                            if val is not None:
+                                has_metric = True
+                                field_found = field_name
+                                break
+                    if not has_metric:
+                        requested_and_missing = True
+                    resolved_details.append({
+                        "user_metric": [t for t in terms if t in query_lower][0],
+                        "normalized": key,
+                        "roic_field": field_found,
+                        "has_val": has_metric
+                    })
+
+            logger.info("roic.provider_response: ticker=%s years=%s", resolved_ticker, list(metrics.keys()) if metrics else None)
+            for detail in resolved_details:
+                logger.info(
+                    "roic.metric_resolution: user_metric=%r normalized=%s roic_field=%s has_val=%s fallback=%s",
+                    detail["user_metric"],
+                    detail["normalized"],
+                    detail["roic_field"],
+                    detail["has_val"],
+                    "none" if detail["has_val"] else "not_available"
+                )
+
+        if has_roic_metric and (requested_and_missing or not resolved_ticker or data.get("error")):
+            number = start_number + len(sources)
+            lines.append(f"[{number}] ROIC.ai Error:\nThe requested metric is not available from the ROIC AI data provider.")
+            sources.append({
+                "title": "ROIC.ai Data Provider Error",
+                "link": f"https://roic.ai/company/{resolved_ticker}" if resolved_ticker else "https://roic.ai/",
+                "snippet": "The requested metric is not available from the ROIC AI data provider.",
+                "publisher": "ROIC.ai",
+                "source_type": "roic_ai",
+                "ticker": resolved_ticker
+            })
+            return "\n\n".join(lines), sources
+
+        if data.get("error") or not results:
+            return "", []
+
+        for result in results:
             number = start_number + len(sources)
             title = result.get("company") or result.get("ticker")
             details = [f"[{number}] {title}", f"Ticker: {result.get('ticker')}", f"Exchange: {result.get('exchange') or 'Unknown'}"]
             lines.append("\n".join(details))
-            sources.append({"title": title, "link": None, "snippet": "Roic.ai company search result.", "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": result.get("ticker")})
+            sources.append({"title": title, "link": f"https://roic.ai/company/{result.get('ticker')}" if result.get('ticker') else "https://roic.ai/", "snippet": "Roic.ai company search result.", "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": result.get("ticker")})
+
+        if metrics:
+            sorted_years = sorted(metrics.keys(), key=int, reverse=True)[:3]
+            number = start_number + len(sources)
+            
+            metric_display_names = {
+                "gross_margin": "Gross Margin",
+                "oper_margin": "Operating Margin",
+                "ebitda_margin": "EBITDA Margin",
+                "profit_margin": "Net Margin",
+                "return_on_inv_capital": "ROIC",
+                "return_com_eqy": "ROE",
+                "return_on_asset": "ROA",
+                "return_on_cap": "Return on Capital",
+                "cf_free_cash_flow": "Free Cash Flow",
+                "fcf_yield": "FCF Yield",
+                "pe_ratio": "PE Ratio",
+                "ev_to_ttm_ebitda": "EV/EBITDA",
+                "pr_to_sales_ratio": "Price/Sales",
+                "enterprise_value": "Enterprise Value",
+                "market_cap": "Market Cap",
+                "cur_ratio": "Current Ratio",
+                "quick_ratio": "Quick Ratio",
+                "tot_debt_to_tot_eqy": "Debt/Equity",
+                "asset_turnover": "Asset Turnover",
+                "invent_turn": "Inventory Turnover",
+                "revenue_growth": "Revenue Growth",
+                "ebitda_growth": "EBITDA Growth",
+                "eps_growth": "EPS Growth",
+                "ebitda": "EBITDA"
+            }
+            
+            def format_value(name: str, val: Any) -> str:
+                if val is None:
+                    return "N/A"
+                if not isinstance(val, (int, float)):
+                    return str(val)
+                percentage_metrics = {
+                    "gross_margin", "ebitda_margin", "oper_margin", "profit_margin",
+                    "return_com_eqy", "return_on_asset", "return_on_cap", "return_on_inv_capital",
+                    "fcf_yield", "revenue_growth", "ebitda_growth", "eps_growth"
+                }
+                currency_metrics = {
+                    "ebitda", "cf_free_cash_flow", "enterprise_value", "market_cap"
+                }
+                if name in percentage_metrics:
+                    return f"{val:.2f}%"
+                if name in currency_metrics:
+                    abs_val = abs(val)
+                    prefix = "$"
+                    if abs_val >= 1e12:
+                        num_str = f"{abs_val / 1e12:.2f}"
+                        suffix = " trillion"
+                    elif abs_val >= 1e9:
+                        num_str = f"{abs_val / 1e9:.2f}"
+                        suffix = " billion"
+                    elif abs_val >= 1e6:
+                        num_str = f"{abs_val / 1e6:.2f}"
+                        suffix = " million"
+                    else:
+                        num_str = f"{abs_val:,.2f}"
+                        suffix = ""
+                    sign = "-" if val < 0 else ""
+                    return f"{sign}{prefix}{num_str}{suffix}"
+                return f"{val:.2f}"
+
+            metric_lines = [f"[{number}] ROIC.ai Financial Metrics for {data.get('query')} ({resolved_ticker}):"]
+            for fy in sorted_years:
+                record = metrics[fy]
+                metric_lines.append(f"Fiscal Year: {fy} (Currency: {record.get('currency') or 'USD'}):")
+                for key, display_name in metric_display_names.items():
+                    val, _ = get_metric_val(record, key)
+                    if val is not None:
+                        formatted_val = format_value(key, val)
+                        metric_lines.append(f"  - {display_name}: {formatted_val}")
+            
+            lines.append("\n".join(metric_lines))
+            sources.append({
+                "title": f"ROIC.ai Financial Metrics — {resolved_ticker}",
+                "link": f"https://roic.ai/company/{resolved_ticker}" if resolved_ticker else "https://roic.ai/",
+                "snippet": f"Consolidated financial metrics from ROIC.ai for {resolved_ticker}.",
+                "publisher": "ROIC.ai",
+                "source_type": "roic_ai",
+                "ticker": resolved_ticker
+            })
+
         transcript = data.get("latest_transcript")
         if transcript:
             terms = {word for word in re.findall(r"[a-z]{4,}", query.lower())} - {"what", "about", "latest", "management", "company"}
@@ -567,7 +805,7 @@ class RAGService:
             excerpt = "\n\n".join((relevant or paragraphs)[:8])[:12000]
             number = start_number + len(sources)
             lines.append(f"[{number}] Latest earnings-call transcript — {transcript['ticker']} Q{transcript.get('quarter')} {transcript.get('year')}\nDate: {transcript.get('date')}\n{excerpt}")
-            sources.append({"title": f"Roic.ai earnings-call transcript — {transcript['ticker']}", "link": None, "snippet": excerpt[:500], "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": transcript["ticker"], "navigation_type": "api", "navigation_target": f"/v1/citations/roic/transcript/{transcript['ticker']}"})
+            sources.append({"title": f"Roic.ai earnings-call transcript — {transcript['ticker']}", "link": f"https://roic.ai/transcripts/{transcript['ticker']}" if transcript.get('ticker') else "https://roic.ai/", "snippet": excerpt[:500], "publisher": "Roic.ai", "source_type": "roic_ai", "ticker": transcript["ticker"], "navigation_type": "api", "navigation_target": f"/v1/citations/roic/transcript/{transcript['ticker']}"})
         return "\n\n".join(lines), sources
 
     @staticmethod
@@ -604,6 +842,28 @@ class RAGService:
     def sec_request_options(question: str) -> dict:
         """Derive deterministic SEC tool options from an already-routed query."""
         lowered = question.lower()
+
+        # Check if the query is asking about the latest filing itself or financial metrics
+        metric_keywords = {
+            "revenue", "sales", "net income", "profit", "assets", "liabilities",
+            "equity", "cash", "eps", "earnings per share", "operating income", "free cash flow"
+        }
+        has_metrics = any(term in lowered for term in metric_keywords)
+
+        filing_keywords = {
+            "filing", "filings", "submission", "submissions", "filed", "history",
+            "date", "link", "links", "url", "urls", "recent", "latest", "last", "form"
+        }
+        has_filings = any(term in lowered for term in filing_keywords)
+
+        intent_phrases = ["latest sec filing", "latest submission", "most recent filing"]
+        is_filing_intent = any(phrase in lowered for phrase in intent_phrases)
+
+        if is_filing_intent or (has_filings and not has_metrics):
+            request_type = "submissions"
+        else:
+            request_type = "facts"
+
         years_match = re.search(r"last\s+(\d+)\s+years?", lowered)
         word_years = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
         if not years_match:
@@ -625,6 +885,8 @@ class RAGService:
             metrics.append("revenue")
         if "net income" in lowered or "profit" in lowered:
             metrics.append("net_income")
+        if "operating income" in lowered:
+            metrics.append("operating_income")
         if "balance sheet" in lowered:
             metrics.extend(["assets", "liabilities", "shareholders_equity"])
         else:
@@ -634,20 +896,58 @@ class RAGService:
                 metrics.append("liabilities")
             if "equity" in lowered:
                 metrics.append("shareholders_equity")
-        if "cash flow" in lowered:
+        if "free cash flow" in lowered:
+            metrics.append("free_cash_flow")
+        elif "cash flow" in lowered:
             metrics.extend(["operating_cash_flow", "investing_cash_flow", "financing_cash_flow"])
         elif "cash" in lowered:
             metrics.append("cash_and_equivalents")
         if "eps" in lowered or "earnings per share" in lowered:
             metrics.extend(["basic_eps", "diluted_eps"])
-        return {"period": period, "metrics": list(dict.fromkeys(metrics)) or None, "years": years}
+
+        return {
+            "period": period,
+            "metrics": list(dict.fromkeys(metrics)) or None,
+            "years": years,
+            "request_type": request_type
+        }
 
     @staticmethod
     def build_financial_news_context(
         news: dict, *, start_number: int
     ) -> tuple[str, list[dict]]:
         """Make normalized Alpha Vantage news compact and citation-addressable."""
-        lines: list[str] = []
+        summary_stats = news.get("sentiment_summary") or {}
+        ticker = news.get("ticker") or "Unknown"
+
+        # Build structured headers exactly as requested
+        header_lines = [
+            "Company:",
+            ticker,
+            "",
+            "Articles analyzed:",
+            str(summary_stats.get("articles_analyzed", 0)),
+            "",
+            "Average sentiment:",
+            f"{summary_stats.get('average_sentiment_score'):.2f}" if summary_stats.get("average_sentiment_score") is not None else "N/A",
+            "",
+            "Overall sentiment:",
+            str(summary_stats.get("overall_sentiment_label") or "Neutral"),
+            "",
+            "Positive:",
+            str(summary_stats.get("positive", 0)),
+            "",
+            "Neutral:",
+            str(summary_stats.get("neutral", 0)),
+            "",
+            "Negative:",
+            str(summary_stats.get("negative", 0)),
+            "",
+            "Articles:",
+            ""
+        ]
+
+        lines: list[str] = ["\n".join(header_lines)]
         sources: list[dict] = []
         for article in news.get("articles") or []:
             url = (article.get("url") or "").strip()
@@ -656,29 +956,43 @@ class RAGService:
             number = start_number + len(sources)
             title = article.get("title") or "Untitled article"
             summary = article.get("summary") or ""
-            details = [
-                f"[{number}] {title}",
+
+            pub_date = article.get("published_at") or "Unknown"
+            formatted_date = FinancialNewsMCPTool.format_pub_date(pub_date)
+
+            article_block = [
+                f"[{number}]",
+                "Title:",
+                title,
+                "",
+                "Published:",
+                formatted_date,
+                "",
+                "Source:",
+                article.get("publisher") or "Alpha Vantage",
+                "",
+                "Summary:",
                 summary,
-                f"Publisher: {article.get('publisher') or 'Alpha Vantage'}",
-                f"Published: {article.get('published_at') or 'Unknown'}",
-                f"Sentiment: {article.get('sentiment') or 'Unknown'}"
-                + (
-                    f" ({article['sentiment_score']})"
-                    if article.get("sentiment_score") is not None
-                    else ""
-                ),
-                f"URL: {url}",
+                "",
+                "Sentiment:",
+                article.get("sentiment") or "Unknown",
+                "",
+                "Relevance:",
+                str(article.get("relevance_score") or "0.0"),
+                "",
+                "URL:",
+                url
             ]
-            lines.append("\n".join(details))
+            lines.append("\n".join(article_block))
             sources.append(
                 {
                     "title": title,
                     "link": url,
                     "snippet": summary,
-                    "date": article.get("published_at"),
+                    "date": pub_date,
                     "publisher": article.get("publisher") or "Alpha Vantage",
                     "source_type": "financial_news",
-                    "ticker": news.get("ticker"),
+                    "ticker": ticker,
                 }
             )
         return "\n\n".join(lines), sources
@@ -688,11 +1002,65 @@ class RAGService:
         """Format normalized SEC facts as one cited, compact context block."""
         if sec_data.get("error"):
             return "", []
+
+        cik = sec_data.get("cik")
+        company = sec_data.get("company")
+        ticker = sec_data.get("ticker")
+        cik_numeric = str(int(cik)) if cik else ""
+
+        if sec_data.get("request_type") == "submissions":
+            latest = sec_data.get("latest_filing") or {}
+            form = latest.get("form") or "Unknown"
+            filing_date = latest.get("filing_date") or "Unknown"
+            period_end = latest.get("period_end") or "Unknown"
+            description = latest.get("description") or "Unknown"
+            link = latest.get("link") or "Unknown"
+
+            lines = [
+                f"[{start_number}] Company: {company}",
+                f"Ticker: {ticker}",
+                f"CIK: {cik}",
+                "Request Type: Submissions",
+                f"Filing Type: {form}",
+                f"Filing Date: {filing_date}",
+                f"Period End: {period_end}",
+                f"Filing Description: {description}",
+                f"SEC Filing Link: {link}",
+                f"Brief Summary: This is the latest official SEC submission ({form}) filed by {company} on {filing_date} for the period ended {period_end}.",
+            ]
+
+            if sec_data.get("latest_financial_filing"):
+                lff = sec_data["latest_financial_filing"]
+                lines.append("\nLatest Financial Filing (10-Q or 10-K):")
+                lines.append(f"Filing Type: {lff.get('form') or 'Unknown'}")
+                lines.append(f"Filing Date: {lff.get('filing_date') or 'Unknown'}")
+                lines.append(f"Period End: {lff.get('period_end') or 'Unknown'}")
+                lines.append(f"Filing Description: {lff.get('description') or 'Unknown'}")
+                lines.append(f"SEC Filing Link: {lff.get('link') or 'Unknown'}")
+
+            if sec_data.get("recent_filings"):
+                lines.append("\nRecent Filings History:")
+                for rf in sec_data["recent_filings"][:5]:
+                    lines.append(f"- Form {rf.get('form')} filed on {rf.get('filing_date')} (Period End: {rf.get('period_end')})")
+
+            f_url = latest.get("filing_url") or link
+            if not f_url or f_url == "Unknown":
+                f_url = f"https://www.sec.gov/edgar/data/{cik_numeric}" if cik_numeric else "https://www.sec.gov/edgar/searchedgar/companysearch"
+
+            return "\n".join(lines), [{
+                "title": f"SEC EDGAR: {company} ({form})",
+                "link": f_url,
+                "snippet": f"Company: {company}\nFiling Type: {form}\nFiled: {filing_date}\nPeriod End: {period_end}",
+                "publisher": "SEC EDGAR",
+                "source_type": "sec_edgar",
+                "ticker": ticker,
+            }]
+
         financials = sec_data.get("financials") or {}
         lines = [
-            f"[{start_number}] Company: {sec_data.get('company')}",
-            f"Ticker: {sec_data.get('ticker')}",
-            f"CIK: {sec_data.get('cik')}",
+            f"[{start_number}] Company: {company}",
+            f"Ticker: {ticker}",
+            f"CIK: {cik}",
             f"Report: {sec_data.get('report_type')} ended {sec_data.get('period_end')}",
             f"Filed: {sec_data.get('filed_date')}",
         ]
@@ -702,25 +1070,68 @@ class RAGService:
                 continue
             has_financials = True
             label = name.replace("_", " ").title()
-            if "history" in data:
-                values = [
-                    f"{item['period_end']}: {item['value']} {item['currency']}"
-                    for item in data["history"]
-                ]
-                lines.append(f"{label}: " + "; ".join(values))
+
+            if isinstance(data, dict) and "error" in data:
+                lines.append(f"{label}: {data['error']}")
+            elif "history" in data:
+                values = []
+                for item in data["history"]:
+                    val_display = item.get("formatted_value") or f"{item['value']} {item.get('unit') or item.get('currency')}"
+                    metadata_str = f"Filing Type: {item.get('filing_type') or item.get('report_type')}, Fiscal Year: {item.get('fiscal_year')}, Fiscal Quarter: {item.get('fiscal_quarter') or 'N/A'}, Period End: {item.get('period_end')}, Filed Date: {item.get('filed_date')}"
+                    val_str = f"{item['period_end']}: {val_display} ({metadata_str}, Source: {item.get('sec_source')})"
+                    values.append(val_str)
+                lines.append(f"{label} History: " + "; ".join(values))
             else:
-                lines.append(f"{label}: {data['value']} {data['currency']}")
+                val_display = data.get("formatted_value") or f"{data['value']} {data.get('unit') or data.get('currency')}"
+                metadata_str = f"Filing Type: {data.get('filing_type') or data.get('report_type')}, Fiscal Year: {data.get('fiscal_year')}, Fiscal Quarter: {data.get('fiscal_quarter') or 'N/A'}, Period End: {data.get('period_end')}, Filed Date: {data.get('filed_date')}"
+                val_str = f"{val_display} ({metadata_str}, Source: {data.get('sec_source')})"
+                if "warning" in data:
+                    val_str += f" (Warning: {data['warning']})"
+                lines.append(f"{label}: {val_str}")
+
         if not has_financials:
             return "", []
-        cik = sec_data.get("cik")
-        return "\n".join(lines), [{
-            "title": f"SEC EDGAR company facts — {sec_data.get('company')}",
-            "link": f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
-            "snippet": "Official SEC XBRL company facts.",
-            "publisher": "SEC EDGAR",
-            "source_type": "sec_edgar",
-            "ticker": sec_data.get("ticker"),
-        }]
+
+        # Extract unique filing URLs from the fact records
+        unique_filings = {}
+        for name, data in financials.items():
+            if not isinstance(data, dict):
+                continue
+            if "history" in data:
+                for item in data["history"]:
+                    f_key = (item.get("filing_type"), item.get("filed_date"))
+                    if f_key not in unique_filings and item.get("filing_url"):
+                        unique_filings[f_key] = item
+            elif data.get("filing_url"):
+                f_key = (data.get("filing_type"), data.get("filed_date"))
+                if f_key not in unique_filings:
+                    unique_filings[f_key] = data
+
+        sec_sources = []
+        if unique_filings:
+            for (f_type, f_date), item in unique_filings.items():
+                p_end = item.get("period_end")
+                f_url = item.get("filing_url") or item.get("filing_index_url") or item.get("filing_html_url")
+                sec_sources.append({
+                    "title": f"SEC EDGAR: {company} ({f_type})",
+                    "link": f_url,
+                    "snippet": f"Company: {company}\nFiling Type: {f_type}\nFiled: {f_date}\nPeriod End: {p_end}",
+                    "publisher": "SEC EDGAR",
+                    "source_type": "sec_edgar",
+                    "ticker": ticker,
+                })
+        else:
+            fallback_url = f"https://www.sec.gov/edgar/data/{cik_numeric}" if cik_numeric else "https://www.sec.gov/edgar/searchedgar/companysearch"
+            sec_sources.append({
+                "title": f"SEC EDGAR: {company}",
+                "link": fallback_url,
+                "snippet": f"Company: {company}\nOfficial SEC EDGAR filings page.",
+                "publisher": "SEC EDGAR",
+                "source_type": "sec_edgar",
+                "ticker": ticker,
+            })
+
+        return "\n".join(lines), sec_sources
 
     @staticmethod
     def build_sec_contexts(sec_results: list[dict], *, start_number: int) -> tuple[str, list[dict]]:

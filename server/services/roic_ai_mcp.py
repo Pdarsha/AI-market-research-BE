@@ -68,6 +68,11 @@ class RoicAIMCPTool:
                         result["latest_transcript"] = self._normalize_transcript(
                             ticker, transcript_response.json()
                         )
+                # Fetch financial metrics/ratios for the resolved ticker
+                if result["results"]:
+                    ticker = result["results"][0].get("ticker")
+                    if ticker:
+                        result["metrics"] = await self._fetch_financial_metrics(client, ticker)
             self._write_cache(key, result)
             logger.info("roic.search: query=%r results=%d cache=false", query, len(result["results"]))
             return {**result, "cached": False}
@@ -77,6 +82,93 @@ class RoicAIMCPTool:
         except Exception:
             logger.exception("roic.search: request failed query=%r", query)
             return self._error("unavailable", "Roic.ai is temporarily unavailable.")
+
+    async def _fetch_financial_metrics(self, client: httpx.AsyncClient, ticker: str) -> dict[str, Any] | None:
+        """Fetch all fundamental ratios and statements for ticker concurrently and merge them by year."""
+        import asyncio
+        endpoints = {
+            "profitability": f"https://api.roic.ai/v2/fundamental/ratios/profitability/{ticker}",
+            "credit": f"https://api.roic.ai/v2/fundamental/ratios/credit/{ticker}",
+            "liquidity": f"https://api.roic.ai/v2/fundamental/ratios/liquidity/{ticker}",
+            "working_capital": f"https://api.roic.ai/v2/fundamental/ratios/working-capital/{ticker}",
+            "multiples": f"https://api.roic.ai/v2/fundamental/multiples/{ticker}",
+            "income_statement": f"https://api.roic.ai/v2/fundamental/income-statement/{ticker}",
+            "balance_sheet": f"https://api.roic.ai/v2/fundamental/balance-sheet/{ticker}",
+            "cash_flow": f"https://api.roic.ai/v2/fundamental/cash-flow/{ticker}",
+        }
+
+        async def fetch_one(name, url):
+            try:
+                resp = await client.get(url, params={"apikey": self._api_key})
+                if resp.status_code == 429:
+                    await asyncio.sleep(1)
+                    resp = await client.get(url, params={"apikey": self._api_key})
+                if resp.status_code == 200:
+                    return name, resp.json()
+                return name, None
+            except Exception:
+                return name, None
+
+        tasks = [fetch_one(name, url) for name, url in endpoints.items()]
+        fetched = await asyncio.gather(*tasks)
+        fetched_dict = dict(fetched)
+
+        # Merge by fiscal_year
+        merged_by_year = {}
+        for category, data in fetched_dict.items():
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                fy = item.get("fiscal_year")
+                if not fy:
+                    continue
+                fy_str = str(fy)
+                if fy_str not in merged_by_year:
+                    merged_by_year[fy_str] = {}
+                merged_by_year[fy_str].update(item)
+
+        if not merged_by_year:
+            return None
+
+        # Compute derived metrics
+        for fy_str, record in merged_by_year.items():
+            if "pr_to_free_cash_flow" in record and record["pr_to_free_cash_flow"]:
+                record["fcf_yield"] = (1.0 / record["pr_to_free_cash_flow"]) * 100
+            
+            if "bs_sh_out" in record and "pr_last" in record:
+                record["market_cap"] = record["bs_sh_out"] * record["pr_last"]
+            
+            if "is_sales_revenue_turnover" in record and "bs_tot_asset" in record and record["bs_tot_asset"]:
+                record["asset_turnover"] = record["is_sales_revenue_turnover"] / record["bs_tot_asset"]
+
+        sorted_years = sorted(merged_by_year.keys(), key=int)
+        for i in range(1, len(sorted_years)):
+            curr_yr = sorted_years[i]
+            prev_yr = sorted_years[i-1]
+            curr_rec = merged_by_year[curr_yr]
+            prev_rec = merged_by_year[prev_yr]
+
+            # Revenue growth
+            if "is_sales_revenue_turnover" in curr_rec and "is_sales_revenue_turnover" in prev_rec:
+                prev_val = prev_rec["is_sales_revenue_turnover"]
+                if prev_val:
+                    curr_rec["revenue_growth"] = ((curr_rec["is_sales_revenue_turnover"] - prev_val) / prev_val) * 100
+
+            # EBITDA growth
+            curr_ebitda = curr_rec.get("ebitda")
+            prev_ebitda = prev_rec.get("ebitda")
+            if curr_ebitda is not None and prev_ebitda:
+                curr_rec["ebitda_growth"] = ((curr_ebitda - prev_ebitda) / prev_ebitda) * 100
+
+            # EPS growth
+            if "diluted_eps" in curr_rec and "diluted_eps" in prev_rec:
+                prev_val = prev_rec["diluted_eps"]
+                if prev_val:
+                    curr_rec["eps_growth"] = ((curr_rec["diluted_eps"] - prev_val) / prev_val) * 100
+
+        return merged_by_year
 
     @staticmethod
     def _normalize(query: str, payload: Any, limit: int) -> dict[str, Any]:

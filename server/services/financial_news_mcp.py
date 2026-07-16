@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -21,6 +22,7 @@ from server.config import settings
 
 logger = logging.getLogger(__name__)
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
+RELEVANCE_THRESHOLD = 0.6
 
 
 @dataclass
@@ -45,8 +47,10 @@ class FinancialNewsMCPTool:
     async def financial_news(self, ticker: str, limit: int = 10) -> dict[str, Any]:
         """Return normalized news for ``ticker``.
 
-        Results are cached by ticker for the configured TTL.  Network I/O runs in
-        a worker thread so an async caller can fetch financial news alongside RAG.
+        The complete Alpha Vantage feed is normalized, filtered for the requested
+        ticker, ranked, and aggregated before the requested number of articles is
+        returned. Network I/O runs in a worker thread so an async caller can fetch
+        financial news alongside RAG.
         """
         ticker = ticker.strip().upper()
         if not ticker or not ticker.replace(".", "").replace("-", "").isalnum():
@@ -82,7 +86,7 @@ class FinancialNewsMCPTool:
 
     def _fetch(self, ticker: str) -> dict[str, Any]:
         query = urlencode(
-            {"function": "NEWS_SENTIMENT", "tickers": ticker, "apikey": self._api_key}
+            {"function": "NEWS_SENTIMENT", "tickers": ticker, "limit": "200", "apikey": self._api_key}
         )
         with urlopen(f"{ALPHA_VANTAGE_URL}?{query}", timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -94,9 +98,11 @@ class FinancialNewsMCPTool:
         return self._normalize(ticker, data)
 
     @classmethod
-    def _normalize(cls, ticker: str, data: dict[str, Any]) -> dict[str, Any]:
-        articles: list[dict[str, Any]] = []
-        for item in data.get("feed") or []:
+    def filter_by_ticker(cls, feed: list[dict[str, Any]], ticker: str, relevance_threshold: float = 0.6) -> list[dict[str, Any]]:
+        """Filter feed items for the requested ticker, extracting the ticker-specific metadata and applying the relevance threshold."""
+        articles = []
+        ticker = ticker.strip().upper()
+        for item in feed:
             if not isinstance(item, dict):
                 continue
             ticker_sentiment = next(
@@ -105,37 +111,183 @@ class FinancialNewsMCPTool:
                     for row in item.get("ticker_sentiment") or []
                     if str(row.get("ticker", "")).upper() == ticker
                 ),
-                {},
+                None,
             )
-            score = ticker_sentiment.get(
-                "ticker_sentiment_score", item.get("overall_sentiment_score")
-            )
-            try:
-                score = float(score) if score is not None else None
-            except (TypeError, ValueError):
-                score = None
+            if not ticker_sentiment:
+                continue
+            relevance = cls._as_float(ticker_sentiment.get("relevance_score"))
+            if relevance is None or relevance < relevance_threshold:
+                continue
+
+            # Read ticker sentiment and overall sentiment scores/labels
+            ticker_score = cls._as_float(ticker_sentiment.get("ticker_sentiment_score"))
+            ticker_label = ticker_sentiment.get("ticker_sentiment_label")
+            overall_score = cls._as_float(item.get("overall_sentiment_score"))
+            overall_label = item.get("overall_sentiment_label")
+
+            # Use ticker sentiment score/label with overall as fallback
+            score = ticker_score if ticker_score is not None else overall_score
+            sentiment = ticker_label if ticker_label is not None else overall_label
+
             articles.append(
                 {
                     "title": item.get("title") or "",
                     "summary": item.get("summary") or "",
                     "url": item.get("url") or "",
                     "published_at": item.get("time_published") or "",
-                    "sentiment": ticker_sentiment.get(
-                        "ticker_sentiment_label", item.get("overall_sentiment_label")
-                    ),
+                    "sentiment": sentiment or "Unknown",
                     "sentiment_score": score,
+                    "ticker_sentiment_score": ticker_score,
+                    "ticker_sentiment_label": ticker_label,
+                    "overall_sentiment": overall_label,
+                    "overall_sentiment_score": overall_score,
+                    "relevance_score": relevance,
                     "publisher": item.get("source") or "Alpha Vantage",
                 }
             )
-        return {"source": "Alpha Vantage", "ticker": ticker, "articles": articles}
+        return articles
+
+    @classmethod
+    def rank_articles(cls, articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Sort articles using:
+        1. relevance_score (highest first)
+        2. publication time (newest first)
+        """
+        ranked = list(articles)
+        ranked.sort(
+            key=lambda article: (
+                article.get("relevance_score") or 0.0,
+                cls._publication_sort_value(article.get("published_at") or ""),
+            ),
+            reverse=True,
+        )
+        return ranked
 
     @staticmethod
-    def _empty(ticker: str) -> dict[str, Any]:
-        return {"source": "Alpha Vantage", "ticker": ticker, "articles": []}
+    def format_pub_date(value: str) -> str:
+        """Format the publication date to YYYY-MM-DD format."""
+        if not value:
+            return "Unknown"
+        for pattern in ("%Y%m%dT%H%M%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(value[: len(datetime.now().strftime(pattern))], pattern)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        # Fallback: if it's 8 digits like 20260712
+        if len(value) >= 8 and value[:8].isdigit():
+            return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+        return value
+
+    @classmethod
+    def calculate_sentiment_statistics(cls, articles: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate sentiment counts and average score based on article metadata."""
+        counts = {"positive": 0, "neutral": 0, "negative": 0}
+        scores: list[float] = []
+
+        for article in articles:
+            label = str(article.get("sentiment") or "").lower()
+            if "bullish" in label or label in {"positive", "pos"}:
+                counts["positive"] += 1
+            elif "bearish" in label or label in {"negative", "neg"}:
+                counts["negative"] += 1
+            else:
+                counts["neutral"] += 1
+            if article.get("sentiment_score") is not None:
+                scores.append(article["sentiment_score"])
+
+        average = sum(scores) / len(scores) if scores else None
+
+        # Calculate date range
+        dates = []
+        for article in articles:
+            pub_date = cls.format_pub_date(article.get("published_at"))
+            if pub_date and pub_date != "Unknown":
+                dates.append(pub_date)
+        if dates:
+            min_date = min(dates)
+            max_date = max(dates)
+            date_range = f"{min_date} to {max_date}" if min_date != max_date else min_date
+        else:
+            date_range = "Unknown"
+
+        return {
+            **counts,
+            "average_sentiment_score": average,
+            "overall_sentiment_label": cls._aggregate_label(average, counts),
+            "articles_analyzed": len(articles),
+            "date_range": date_range,
+        }
+
+    @classmethod
+    def _normalize(cls, ticker: str, data: dict[str, Any]) -> dict[str, Any]:
+        feed = data.get("feed") or []
+        filtered = cls.filter_by_ticker(feed, ticker, relevance_threshold=RELEVANCE_THRESHOLD)
+        ranked = cls.rank_articles(filtered)
+        return {
+            "source": "Alpha Vantage",
+            "ticker": ticker,
+            "articles": ranked,
+            "sentiment_summary": cls.calculate_sentiment_statistics(ranked),
+        }
 
     @staticmethod
-    def _with_limit(payload: dict[str, Any], limit: int, *, cached: bool) -> dict[str, Any]:
-        return {**payload, "articles": payload.get("articles", [])[:limit], "cached": cached}
+    def _as_float(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _publication_sort_value(value: str) -> float:
+        """Return a sortable timestamp while tolerating Alpha Vantage variants."""
+        if not value:
+            return 0.0
+        for pattern in ("%Y%m%dT%H%M%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value[: len(datetime.now().strftime(pattern))], pattern).timestamp()
+            except ValueError:
+                continue
+        # Alpha Vantage's canonical timestamp is lexically chronological.
+        return float("".join(character for character in value if character.isdigit()) or 0)
+
+    @staticmethod
+    def _aggregate_label(average: float | None, counts: dict[str, int]) -> str:
+        """Derive a deterministic aggregate label from API ticker metadata."""
+        if average is None:
+            if counts["positive"] > counts["negative"]:
+                return "Bullish"
+            if counts["negative"] > counts["positive"]:
+                return "Bearish"
+            return "Neutral"
+        if average >= 0.35:
+            return "Bullish"
+        if average >= 0.15:
+            return "Somewhat Bullish"
+        if average <= -0.35:
+            return "Bearish"
+        if average <= -0.15:
+            return "Somewhat Bearish"
+        return "Neutral"
+
+    @classmethod
+    def _empty(cls, ticker: str) -> dict[str, Any]:
+        return {
+            "source": "Alpha Vantage",
+            "ticker": ticker,
+            "articles": [],
+            "sentiment_summary": cls.calculate_sentiment_statistics([]),
+        }
+
+    @classmethod
+    def _with_limit(cls, payload: dict[str, Any], limit: int, *, cached: bool) -> dict[str, Any]:
+        articles = payload.get("articles", [])[:limit]
+        return {
+            **payload,
+            "articles": articles,
+            "sentiment_summary": cls.calculate_sentiment_statistics(articles),
+            "cached": cached,
+        }
 
 
 _financial_news_tool = FinancialNewsMCPTool()
