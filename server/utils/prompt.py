@@ -87,7 +87,7 @@ NO
 
 
 def augmented_system_prompt(
-    document_context=None, web_context=None, financial_news_context=None, sec_context=None, roic_context=None
+    document_context=None, web_context=None, financial_news_context=None, sec_context=None, roic_context=None, companies_house_context=None
 ):
     """System prompt that grounds the answer in whatever context is available.
 
@@ -108,6 +108,8 @@ def augmented_system_prompt(
         sections.append("=== OFFICIAL SEC EDGAR COMPANY FACTS ===\n" + str(sec_context))
     if roic_context:
         sections.append("=== ROIC.AI COMPANY DATA ===\n" + str(roic_context))
+    if companies_house_context:
+        sections.append("=== COMPANIES HOUSE UK REGISTRY DATA ===\n" + str(companies_house_context))
     context_block = "\n\n".join(sections) if sections else "None"
 
     cited_kinds = []
@@ -121,6 +123,8 @@ def augmented_system_prompt(
         cited_kinds.append("official SEC EDGAR company facts")
     if roic_context:
         cited_kinds.append("Roic.ai company data")
+    if companies_house_context:
+        cited_kinds.append("Companies House UK registry data")
 
     if cited_kinds:
         citation_rules = f"""
@@ -450,6 +454,23 @@ What did Apple's CEO say during the latest earnings call? -> YES:AAPL
 What guidance did Microsoft provide? -> YES:MSFT
 Summarize Nvidia's latest conference call. -> YES:NVDA
 What is Nvidia's SEC revenue? -> NO
+"""
+
+
+def companies_house_classification_prompt():
+    return """You route questions about UK companies to the Companies House registry tool.
+Return only YES:ENTITY or NO. Use YES for questions about UK company status, registered address,
+directors, officers, filing history, incorporation details, or registration info of a UK company.
+ENTITY must be the raw query text (name or number, e.g. Barclays or 01026167) unchanged/unparsed.
+Use NO for US public companies, stock prices, live financial news, or general investing education.
+
+Examples:
+Who are the directors of Barclays? -> YES:Barclays
+What is the registered address of company 01026167? -> YES:01026167
+Show company status for BP plc -> YES:BP plc
+What is Apple's revenue? -> NO
+Latest Nvidia news -> NO
+What is a balance sheet? -> NO
 """
 
 

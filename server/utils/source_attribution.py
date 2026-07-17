@@ -9,6 +9,7 @@ def source_attribution_from_citations(citations: list[dict] | None) -> dict:
         "alpha_vantage": [],
         "roic_ai": [],
         "web": [],
+        "companies_house": [],
         "other_mcp": [],
     }
     seen: dict[str, set] = {name: set() for name in groups}
@@ -22,6 +23,7 @@ def source_attribution_from_citations(citations: list[dict] | None) -> dict:
             "financial_news": "alpha_vantage",
             "roic_ai": "roic_ai",
             "web": "web",
+            "companies_house": "companies_house",
         }.get(source_type, "other_mcp")
         key = citation.get("chunk_id") or citation.get("url") or citation.get("title")
         if key not in seen[group]:

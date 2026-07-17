@@ -39,6 +39,7 @@ from server.utils.prompt import (
     sec_edgar_classification_prompt,
     roic_ai_classification_prompt,
     web_search_classification_prompt,
+    companies_house_classification_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,7 @@ class RAGService:
         financial_news_context: str | None = None,
         sec_context: str | None = None,
         roic_context: str | None = None,
+        companies_house_context: str | None = None,
     ) -> list[dict]:
         """Prompt generation.
 
@@ -291,6 +293,7 @@ class RAGService:
             or financial_news_context is not None
             or sec_context is not None
             or roic_context is not None
+            or companies_house_context is not None
         ):
             system_prompt = augmented_system_prompt(
                 document_context=retrieved_context,
@@ -298,6 +301,7 @@ class RAGService:
                 financial_news_context=financial_news_context,
                 sec_context=sec_context,
                 roic_context=roic_context,
+                companies_house_context=companies_house_context,
             )
         else:
             system_prompt = ai_assistent()
@@ -521,6 +525,26 @@ class RAGService:
             return match.group(1) if match else None
         except Exception:
             logger.exception("rag.classify_roic: classification failed")
+            return None
+
+    @staticmethod
+    def classify_companies_house_query(client, question: str, model: str) -> str | None:
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": companies_house_classification_prompt()},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=16,
+                temperature=0,
+            )
+            answer = (completion.choices[0].message.content or "").strip()
+            if answer.upper().startswith("YES:"):
+                return answer[4:].strip()
+            return None
+        except Exception:
+            logger.exception("rag.classify_companies_house: classification failed")
             return None
 
     @staticmethod
@@ -996,6 +1020,137 @@ class RAGService:
                 }
             )
         return "\n\n".join(lines), sources
+
+    @staticmethod
+    def build_companies_house_context(
+        data: dict, *, start_number: int
+    ) -> tuple[str, list[dict]]:
+        """Format Companies House search results and resolved profile into a combined cited context block."""
+        if not data:
+            return "", []
+
+        number = start_number
+        query = data.get("query") or "Unknown query"
+
+        # If data represents no results found
+        if "message" in data:
+            link = "https://find-and-update.company-information.service.gov.uk"
+            sources = [{
+                "title": "Companies House: No Records Found",
+                "link": link,
+                "snippet": f"No Companies House records were found matching '{query}'.",
+                "publisher": "Companies House",
+                "source_type": "companies_house",
+            }]
+            return f"[{number}] Companies House Registry:\nNo Companies House records were found matching '{query}'.", sources
+
+        summary = data.get("summary")
+        resolved_number = data.get("resolved_company_number")
+
+        lines = [
+            f"[{number}] Companies House Registry Results for query: '{query}'"
+        ]
+
+        if summary:
+            company_name = summary.get("company_name") or "Unknown Company"
+            comp_num = summary.get("company_number") or "Unknown"
+            status = summary.get("status") or "Unknown"
+            company_type = summary.get("company_type") or "Unknown"
+            inc_date = summary.get("incorporated_on") or "Unknown"
+            
+            office = summary.get("registered_office") or {}
+            street = office.get("street") or "N/A"
+            city = office.get("city") or "N/A"
+            postal_code = office.get("postal_code") or "N/A"
+            country = office.get("country") or "N/A"
+
+            lines.extend([
+                "\nResolved Company:",
+                f"  - Company Name: {company_name}",
+                f"  - Company Number: {comp_num}",
+                f"  - Company Type: {company_type}",
+                f"  - Resolution Method: {summary.get('resolution_method')}",
+                "\nCompany Status:",
+                f"  - Status: {status}",
+            ])
+            
+            accs = summary.get("accounts") or {}
+            conf = summary.get("confirmation_statement") or {}
+            accs_due = accs.get("next_due") or "N/A"
+            accs_overdue = "Overdue" if accs.get("overdue") else "Up to date"
+            conf_due = conf.get("next_due") or "N/A"
+            conf_overdue = "Overdue" if conf.get("overdue") else "Up to date"
+
+            lines.extend([
+                f"  - Accounts Status: {accs_overdue} (Next due: {accs_due})",
+                f"  - Confirmation Statement Status: {conf_overdue} (Next due: {conf_due})",
+                f"\nIncorporated: {inc_date}",
+            ])
+
+            history = summary.get("name_history") or []
+            if history:
+                lines.append("\nCompany Name History:")
+                for name_entry in history:
+                    lines.append(f"  - Previous Name: {name_entry.get('name')} (Effective: {name_entry.get('effective_from')} to {name_entry.get('ceased_on')})")
+
+            lines.extend([
+                "\nRegistered Office:",
+                f"  - Street: {street}",
+                f"  - City: {city}",
+                f"  - Postal Code: {postal_code}",
+                f"  - Country: {country}",
+            ])
+
+            sic_codes = summary.get("sic_codes") or []
+            if sic_codes:
+                lines.append("\nSIC Codes:")
+                for sic in sic_codes:
+                    lines.append(f"  - {sic.get('code')}: {sic.get('description')}")
+            else:
+                lines.append("\nSIC Codes: None listed")
+
+            officers = summary.get("officers") or []
+            if officers:
+                lines.append("\nCurrent Officers:")
+                for off in officers:
+                    lines.append(f"  - Name: {off.get('name')}, Role: {off.get('role')}, Appointed On: {off.get('appointed_on')}")
+            else:
+                lines.append("\nCurrent Officers: None listed")
+
+            lines.append(f"\nSource: {summary.get('source_url')}")
+
+            other_matches = summary.get("other_matches") or []
+            if other_matches:
+                lines.append("\nOther Search Matches:")
+                for item in other_matches:
+                    title = item.get("title") or "Unknown"
+                    num = item.get("company_number") or "Unknown"
+                    status_str = item.get("company_status") or "Unknown"
+                    addr = item.get("address_snippet") or "Unknown Address"
+                    lines.append(f"  - {title} (Company Number: {num}, Status: {status_str}, Address: {addr})")
+        else:
+            lines.append("No resolved company profile could be retrieved.")
+
+        if resolved_number:
+            link = f"https://find-and-update.company-information.service.gov.uk/company/{resolved_number}"
+            company_name_title = "Unknown Company"
+            if summary:
+                company_name_title = summary.get("company_name") or "Unknown Company"
+            title_text = f"Companies House: {company_name_title}"
+        else:
+            link = "https://find-and-update.company-information.service.gov.uk"
+            title_text = f"Companies House Search: {query}"
+
+        sources = [{
+            "title": title_text,
+            "link": link,
+            "snippet": f"Companies House Registry search and profile results for query '{query}'.",
+            "publisher": "Companies House",
+            "source_type": "companies_house",
+            "company_number": resolved_number
+        }]
+
+        return "\n".join(lines), sources
 
     @staticmethod
     def build_sec_context(sec_data: dict, *, start_number: int) -> tuple[str, list[dict]]:

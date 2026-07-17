@@ -10,6 +10,10 @@ from mcp.server.fastmcp import FastMCP
 from server.services.financial_news_mcp import financial_news as _financial_news
 from server.services.sec_edgar_mcp import sec_company_facts as _sec_company_facts
 from server.services.roic_ai_mcp import roic_ai as _roic_ai
+from server.services.companies_house_mcp import (
+    companies_house_search as _companies_house_search,
+    companies_house_profile as _companies_house_profile,
+)
 
 mcp = FastMCP("capitaledge-financial-data")
 
@@ -40,5 +44,15 @@ async def sec_company_facts(
     )
 
 
+@mcp.tool(name="companies_house_search")
+async def companies_house_search(query: str, items_per_page: int = 10) -> dict:
+    """Search Companies House (UK company registry) by company name."""
+    return await _companies_house_search(query=query, items_per_page=items_per_page)
+
+
+@mcp.tool(name="companies_house_profile")
+async def companies_house_profile(query: str) -> dict:
+    """Retrieve UK company search results and resolved company details."""
+    return await _companies_house_profile(query=query)
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     )
     ROIC_API_KEY: str = os.getenv("ROIC_API_KEY", "")
     ROIC_CACHE_TTL: int = int(os.getenv("ROIC_CACHE_TTL", "3600"))
+    COMPANIES_HOUSE_API_KEY: str = os.getenv("COMPANIES_HOUSE_API_KEY", "")
+    COMPANIES_HOUSE_BASE_URL: str = os.getenv(
+        "COMPANIES_HOUSE_BASE_URL", "https://api.company-information.service.gov.uk"
+    )
+    COMPANIES_HOUSE_CACHE_TTL: int = int(
+        os.getenv("COMPANIES_HOUSE_CACHE_TTL", "3600")
+    )
 
     LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
 

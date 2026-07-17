@@ -15,6 +15,7 @@ from server.services.financial_news_mcp import financial_news
 from server.services.rag_service import get_rag_service
 from server.services.sec_edgar_mcp import sec_company_facts
 from server.services.roic_ai_mcp import roic_ai
+from server.services.companies_house_mcp import companies_house_profile
 from server.utils.auth import get_current_user
 from server.utils.helpers import (
     document_sources_only,
@@ -205,15 +206,36 @@ def get_chat_session(
     def _doc_info(doc_id):
         if doc_id not in doc_info_cache:
             doc = crud.document.get(db, doc_id)
-            doc_info_cache[doc_id] = (
-                {
+            if doc:
+                import os
+                import mimetypes
+                from server.config import WORKSPACE_DOCS_DIR
+                
+                size = 0
+                if doc.storage_path:
+                    file_name_only = os.path.basename(doc.storage_path)
+                    full_path = WORKSPACE_DOCS_DIR / file_name_only
+                    if os.path.exists(full_path):
+                        size = os.path.getsize(full_path)
+                        
+                mime_type = mimetypes.guess_type(doc.file_name)[0] or f"application/{doc.file_format.lower()}"
+                timestamp = doc.created_at.isoformat() if doc.created_at else None
+                
+                doc_info_cache[doc_id] = {
                     "id": doc.id,
+                    "file_id": doc.id,
                     "file_name": doc.file_name,
+                    "original_filename": doc.file_name,
+                    "display_name": doc.file_name,
                     "file_format": doc.file_format,
+                    "mime_type": mime_type,
+                    "size": size,
+                    "created_at": timestamp,
+                    "upload_timestamp": timestamp,
+                    "storage_path": doc.storage_path,
                 }
-                if doc
-                else None
-            )
+            else:
+                doc_info_cache[doc_id] = None
         return doc_info_cache[doc_id]
 
     messages = []
@@ -356,6 +378,9 @@ def add_chat_message(
     roic_response = None
     roic_context = None
     roic_sources: list[dict] = []
+    companies_house_response = None
+    companies_house_context = None
+    companies_house_sources: list[dict] = []
     document_context = None
     web_context = None
     retrieved_chunks = None
@@ -468,13 +493,24 @@ def add_chat_message(
                     if financial_ticker:
                         break
 
+    # Companies House
+    companies_house_query = rag.classify_companies_house_query(
+        client, question=request.content, model=settings.LLM_MODEL
+    )
+    if companies_house_query:
+        sec_tickers = []
+        sec_ticker = None
+        sec_options = {}
+        roic_query = None
+        financial_ticker = None
+
     # Web Search
-    requires_web = not (financial_ticker or sec_ticker or roic_query) and rag.classify_requires_web_search(
+    requires_web = not (financial_ticker or sec_ticker or roic_query or companies_house_query) and rag.classify_requires_web_search(
         client, question=request.content, model=settings.LLM_MODEL
     )
 
     # 3. Apply Dynamic Source Selection priority rules
-    has_external_provider = bool(sec_tickers or roic_query or financial_ticker or requires_web)
+    has_external_provider = bool(sec_tickers or roic_query or financial_ticker or companies_house_query or requires_web)
     if has_external_provider:
         is_document_question = explicit_document_request and is_document_question
     else:
@@ -496,6 +532,8 @@ def add_chat_message(
         selected_list.append("ROIC AI")
     if financial_ticker:
         selected_list.append("Alpha Vantage")
+    if companies_house_query:
+        selected_list.append("Companies House")
     if requires_web:
         selected_list.append("Web Search")
 
@@ -547,9 +585,12 @@ def add_chat_message(
     def retrieve_roic_ai():
         return asyncio.run(roic_ai(query=roic_query, transcript=True))
 
+    def retrieve_companies_house():
+        return asyncio.run(companies_house_profile(query=companies_house_query))
+
     # 6. Execute selected providers concurrently
     futures = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         if is_document_question:
             futures["rag"] = executor.submit(retrieve_documents)
         if sec_tickers:
@@ -558,6 +599,8 @@ def add_chat_message(
             futures["roic"] = executor.submit(retrieve_roic_ai)
         if financial_ticker:
             futures["news"] = executor.submit(retrieve_financial_news)
+        if companies_house_query:
+            futures["companies_house"] = executor.submit(retrieve_companies_house)
 
         if "rag" in futures:
             source_documents, retrieved_chunks = futures["rag"].result()
@@ -567,6 +610,8 @@ def add_chat_message(
             roic_response = futures["roic"].result()
         if "news" in futures:
             financial_news_response = futures["news"].result()
+        if "companies_house" in futures:
+            companies_house_response = futures["companies_house"].result()
 
     if retrieved_chunks:
         document_context = rag.build_context_with_citations(retrieved_chunks) or None
@@ -607,20 +652,32 @@ def add_chat_message(
         )
         roic_context = roic_context or None
 
+    if companies_house_response:
+        companies_house_context, companies_house_sources = rag.build_companies_house_context(
+            companies_house_response,
+            start_number=len(retrieved_chunks or []) + len(financial_sources) + len(sec_sources) + len(roic_sources) + 1,
+        )
+        companies_house_context = companies_house_context or None
+
     if requires_web:
         # Web results continue the document chunks' [n] numbering so the LLM sees
         # one unbroken citation sequence across the whole CONTEXT.
         web_context, web_sources = rag.web_search(
             request.content,
             start_number=(
-                len(retrieved_chunks or []) + len(financial_sources) + len(sec_sources) + len(roic_sources) + 1
+                len(retrieved_chunks or [])
+                + len(financial_sources)
+                + len(sec_sources)
+                + len(roic_sources)
+                + len(companies_house_sources)
+                + 1
             ),
         )
         web_context = web_context or None
         used_web = web_context is not None
 
     logger.info(
-        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s finance=%s sec=%s",
+        "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s finance=%s sec=%s companies_house=%s",
         chat_id,
         getattr(current_user, "id", None),
         len(document_ids),
@@ -628,6 +685,7 @@ def add_chat_message(
         used_web,
         financial_ticker,
         sec_tickers,
+        companies_house_query,
     )
 
     llm_history = [] if context_reason == "new_upload" else history
@@ -639,6 +697,7 @@ def add_chat_message(
         financial_news_context=financial_context,
         sec_context=sec_context,
         roic_context=roic_context,
+        companies_house_context=companies_house_context,
     )
     raw_response = rag.generate_response(
         client, messages=messages, model=settings.LLM_MODEL
@@ -652,6 +711,7 @@ def add_chat_message(
     cited_sources.extend(financial_sources)
     cited_sources.extend(sec_sources)
     cited_sources.extend(roic_sources)
+    cited_sources.extend(companies_house_sources)
     if used_web:
         cited_sources.extend(web_sources or [])
 
@@ -705,6 +765,7 @@ def add_chat_message(
                 "financial_news": financial_news_response,
                 "sec_company_facts": sec_company_facts_response,
                 "roic_ai": roic_response,
+                "companies_house": companies_house_response,
                 "follow_up_questions": follow_up_questions,
             },
             "message": "Message added and AI response created successfully.",

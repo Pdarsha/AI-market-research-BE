@@ -221,6 +221,10 @@ async def upload_docs(
     The file's text is chunked, embedded and stored (tagged with the workspace)
     so a chat inside the workspace can retrieve it via the ``@doc`` agent.
     """
+    if doc.size > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(
+            status_code=400, detail="File size exceeds the 10MB limit."
+        )
     workspace = crud.workspace._get_owned_workspace(
         db, workspace_id, str(current_user.id)
     )
