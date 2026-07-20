@@ -1,0 +1,10 @@
+{
+    "id": "expert_interview_synthesizer",
+    "title": "Expert Interview Synthesizer",
+    "description": "Extract key insights across many expert interviews at once.",
+    "tag": "Generative Grid",
+    "icon": "layout-grid",
+    "prompt": "Synthesize the key insights across the expert interviews and highlight consensus and disagreements.",
+    "enabled": true,
+    "display_order": 6
+}

@@ -29,6 +29,12 @@ from server.services.rag_service import RAGService, get_rag_service
 from server.services.rerank_service import RerankService, get_rerank_service
 from server.services.sec_edgar_mcp import SECEDGARClient, sec_company_facts
 from server.services.roic_ai_mcp import RoicAIMCPTool, roic_ai
+from server.services.prompt_template_registry import (
+    PromptTemplate,
+    PromptTemplateRegistry,
+    get_prompt_template_registry,
+)
+from server.services.audit_logger import AuditLogger
 
 __all__ = [
     "Chunk",
@@ -50,4 +56,9 @@ __all__ = [
     "sec_company_facts",
     "RoicAIMCPTool",
     "roic_ai",
+    "PromptTemplate",
+    "PromptTemplateRegistry",
+    "get_prompt_template_registry",
+    "AuditLogger",
 ]
+

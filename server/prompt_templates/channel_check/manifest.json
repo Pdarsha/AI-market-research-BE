@@ -1,0 +1,10 @@
+{
+    "id": "channel_check",
+    "title": "Channel Check",
+    "description": "Market interviews with market participants in specific industry channels.",
+    "tag": "Channel Check Grid",
+    "icon": "layout-grid",
+    "prompt": "Run a channel check and summarize what market participants are saying across the industry channel.",
+    "enabled": true,
+    "display_order": 4
+}

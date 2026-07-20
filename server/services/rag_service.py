@@ -74,72 +74,99 @@ class RAGService:
         When re-ranking is disabled (``settings.RAG_RERANK_ENABLED``) the vector
         top-k is returned directly.
         """
-        top_k = top_k or settings.RAG_TOP_K
+        import time
+        from server.services.audit_logger import AuditLogger
 
-        if document_ids and len(document_ids) > top_k:
-            top_k = min(len(document_ids), settings.RAG_MAX_CONTEXT_CHUNKS)
+        start_time = time.time()
+        try:
+            top_k = top_k or settings.RAG_TOP_K
 
-        query_embedding = self._embedder.embed_text(query)
+            if document_ids and len(document_ids) > top_k:
+                top_k = min(len(document_ids), settings.RAG_MAX_CONTEXT_CHUNKS)
 
-        self._widen_hnsw_search(db)
-        distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+            query_embedding = self._embedder.embed_text(query)
 
-        def _scoped():
-            q = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
-            if workspace_id:
-                q = q.filter(DocumentChunk.workspace_id == str(workspace_id))
-            return q
+            self._widen_hnsw_search(db)
+            distance = DocumentChunk.embedding.cosine_distance(query_embedding)
 
-        candidate_k = (
-            max(top_k, settings.RAG_RERANK_CANDIDATES)
-            if settings.RAG_RERANK_ENABLED
-            else top_k
-        )
+            def _scoped():
+                q = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
+                if workspace_id:
+                    q = q.filter(DocumentChunk.workspace_id == str(workspace_id))
+                return q
 
-        if document_ids and len(document_ids) > 1:
-            import math
-
-            per_doc = max(1, math.ceil(candidate_k / len(document_ids)))
-            rows: list[DocumentChunk] = []
-            for doc_id in document_ids:
-                rows.extend(
-                    _scoped()
-                    .filter(DocumentChunk.document_id == doc_id)
-                    .order_by(distance)
-                    .limit(per_doc)
-                    .all()
-                )
-        else:
-            stmt = _scoped()
-            if document_ids:
-                stmt = stmt.filter(DocumentChunk.document_id.in_(document_ids))
-            rows = stmt.order_by(distance).limit(candidate_k).all()
-
-        if not rows:
-            return []
-
-        if settings.RAG_RERANK_ENABLED:
-            ordered = get_rerank_service().rerank(
-                query,
-                rows,
-                top_k=len(rows),
-                text_getter=lambda chunk: chunk.content or "",
+            candidate_k = (
+                max(top_k, settings.RAG_RERANK_CANDIDATES)
+                if settings.RAG_RERANK_ENABLED
+                else top_k
             )
-        else:
-            ordered = rows
 
-        final = self._ensure_document_representation(
-            ordered, document_ids=document_ids, top_k=top_k
-        )
-        logger.debug(
-            "RAG retrieve: user=%s workspace=%s attached_docs=%d candidates=%d final=%d",
-            user_id,
-            workspace_id,
-            len(document_ids or []),
-            len(rows),
-            len(final),
-        )
-        return final
+            if document_ids and len(document_ids) > 1:
+                import math
+
+                per_doc = max(1, math.ceil(candidate_k / len(document_ids)))
+                rows: list[DocumentChunk] = []
+                for doc_id in document_ids:
+                    rows.extend(
+                        _scoped()
+                        .filter(DocumentChunk.document_id == doc_id)
+                        .order_by(distance)
+                        .limit(per_doc)
+                        .all()
+                    )
+            else:
+                stmt = _scoped()
+                if document_ids:
+                    stmt = stmt.filter(DocumentChunk.document_id.in_(document_ids))
+                rows = stmt.order_by(distance).limit(candidate_k).all()
+
+            if not rows:
+                final = []
+            else:
+                if settings.RAG_RERANK_ENABLED:
+                    ordered = get_rerank_service().rerank(
+                        query,
+                        rows,
+                        top_k=len(rows),
+                        text_getter=lambda chunk: chunk.content or "",
+                    )
+                else:
+                    ordered = rows
+
+                final = self._ensure_document_representation(
+                    ordered, document_ids=document_ids, top_k=top_k
+                )
+
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="RAG_RETRIEVAL",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id) if workspace_id else None,
+                status="success",
+                processing_time=elapsed,
+                metadata={
+                    "query": query,
+                    "document_ids": document_ids,
+                    "chunks_count": len(final),
+                },
+            )
+            return final
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="RAG_RETRIEVAL",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id) if workspace_id else None,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "query": query,
+                    "document_ids": document_ids,
+                    "error": str(e),
+                },
+            )
+            raise
+
 
     @staticmethod
     def _ensure_document_representation(

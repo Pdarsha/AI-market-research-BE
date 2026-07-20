@@ -56,6 +56,17 @@ def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
     transcript = result.get("latest_transcript")
     if result.get("error") or not transcript:
         raise HTTPException(status_code=404, detail="Roic.ai transcript not available")
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CITATION_GET_ROIC_TRANSCRIPT",
+        user_id=str(current_user.id),
+        endpoint=f"/v1/citations/roic/transcript/{ticker}",
+        http_method="GET",
+        status="200",
+        metadata={"ticker": ticker},
+    )
+
     return JSONResponse(
         status_code=200,
         content={"success": True, "error": None, "data": transcript, "message": "Roic.ai transcript fetched successfully."},
@@ -94,6 +105,19 @@ def get_citation(
         doc.id,
         page,
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CITATION_GET",
+        user_id=str(current_user.id),
+        workspace_id=doc.workspace_id,
+        document_id=doc.id,
+        endpoint=f"/v1/citations/{citation_id}",
+        http_method="GET",
+        status="200",
+        metadata={"citation_id": citation_id},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -151,6 +175,18 @@ def get_document_viewer(
         getattr(current_user, "id", None),
         document_id,
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_VIEW",
+        user_id=str(current_user.id),
+        workspace_id=doc.workspace_id,
+        document_id=document_id,
+        endpoint=f"/v1/documents/{document_id}/viewer",
+        http_method="GET",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -212,6 +248,19 @@ def get_document_highlight(
         found_page,
         len(rects),
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_HIGHLIGHT",
+        user_id=str(current_user.id),
+        workspace_id=doc.workspace_id,
+        document_id=document_id,
+        endpoint=f"/v1/documents/{document_id}/highlight",
+        http_method="GET",
+        status="200",
+        metadata={"page": found_page, "chunk_id": chunk_id},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -247,6 +296,18 @@ def get_document_file(
     if not abs_path or not abs_path.exists():
         raise HTTPException(status_code=404, detail="File not found on server")
 
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_GET_FILE",
+        user_id=payload["user_id"],
+        workspace_id=doc.workspace_id,
+        document_id=document_id,
+        endpoint=f"/v1/documents/{document_id}/file",
+        http_method="GET",
+        status="200",
+        metadata={"filename": doc.file_name},
+    )
+
     # FileResponse streams the file in chunks (handles large documents).
     return FileResponse(
         path=str(abs_path),
@@ -277,6 +338,16 @@ def export_conversation_pdf(
         )
     except Exception as exc:  # pragma: no cover - layout engine failure
         raise HTTPException(status_code=500, detail="PDF generation failed") from exc
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_EXPORT",
+        user_id=str(current_user.id),
+        endpoint="/v1/documents/export-pdf",
+        http_method="POST",
+        status="200",
+        metadata={"title": title, "messages_count": len(payload.messages)},
+    )
 
     return Response(
         content=pdf_bytes,

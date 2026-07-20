@@ -75,9 +75,39 @@ class DocumentProcessor:
         storage_path = self._save_original(file.filename or "", content)
 
         # 3. Extract text.
+        import time
+        from server.services.audit_logger import AuditLogger
+
+        start_ocr = time.time()
         try:
             raw_text = self._ocr.extract_text(file.filename or "", content)
+            elapsed_ocr = time.time() - start_ocr
+            AuditLogger.log(
+                action="DOCUMENT_OCR",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id),
+                status="success",
+                processing_time=elapsed_ocr,
+                metadata={
+                    "filename": file.filename,
+                    "file_format": file_format,
+                    "text_len": len(raw_text),
+                },
+            )
         except Exception as exc:
+            elapsed_ocr = time.time() - start_ocr
+            AuditLogger.log(
+                action="DOCUMENT_OCR",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id),
+                status="error",
+                processing_time=elapsed_ocr,
+                metadata={
+                    "filename": file.filename,
+                    "file_format": file_format,
+                    "error": str(exc),
+                },
+            )
             logger.exception("Text extraction failed for %s", file.filename)
             raise HTTPException(
                 status_code=400, detail=f"Failed to read file: {exc}"
@@ -98,7 +128,33 @@ class DocumentProcessor:
             )
 
         # 6. Embed (OpenAI, async + batched).
-        embeddings = await self._embedder.aembed_texts([c.text for c in chunks])
+        start_embed = time.time()
+        try:
+            embeddings = await self._embedder.aembed_texts([c.text for c in chunks])
+            elapsed_embed = time.time() - start_embed
+            AuditLogger.log(
+                action="DOCUMENT_EMBEDDING",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id),
+                status="success",
+                processing_time=elapsed_embed,
+                metadata={"filename": file.filename, "chunks_count": len(chunks)},
+            )
+        except Exception as exc:
+            elapsed_embed = time.time() - start_embed
+            AuditLogger.log(
+                action="DOCUMENT_EMBEDDING",
+                user_id=str(user_id),
+                workspace_id=str(workspace_id),
+                status="error",
+                processing_time=elapsed_embed,
+                metadata={
+                    "filename": file.filename,
+                    "chunks_count": len(chunks),
+                    "error": str(exc),
+                },
+            )
+            raise exc
 
         # 7. Store the document, then its chunks (with embeddings) in pgvector.
         document = crud.document.create(

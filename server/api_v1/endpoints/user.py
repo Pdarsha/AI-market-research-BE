@@ -64,6 +64,15 @@ def build_login_response(
             access_token=access_token, refresh_token=refresh_token, token_type="bearer"
         ),
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_LOGIN",
+        user_id=str(user.id),
+        status="200",
+        metadata={"email": user.email, "providers": user.providers},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -172,6 +181,15 @@ async def get_profile(current_user=Depends(get_current_user)):
         role=current_user.role,
     )
     logger.info("get_profile: user_id=%s", getattr(current_user, "id", None))
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_PROFILE",
+        user_id=str(current_user.id),
+        endpoint="/v1/user/profile",
+        http_method="POST",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -207,6 +225,15 @@ async def sign_up(data: schemas.UserCreateInput, db: Session = Depends(get_db)):
 
     otp_sent = await validate_email_send_otp(db, email, user.id)
     if otp_sent:
+        from server.services.audit_logger import AuditLogger
+        AuditLogger.log(
+            action="USER_SIGNUP",
+            user_id=str(user.id),
+            endpoint="/v1/user/signup",
+            http_method="POST",
+            status="200",
+            metadata={"email": email},
+        )
         return JSONResponse(
             status_code=200,
             content={
@@ -263,6 +290,15 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
                 expires_delta=refresh_expires,
             )
             logger.info("verify_otp success: email=%s user_id=%s", email, user_obj.id)
+            from server.services.audit_logger import AuditLogger
+            AuditLogger.log(
+                action="USER_VERIFY_OTP",
+                user_id=str(user_obj.id),
+                endpoint="/v1/user/verify-otp",
+                http_method="POST",
+                status="200",
+                metadata={"email": email},
+            )
             return JSONResponse(
                 status_code=200,
                 content={
@@ -310,6 +346,15 @@ async def resend_otp(data: schemas.EmailSchema, db: Session = Depends(get_db)):
     otp_sent = await validate_email_send_otp(db, email, user_obj.id)
     if otp_sent:
         logger.info("resend_otp sent: email=%s user_id=%s", email, user_obj.id)
+        from server.services.audit_logger import AuditLogger
+        AuditLogger.log(
+            action="USER_RESEND_OTP",
+            user_id=str(user_obj.id),
+            endpoint="/v1/user/signup-resend-otp",
+            http_method="POST",
+            status="200",
+            metadata={"email": email},
+        )
         return JSONResponse(
             status_code=200,
             content={
@@ -369,6 +414,15 @@ async def change_password(
         expires_delta=access_token_expires,
     )
 
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_CHANGE_PASSWORD",
+        user_id=str(user_obj.id),
+        endpoint="/v1/user/change-password",
+        http_method="POST",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -396,6 +450,15 @@ async def forgot_password_send_otp(
     if otp_sent:
         logger.info(
             "forgot_password_send_otp sent: email=%s user_id=%s", email, user_obj.id
+        )
+        from server.services.audit_logger import AuditLogger
+        AuditLogger.log(
+            action="USER_FORGOT_PASSWORD_SEND_OTP",
+            user_id=str(user_obj.id),
+            endpoint="/v1/user/forgot-password-send-otp",
+            http_method="POST",
+            status="200",
+            metadata={"email": email},
         )
         return JSONResponse(
             status_code=200,
@@ -448,6 +511,15 @@ async def reset_forgot_password(
             crud.email_otp.remove(db, id=email_otp_obj.id)
             logger.info(
                 "reset_forgot_password success: email=%s user_id=%s", email, user_obj.id
+            )
+            from server.services.audit_logger import AuditLogger
+            AuditLogger.log(
+                action="USER_RESET_FORGOT_PASSWORD",
+                user_id=str(user_obj.id),
+                endpoint="/v1/user/reset-forgot-password",
+                http_method="POST",
+                status="200",
+                metadata={"email": email},
             )
             return JSONResponse(
                 status_code=200,
@@ -505,6 +577,14 @@ async def update_profile(
         role=user_obj.role,
     )
     logger.info("update_profile success: user_id=%s", user_obj.id)
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_UPDATE_PROFILE",
+        user_id=str(user_obj.id),
+        endpoint="/v1/user/update-profile",
+        http_method="POST",
+        status="200",
+    )
     return JSONResponse(
         status_code=200,
         content={
@@ -547,6 +627,15 @@ async def refresh_access_token(
     access_token_expires = timedelta(minutes=TOKEN_EXPIRE_DELTA)
     access_token = create_access_token(
         data={"sub": user.email, "id": user.id}, expires_delta=access_token_expires
+    )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_REFRESH_TOKEN",
+        user_id=str(user.id),
+        endpoint="/v1/user/refresh-token",
+        http_method="POST",
+        status="200",
     )
 
     return JSONResponse(

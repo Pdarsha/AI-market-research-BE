@@ -33,6 +33,18 @@ def create_workspace(
             user_id=str(current_user.id),
         ),
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_CREATE",
+        user_id=str(current_user.id),
+        workspace_id=workspace.id,
+        endpoint="/v1/workspaces/create-workspace",
+        http_method="POST",
+        status="201",
+        metadata={"name": workspace.name},
+    )
+
     return JSONResponse(
         status_code=201,
         content={
@@ -54,6 +66,16 @@ def list_workspaces(
     workspaces = crud.workspace.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
     )
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_LIST",
+        user_id=str(current_user.id),
+        endpoint="/v1/workspaces/list-workspaces",
+        http_method="GET",
+        status="200",
+        metadata={"count": len(workspaces)},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -115,6 +137,15 @@ def public_workspace(
             for c in chats
         ],
     }
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_GET_PUBLIC",
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/public/{workspace_id}",
+        http_method="GET",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -148,6 +179,16 @@ def get_workspace(
         serialize_document(f)
         for f in crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     ]
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_GET",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/{workspace_id}",
+        http_method="GET",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -172,6 +213,18 @@ def update_workspace(
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     workspace = crud.workspace.update(db, db_obj=workspace, obj_in=request)
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_UPDATE",
+        user_id=str(current_user.id),
+        workspace_id=workspace.id,
+        endpoint=f"/v1/workspaces/{workspace_id}",
+        http_method="PUT",
+        status="200",
+        metadata={"name": workspace.name},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -196,6 +249,16 @@ def delete_workspace(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     crud.workspace.delete_workspace(db, workspace=workspace)
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="WORKSPACE_DELETE",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/{workspace_id}",
+        http_method="DELETE",
+        status="200",
+    )
 
     return JSONResponse(
         status_code=200,
@@ -242,6 +305,18 @@ async def upload_docs(
         db, file=doc, user_id=current_user.id, workspace_id=workspace_id
     )
 
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_UPLOAD",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        document_id=document.id,
+        endpoint="/v1/workspaces/upload-docs",
+        http_method="POST",
+        status="200",
+        metadata={"filename": doc.filename},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -266,6 +341,17 @@ def list_workspace_docs(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     files = crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_LIST",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/{workspace_id}/docs",
+        http_method="GET",
+        status="200",
+        metadata={"count": len(files)},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -289,6 +375,17 @@ async def get_workspace_document(
     )
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_GET",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        document_id=doc_id,
+        endpoint=f"/v1/workspaces/{workspace_id}/docs/{doc_id}",
+        http_method="GET",
+        status="200",
+    )
 
     return JSONResponse(
         status_code=200,
@@ -354,6 +451,18 @@ def delete_workspace_doc(
     # Removing the document row cascades (ON DELETE CASCADE) to its
     # ``document_chunks`` rows, purging the file's embeddings from pgvector.
     crud.document.remove(db, id=doc_id)
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_DELETE",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        document_id=doc_id,
+        endpoint=f"/v1/workspaces/{workspace_id}/docs/{doc_id}",
+        http_method="DELETE",
+        status="200",
+        metadata={"filename": file.file_name},
+    )
 
     return JSONResponse(
         status_code=200,

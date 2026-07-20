@@ -250,6 +250,17 @@ class CitationService:
             len(citations),
         )
 
+        from server.services.audit_logger import AuditLogger
+        AuditLogger.log(
+            action="CITATION_GENERATION",
+            status="success",
+            metadata={
+                "answer_len": len(answer),
+                "markers_found": len(markers),
+                "unique_sources": len(citations),
+            }
+        )
+
         return rewritten, citations
 
     @staticmethod

@@ -1,0 +1,10 @@
+{
+    "id": "earnings_analysis",
+    "title": "Earnings Analysis",
+    "description": "Parse earnings call analysis with summarization of guidance, growth drivers, and risks.",
+    "tag": "Generative Grid",
+    "icon": "layout-grid",
+    "prompt": "Analyze the latest earnings call: summarize guidance, growth drivers, margins, and key risks.",
+    "enabled": true,
+    "display_order": 3
+}

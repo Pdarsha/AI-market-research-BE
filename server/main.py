@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,8 @@ from server.config import STATIC_DIR, create_storage_directories, settings
 from server.db.init_db import init_db
 
 from .api import api_router
+
+logger = logging.getLogger(__name__)
 
 
 async def app_startup():
@@ -22,12 +25,9 @@ async def lifespan(app: FastAPI):
 
     await app_startup()
 
-    # Pre-load OCR engines in the background so the first uploaded document
-    # doesn't pay model-load latency. Best-effort; never blocks startup.
     import threading
 
     from server.services.ocr_service import warm_up_ocr
-
     threading.Thread(target=warm_up_ocr, name="ocr-warmup", daemon=True).start()
     yield
 
@@ -59,6 +59,15 @@ app.add_middleware(
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    from server.services.audit_logger import AuditLogger
+
+    AuditLogger.log(
+        action="API_ERROR",
+        endpoint=request.url.path,
+        http_method=request.method,
+        status=str(exc.status_code),
+        metadata={"error": exc.detail},
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -72,6 +81,18 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "Unhandled error on %s %s: %s", request.method, request.url.path, exc
+    )
+    from server.services.audit_logger import AuditLogger
+
+    AuditLogger.log(
+        action="API_ERROR",
+        endpoint=request.url.path,
+        http_method=request.method,
+        status="500",
+        metadata={"error": str(exc)},
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -85,6 +106,15 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    from server.services.audit_logger import AuditLogger
+
+    AuditLogger.log(
+        action="VALIDATION_ERROR",
+        endpoint=request.url.path,
+        http_method=request.method,
+        status="422",
+        metadata={"errors": exc.errors()},
+    )
     return JSONResponse(
         status_code=422,
         content={

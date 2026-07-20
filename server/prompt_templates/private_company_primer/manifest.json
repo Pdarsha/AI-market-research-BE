@@ -1,0 +1,10 @@
+{
+    "id": "private_company_primer",
+    "title": "Private Company Primer",
+    "description": "Conduct a deep dive for a private company.",
+    "tag": "Report",
+    "icon": "file-text",
+    "prompt": "Conduct a private company primer covering funding history, business model, market, and growth outlook.",
+    "enabled": true,
+    "display_order": 2
+}

@@ -61,6 +61,19 @@ def create_chat_session(
             user_id=str(current_user.id), title=title, workspace_id=workspace_id
         ),
     )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_CREATE",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        chat_id=session.id,
+        endpoint="/v1/ai/chats",
+        http_method="POST",
+        status="201",
+        metadata={"title": session.title},
+    )
+
     return JSONResponse(
         status_code=201,
         content={
@@ -89,6 +102,16 @@ def list_chat_sessions(
     sessions = crud.chat_session.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
     )
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_LIST",
+        user_id=str(current_user.id),
+        endpoint="/v1/ai/chats",
+        http_method="GET",
+        status="200",
+        metadata={"count": len(sessions)},
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -125,8 +148,20 @@ def delete_chat_session(
     if not session or session.user_id != str(current_user.id):
         raise HTTPException(status_code=404, detail="Chat session not found")
 
+    workspace_id = session.workspace_id
     db.delete(session)
     db.commit()
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_DELETE",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/{chat_id}",
+        http_method="DELETE",
+        status="200",
+    )
 
     return JSONResponse(
         status_code=200,
@@ -167,6 +202,16 @@ def public_chat_session(
         }
         for msg in conversation
     ]
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_GET_PUBLIC",
+        workspace_id=session.workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/public/{chat_id}",
+        http_method="GET",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -259,6 +304,17 @@ def get_chat_session(
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }
         )
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_GET",
+        user_id=str(current_user.id),
+        workspace_id=session.workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/{chat_id}",
+        http_method="GET",
+        status="200",
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -300,6 +356,18 @@ def update_chat_title(
     db.add(session)
     db.commit()
     db.refresh(session)
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="CHAT_UPDATE",
+        user_id=str(current_user.id),
+        workspace_id=session.workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/{chat_id}",
+        http_method="PUT",
+        status="200",
+        metadata={"title": session.title},
+    )
 
     return JSONResponse(
         status_code=200,
@@ -359,6 +427,18 @@ def add_chat_message(
             workspace_id=session.workspace_id,
             document_ids=document_ids or None,
         ),
+    )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="USER_MESSAGE",
+        user_id=str(current_user.id),
+        workspace_id=session.workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/{chat_id}/messages",
+        http_method="POST",
+        status="200",
+        metadata={"document_ids": document_ids},
     )
 
     rag = get_rag_service()
@@ -569,24 +649,152 @@ def add_chat_message(
             return None, None
 
     def retrieve_financial_news():
-        return asyncio.run(
-            financial_news(
-                financial_ticker, limit=settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS
+        import time
+        from server.services.audit_logger import AuditLogger
+        start_time = time.time()
+        try:
+            res = asyncio.run(
+                financial_news(
+                    financial_ticker, limit=settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS
+                )
             )
-        )
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "financial_news", "ticker": financial_ticker},
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "financial_news",
+                    "ticker": financial_ticker,
+                    "error": str(e),
+                },
+            )
+            raise
 
     def retrieve_sec_company_facts():
-        async def _retrieve_all():
-            return await asyncio.gather(
-                *(sec_company_facts(ticker=ticker, **sec_options) for ticker in sec_tickers)
+        import time
+        from server.services.audit_logger import AuditLogger
+        start_time = time.time()
+        try:
+
+            async def _retrieve_all():
+                return await asyncio.gather(
+                    *(
+                        sec_company_facts(ticker=ticker, **sec_options)
+                        for ticker in sec_tickers
+                    )
+                )
+
+            res = asyncio.run(_retrieve_all())
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "sec_company_facts", "tickers": sec_tickers},
             )
-        return asyncio.run(_retrieve_all())
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "sec_company_facts",
+                    "tickers": sec_tickers,
+                    "error": str(e),
+                },
+            )
+            raise
 
     def retrieve_roic_ai():
-        return asyncio.run(roic_ai(query=roic_query, transcript=True))
+        import time
+        from server.services.audit_logger import AuditLogger
+        start_time = time.time()
+        try:
+            res = asyncio.run(roic_ai(query=roic_query, transcript=True))
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "roic_ai", "query": roic_query},
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={"tool": "roic_ai", "query": roic_query, "error": str(e)},
+            )
+            raise
 
     def retrieve_companies_house():
-        return asyncio.run(companies_house_profile(query=companies_house_query))
+        import time
+        from server.services.audit_logger import AuditLogger
+        start_time = time.time()
+        try:
+            res = asyncio.run(companies_house_profile(query=companies_house_query))
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "companies_house_profile",
+                    "query": companies_house_query,
+                },
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "companies_house_profile",
+                    "query": companies_house_query,
+                    "error": str(e),
+                },
+            )
+            raise
 
     # 6. Execute selected providers concurrently
     futures = {}
@@ -739,6 +947,21 @@ def add_chat_message(
             source_documents=source_documents,
             citations=citations,
         ),
+    )
+
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="AI_RESPONSE",
+        user_id=str(current_user.id),
+        workspace_id=session.workspace_id,
+        chat_id=chat_id,
+        endpoint=f"/v1/ai/chats/{chat_id}/messages",
+        http_method="POST",
+        status="200",
+        metadata={
+            "citations_count": len(citations) if citations else 0,
+            "follow_up_questions": follow_up_questions,
+        },
     )
 
     return JSONResponse(
