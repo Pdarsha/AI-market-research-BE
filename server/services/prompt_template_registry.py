@@ -87,70 +87,90 @@ class PromptTemplateRegistry:
 
     def reload(self) -> None:
         """Scan the templates directory, validate manifests, and cache active ones."""
-        new_cache = {}
-        if not self.templates_dir.exists() or not self.templates_dir.is_dir():
-            logger.warning("Prompt templates directory not found: %s", self.templates_dir)
-            self._cache = {}
-            return
+        from server.services.audit_logger import audit_context
 
-        for path in self.templates_dir.iterdir():
-            if not path.is_dir():
-                continue
+        with audit_context(
+            action="PROMPT_TEMPLATES_RELOAD",
+            metadata={
+                "loaded_templates": [],
+                "skipped_count": 0,
+                "skipped_details": [],
+            }
+        ) as meta:
+            new_cache = {}
+            if not self.templates_dir.exists() or not self.templates_dir.is_dir():
+                logger.warning("Prompt templates directory not found: %s", self.templates_dir)
+                self._cache = {}
+                meta["error"] = "Templates directory not found"
+                return
 
-            manifest_path = path / "manifest.json"
-            if not manifest_path.exists():
-                logger.warning(
-                    "Skipping template directory %s: manifest.json is missing",
-                    path.name,
+            skipped = []
+            for path in self.templates_dir.iterdir():
+                if not path.is_dir():
+                    continue
+
+                manifest_path = path / "manifest.json"
+                if not manifest_path.exists():
+                    logger.warning(
+                        "Skipping template directory %s: manifest.json is missing",
+                        path.name,
+                    )
+                    skipped.append({"folder": path.name, "reason": "missing manifest.json"})
+                    continue
+
+                try:
+                    content = manifest_path.read_text(encoding="utf-8")
+                    manifest = json.loads(content)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "Skipping template directory %s: invalid JSON in manifest.json: %s",
+                        path.name,
+                        e,
+                    )
+                    skipped.append({"folder": path.name, "reason": f"invalid JSON: {e}"})
+                    continue
+                except Exception as e:
+                    logger.warning(
+                        "Skipping template directory %s: failed to read manifest.json: %s",
+                        path.name,
+                        e,
+                    )
+                    skipped.append({"folder": path.name, "reason": f"read failed: {e}"})
+                    continue
+
+                # Validate required fields
+                missing_fields = [f for f in REQUIRED_FIELDS if f not in manifest]
+                if missing_fields:
+                    logger.warning(
+                        "Skipping template directory %s: manifest.json is missing required fields: %s",
+                        path.name,
+                        ", ".join(missing_fields),
+                    )
+                    skipped.append({"folder": path.name, "reason": f"missing required fields: {', '.join(missing_fields)}"})
+                    continue
+
+                # Check if enabled
+                if not manifest.get("enabled"):
+                    logger.debug("Template %s is disabled. Skipping.", path.name)
+                    skipped.append({"folder": path.name, "reason": "disabled"})
+                    continue
+
+                template_id = manifest["id"]
+                if template_id != path.name:
+                    logger.warning(
+                        "Template folder name '%s' does not match manifest id '%s'",
+                        path.name,
+                        template_id,
+                    )
+
+                new_cache[template_id] = PromptTemplate(
+                    id=template_id, manifest=manifest, template_dir=path
                 )
-                continue
 
-            try:
-                content = manifest_path.read_text(encoding="utf-8")
-                manifest = json.loads(content)
-            except json.JSONDecodeError as e:
-                logger.warning(
-                    "Skipping template directory %s: invalid JSON in manifest.json: %s",
-                    path.name,
-                    e,
-                )
-                continue
-            except Exception as e:
-                logger.warning(
-                    "Skipping template directory %s: failed to read manifest.json: %s",
-                    path.name,
-                    e,
-                )
-                continue
-
-            # Validate required fields
-            missing_fields = [f for f in REQUIRED_FIELDS if f not in manifest]
-            if missing_fields:
-                logger.warning(
-                    "Skipping template directory %s: manifest.json is missing required fields: %s",
-                    path.name,
-                    ", ".join(missing_fields),
-                )
-                continue
-
-            # Check if enabled
-            if not manifest.get("enabled"):
-                logger.debug("Template %s is disabled. Skipping.", path.name)
-                continue
-
-            template_id = manifest["id"]
-            if template_id != path.name:
-                logger.warning(
-                    "Template folder name '%s' does not match manifest id '%s'",
-                    path.name,
-                    template_id,
-                )
-
-            new_cache[template_id] = PromptTemplate(
-                id=template_id, manifest=manifest, template_dir=path
-            )
-
-        self._cache = new_cache
+            self._cache = new_cache
+            meta["loaded_templates"] = list(new_cache.keys())
+            meta["skipped_count"] = len(skipped)
+            meta["skipped_details"] = skipped
 
     def list_templates(self) -> List[PromptTemplate]:
         """Return list of active templates sorted by display_order."""

@@ -1007,32 +1007,44 @@ class OCRService:
 
     def extract_text(self, filename: str, content: bytes) -> str:
         """Extract and return plain text from ``content`` for ``filename``."""
+        from server.services.audit_logger import audit_context
         ext = self.detect_extension(filename)
 
-        key = self._cache_key(ext, content)
-        with self._extract_cache_lock:
-            cached = self._extract_cache.get(key)
-        if cached is not None:
-            logger.info(
-                "Extraction cache HIT for %s (%d chars) — OCR skipped",
-                filename,
-                len(cached),
-            )
-            return cached
+        with audit_context(
+            action="OCR_TEXT_EXTRACTION",
+            metadata={
+                "filename": filename,
+                "extension": ext,
+                "cache_hit": False,
+            }
+        ) as meta:
+            key = self._cache_key(ext, content)
+            with self._extract_cache_lock:
+                cached = self._extract_cache.get(key)
+            if cached is not None:
+                logger.info(
+                    "Extraction cache HIT for %s (%d chars) — OCR skipped",
+                    filename,
+                    len(cached),
+                )
+                meta["character_count"] = len(cached)
+                meta["cache_hit"] = True
+                return cached
 
-        _, extractor = self._EXTRACTORS[ext]
-        try:
-            text = extractor(content)
-        except _PasswordProtected as exc:
-            raise ValueError(str(exc)) from exc
+            _, extractor = self._EXTRACTORS[ext]
+            try:
+                text = extractor(content)
+                meta["character_count"] = len(text)
+            except _PasswordProtected as exc:
+                raise ValueError(str(exc)) from exc
 
-        with self._extract_cache_lock:
-            if len(self._extract_cache) >= self._CACHE_MAX_ENTRIES:
-                self._extract_cache.pop(next(iter(self._extract_cache)))
-            self._extract_cache[key] = text
+            with self._extract_cache_lock:
+                if len(self._extract_cache) >= self._CACHE_MAX_ENTRIES:
+                    self._extract_cache.pop(next(iter(self._extract_cache)))
+                self._extract_cache[key] = text
 
-        logger.debug("Extracted %d chars from %s (%s)", len(text), filename, ext)
-        return text
+            logger.debug("Extracted %d chars from %s (%s)", len(text), filename, ext)
+            return text
 
 
 @lru_cache(maxsize=1)

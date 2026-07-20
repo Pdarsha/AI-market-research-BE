@@ -205,16 +205,22 @@ class SECEDGARClient:
 
     async def _get_json(self, endpoint: str) -> dict[str, Any]:
         """GET an SEC endpoint with the required descriptive User-Agent header."""
-        logger.info("sec.request: endpoint=%s", endpoint)
-        async with httpx.AsyncClient(
-            headers={"User-Agent": self._user_agent}, timeout=20
-        ) as client:
-            response = await client.get(endpoint)
-            response.raise_for_status()
-            payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("SEC returned a non-object response")
-        return payload
+        from server.services.audit_logger import audit_context
+
+        with audit_context(
+            action="SEC_EDGAR_MCP_CALL",
+            metadata={"endpoint": endpoint}
+        ):
+            logger.info("sec.request: endpoint=%s", endpoint)
+            async with httpx.AsyncClient(
+                headers={"User-Agent": self._user_agent}, timeout=20
+            ) as client:
+                response = await client.get(endpoint)
+                response.raise_for_status()
+                payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("SEC returned a non-object response")
+            return payload
 
     @classmethod
     def _normalize_submissions(cls, resolved: dict[str, str], data: dict[str, Any]) -> dict[str, Any]:

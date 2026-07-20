@@ -66,66 +66,81 @@ class RerankService:
         unparseable model response, the original order (truncated to ``top_k``) is
         returned so retrieval still succeeds.
         """
-        items = list(items)
-        if len(items) <= 1:
-            return items[:top_k]
+        from server.services.audit_logger import audit_context
 
-        # Number the passages so the model can refer to them by index.
-        passages = []
-        for index, item in enumerate(items, start=1):
-            text = (text_getter(item) or "").strip().replace("\n", " ")
-            passages.append(f"[{index}] {text[:_MAX_PASSAGE_CHARS]}")
-        passages_block = "\n".join(passages)
+        candidates_count = len(items)
+        with audit_context(
+            action="CANDIDATE_RERANKING",
+            metadata={
+                "model": self.model_name,
+                "query": query,
+                "candidates_count": candidates_count,
+            }
+        ) as meta:
+            items = list(items)
+            if len(items) <= 1:
+                meta["ranked_count"] = len(items[:top_k])
+                return items[:top_k]
 
-        system_prompt = (
-            "You are a search-result re-ranking assistant. Given a user query and a "
-            "list of numbered passages, rank the passages by how well they answer the "
-            "query. Respond with ONLY a JSON array of passage numbers ordered from "
-            "most to least relevant, e.g. [3, 1, 2]. Do not include any other text."
-        )
-        user_prompt = (
-            f"Query:\n{query}\n\n"
-            f"Passages:\n{passages_block}\n\n"
-            f"Return the top {top_k} passage numbers as a JSON array."
-        )
+            # Number the passages so the model can refer to them by index.
+            passages = []
+            for index, item in enumerate(items, start=1):
+                text = (text_getter(item) or "").strip().replace("\n", " ")
+                passages.append(f"[{index}] {text[:_MAX_PASSAGE_CHARS]}")
+            passages_block = "\n".join(passages)
 
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                max_tokens=100,
+            system_prompt = (
+                "You are a search-result re-ranking assistant. Given a user query and a "
+                "list of numbered passages, rank the passages by how well they answer the "
+                "query. Respond with ONLY a JSON array of passage numbers ordered from "
+                "most to least relevant, e.g. [3, 1, 2]. Do not include any other text."
             )
-            content = (completion.choices[0].message.content or "").strip()
-        except Exception:
-            logger.exception("rerank: LLM ranking failed; falling back to vector order")
-            return items[:top_k]
-
-        order = self._parse_ranking(content, n=len(items))
-        if not order:
-            logger.warning(
-                "rerank: could not parse ranking from model output; using vector order"
+            user_prompt = (
+                f"Query:\n{query}\n\n"
+                f"Passages:\n{passages_block}\n\n"
+                f"Return the top {top_k} passage numbers as a JSON array."
             )
-            return items[:top_k]
 
-        # Map the 1-indexed ranking back to items, then append any candidates the
-        # model omitted (so we never silently drop results), and keep top_k.
-        ranked = [items[i - 1] for i in order]
-        ranked_set = set(order)
-        ranked.extend(
-            item for i, item in enumerate(items, start=1) if i not in ranked_set
-        )
-        top = ranked[:top_k]
-        logger.info(
-            "rerank: model=%s candidates=%d -> kept=%d",
-            self.model_name,
-            len(items),
-            len(top),
-        )
-        return top
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0,
+                    max_tokens=100,
+                )
+                content = (completion.choices[0].message.content or "").strip()
+            except Exception as exc:
+                logger.exception("rerank: LLM ranking failed; falling back to vector order")
+                meta["error"] = str(exc)
+                return items[:top_k]
+
+            order = self._parse_ranking(content, n=len(items))
+            if not order:
+                logger.warning(
+                    "rerank: could not parse ranking from model output; using vector order"
+                )
+                meta["error"] = "Parsing failed"
+                return items[:top_k]
+
+            # Map the 1-indexed ranking back to items, then append any candidates the
+            # model omitted (so we never silently drop results), and keep top_k.
+            ranked = [items[i - 1] for i in order]
+            ranked_set = set(order)
+            ranked.extend(
+                item for i, item in enumerate(items, start=1) if i not in ranked_set
+            )
+            top = ranked[:top_k]
+            logger.info(
+                "rerank: model=%s candidates=%d -> kept=%d",
+                self.model_name,
+                len(items),
+                len(top),
+            )
+            meta["ranked_count"] = len(top)
+            return top
 
     @staticmethod
     def _parse_ranking(content: str, *, n: int) -> list[int]:

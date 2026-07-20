@@ -24,6 +24,7 @@ import serpapi
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from server import crud
 from server.config import settings
 from server.models.workspace import DocumentChunk
 from server.services.embedding_service import EmbeddingService, get_embedding_service
@@ -87,13 +88,6 @@ class RAGService:
             query_embedding = self._embedder.embed_text(query)
 
             self._widen_hnsw_search(db)
-            distance = DocumentChunk.embedding.cosine_distance(query_embedding)
-
-            def _scoped():
-                q = db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
-                if workspace_id:
-                    q = q.filter(DocumentChunk.workspace_id == str(workspace_id))
-                return q
 
             candidate_k = (
                 max(top_k, settings.RAG_RERANK_CANDIDATES)
@@ -101,24 +95,14 @@ class RAGService:
                 else top_k
             )
 
-            if document_ids and len(document_ids) > 1:
-                import math
-
-                per_doc = max(1, math.ceil(candidate_k / len(document_ids)))
-                rows: list[DocumentChunk] = []
-                for doc_id in document_ids:
-                    rows.extend(
-                        _scoped()
-                        .filter(DocumentChunk.document_id == doc_id)
-                        .order_by(distance)
-                        .limit(per_doc)
-                        .all()
-                    )
-            else:
-                stmt = _scoped()
-                if document_ids:
-                    stmt = stmt.filter(DocumentChunk.document_id.in_(document_ids))
-                rows = stmt.order_by(distance).limit(candidate_k).all()
+            rows = crud.document_chunk.search_nearest_chunks(
+                db,
+                query_embedding=query_embedding,
+                user_id=str(user_id),
+                workspace_id=workspace_id,
+                document_ids=document_ids,
+                candidate_k=candidate_k,
+            )
 
             if not rows:
                 final = []
@@ -213,39 +197,8 @@ class RAGService:
 
     @staticmethod
     def _widen_hnsw_search(db: Session) -> None:
-        """Raise ``hnsw.ef_search`` for the current transaction (PostgreSQL only).
-
-        HNSW applies the ``WHERE`` filter (user/workspace/document scope) only
-        *after* pulling its ``ef_search`` nearest neighbours from the whole table,
-        so a small default window (40) can miss a specific document's chunks when
-        other documents sit nearer in vector space — the cause of "first upload
-        returns nothing, re-upload works". A wider window restores recall for
-        filtered searches. ``iterative_scan`` (pgvector >= 0.8) makes it exact;
-        it's attempted in a savepoint so older versions degrade gracefully.
-        """
-        try:
-            if db.bind is None or db.bind.dialect.name != "postgresql":
-                return
-        except Exception:
-            return
-
-        try:
-            db.execute(
-                text("SET LOCAL hnsw.ef_search = :ef").bindparams(
-                    ef=int(settings.RAG_HNSW_EF_SEARCH)
-                )
-            )
-        except Exception:
-            logger.debug("rag: could not set hnsw.ef_search", exc_info=True)
-            return
-
-        try:
-            with db.begin_nested():
-                db.execute(
-                    text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
-                )
-        except Exception:
-            logger.debug("rag: hnsw.iterative_scan unavailable", exc_info=True)
+        """Raise ``hnsw.ef_search`` for the current transaction (PostgreSQL only)."""
+        crud.document_chunk.set_search_parameters(db, ef_search=int(settings.RAG_HNSW_EF_SEARCH))
 
     @staticmethod
     def build_context(chunks: list[DocumentChunk]) -> str:
@@ -1454,6 +1407,75 @@ class RAGService:
             len(sources),
         )
         return context, sources
+
+    def prepare_workspace_analysis_prompt(
+        self,
+        db: Session,
+        *,
+        client,
+        user_id: str,
+        workspace_id: str,
+        ws_name: str,
+        current_chat_id: str,
+        model: str,
+    ) -> str:
+        """Fetch, format, and intelligently summarize recent chats within a workspace,
+        constructing an optimized analysis prompt to fit within token budgets.
+        """
+        other_sessions = crud.genai.get_sessions_by_workspace_id(
+            db,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            chat_id=current_chat_id,
+        )
+        chats_list = []
+        for s in other_sessions:
+            msgs = crud.chat_message.get_multi_by_chat(db, chat_id=s.id)
+            if msgs:
+                msg_texts = []
+                for m in msgs:
+                    role_label = "User" if m.role == "user" else "AI"
+                    msg_texts.append(f"[{role_label}]: {m.content or ''}")
+                chats_list.append(
+                    f'Chat Title: "{s.title or "Untitled"}"\nMessages:\n'
+                    + "\n".join(msg_texts)
+                )
+
+        chats_context_str = None
+        if chats_list:
+            chats_context_str = "\n\n".join(chats_list)
+
+            # Intelligently trim or summarize chat history
+            MAX_CHATS_CHAR_LIMIT = 10000
+            if len(chats_context_str) > MAX_CHATS_CHAR_LIMIT:
+                try:
+                    summary_prompt = (
+                        "Summarize the following recent conversations from a workspace into key themes, "
+                        "insights, questions asked, and decisions made. Keep it concise (under 800 words):\n\n"
+                        f"{chats_context_str}"
+                    )
+                    chats_context_str = self.generate_response(
+                        client,
+                        messages=[{"role": "user", "content": summary_prompt}],
+                        model=model,
+                    )
+                except Exception:
+                    chats_context_str = (
+                        chats_context_str[:MAX_CHATS_CHAR_LIMIT]
+                        + "\n... [trimmed]"
+                    )
+
+        return (
+            f'Perform a comprehensive, structured workspace analysis for "{ws_name}".\n\n'
+            f"Recent Conversations Summary/Context:\n{chats_context_str or 'No previous chats.'}\n\n"
+            "Please synthesize the provided document contents and the recent chat conversations to generate a comprehensive workspace analysis report structured exactly with the following sections:\n\n"
+            "1. **Workspace-wide Analysis**: A comprehensive overall summary of the workspace, its context, and its contents.\n"
+            "2. **Bulk Document Summarization**: Concise summaries across all relevant documents within the workspace, highlighting key themes and points from each.\n"
+            "3. **Trend Extraction**: Identification of recurring patterns, themes, and important trends across both documents and conversations.\n"
+            "4. **Risk Identification**: Detection of potential risks, issues, inconsistencies, or areas requiring attention/further due diligence.\n"
+            "5. **Topic Clustering**: Grouping of related documents, chats, and discussions into logical topics or categories.\n"
+            "6. **AI-Generated Observations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data."
+        )
 
 
 @lru_cache(maxsize=1)

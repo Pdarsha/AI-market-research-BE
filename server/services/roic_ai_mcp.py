@@ -35,53 +35,74 @@ class RoicAIMCPTool:
         self._cache_ttl = settings.ROIC_CACHE_TTL if cache_ttl is None else cache_ttl
 
     async def roic_ai(self, query: str, limit: int = 5, transcript: bool = False) -> dict[str, Any]:
+        from server.services.audit_logger import audit_context
+
         query = query.strip()
         if not query:
             return self._error("invalid_request", "Provide a company name or ticker.")
         limit = max(1, min(int(limit), 20))
-        key = f"{query.upper()}:{transcript}"
-        cached = self._read_cache(key)
-        if cached:
-            return {**cached, "cached": True}
-        if not self._api_key:
-            return self._error("not_configured", "ROIC_API_KEY is not configured.")
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(
-                    ROIC_SEARCH_URL,
-                    params={"apikey": self._api_key, "query": query},
-                )
-                if response.status_code == 429:
-                    return self._error("rate_limited", "Roic.ai rate limit reached. Please try again shortly.")
-                response.raise_for_status()
-                result = self._normalize(query, response.json(), limit)
-                if transcript and result["results"]:
-                    ticker = result["results"][0].get("ticker")
-                    if ticker:
-                        transcript_response = await client.get(
-                            f"{ROIC_LATEST_TRANSCRIPT_URL}/{ticker}",
-                            params={"apikey": self._api_key},
-                        )
-                        if transcript_response.status_code == 429:
-                            return self._error("rate_limited", "Roic.ai rate limit reached. Please try again shortly.")
-                        transcript_response.raise_for_status()
-                        result["latest_transcript"] = self._normalize_transcript(
-                            ticker, transcript_response.json()
-                        )
-                # Fetch financial metrics/ratios for the resolved ticker
-                if result["results"]:
-                    ticker = result["results"][0].get("ticker")
-                    if ticker:
-                        result["metrics"] = await self._fetch_financial_metrics(client, ticker)
-            self._write_cache(key, result)
-            logger.info("roic.search: query=%r results=%d cache=false", query, len(result["results"]))
-            return {**result, "cached": False}
-        except httpx.HTTPStatusError as exc:
-            logger.warning("roic.search: API error status=%s", exc.response.status_code)
-            return self._error("api_error", "Roic.ai could not process this request.")
-        except Exception:
-            logger.exception("roic.search: request failed query=%r", query)
-            return self._error("unavailable", "Roic.ai is temporarily unavailable.")
+
+        with audit_context(
+            action="ROIC_AI_MCP_CALL",
+            metadata={
+                "query": query,
+                "limit": limit,
+                "transcript": transcript,
+            }
+        ) as meta:
+            key = f"{query.upper()}:{transcript}"
+            cached = self._read_cache(key)
+            if cached:
+                return {**cached, "cached": True}
+            if not self._api_key:
+                meta["error"] = "ROIC_API_KEY is not configured."
+                meta["status"] = "failed"
+                return self._error("not_configured", "ROIC_API_KEY is not configured.")
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(
+                        ROIC_SEARCH_URL,
+                        params={"apikey": self._api_key, "query": query},
+                    )
+                    if response.status_code == 429:
+                        meta["error"] = "Roic.ai rate limit reached."
+                        meta["status"] = "failed"
+                        return self._error("rate_limited", "Roic.ai rate limit reached. Please try again shortly.")
+                    response.raise_for_status()
+                    result = self._normalize(query, response.json(), limit)
+                    if transcript and result["results"]:
+                        ticker = result["results"][0].get("ticker")
+                        if ticker:
+                            transcript_response = await client.get(
+                                f"{ROIC_LATEST_TRANSCRIPT_URL}/{ticker}",
+                                params={"apikey": self._api_key},
+                            )
+                            if transcript_response.status_code == 429:
+                                meta["error"] = "Roic.ai rate limit reached."
+                                meta["status"] = "failed"
+                                return self._error("rate_limited", "Roic.ai rate limit reached. Please try again shortly.")
+                            transcript_response.raise_for_status()
+                            result["latest_transcript"] = self._normalize_transcript(
+                                ticker, transcript_response.json()
+                            )
+                    # Fetch financial metrics/ratios for the resolved ticker
+                    if result["results"]:
+                        ticker = result["results"][0].get("ticker")
+                        if ticker:
+                            result["metrics"] = await self._fetch_financial_metrics(client, ticker)
+                self._write_cache(key, result)
+                logger.info("roic.search: query=%r results=%d cache=false", query, len(result["results"]))
+                return {**result, "cached": False}
+            except httpx.HTTPStatusError as exc:
+                logger.warning("roic.search: API error status=%s", exc.response.status_code)
+                meta["error"] = f"API error status={exc.response.status_code}"
+                meta["status"] = "failed"
+                return self._error("api_error", "Roic.ai could not process this request.")
+            except Exception as exc:
+                logger.exception("roic.search: request failed query=%r", query)
+                meta["error"] = str(exc)
+                meta["status"] = "failed"
+                return self._error("unavailable", "Roic.ai is temporarily unavailable.")
 
     async def _fetch_financial_metrics(self, client: httpx.AsyncClient, ticker: str) -> dict[str, Any] | None:
         """Fetch all fundamental ratios and statements for ticker concurrently and merge them by year."""

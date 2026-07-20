@@ -364,67 +364,85 @@ class CompaniesHouseClient:
 
     async def _get_json(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """GET a Companies House endpoint using HTTP Basic Auth (API key as username, empty password)."""
-        if not self._api_key:
-            logger.warning("companies_house: API key is not configured")
-            return self._error("not_configured", "Companies House API key is not configured.")
+        from server.services.audit_logger import audit_context
 
-        # Ensure base URL has correct format
-        if endpoint.startswith("http"):
-            url = endpoint
-        else:
-            url = f"{self._base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+        with audit_context(
+            action="COMPANIES_HOUSE_MCP_CALL",
+            metadata={"endpoint": endpoint, "params": params}
+        ) as meta:
+            if not self._api_key:
+                logger.warning("companies_house: API key is not configured")
+                meta["error"] = "API key is not configured"
+                meta["status"] = "failed"
+                return self._error("not_configured", "Companies House API key is not configured.")
 
-        headers = {"Accept": "application/json"}
-        auth = (self._api_key, "")
+            # Ensure base URL has correct format
+            if endpoint.startswith("http"):
+                url = endpoint
+            else:
+                url = f"{self._base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
-        logger.info("companies_house.request: url=%s params=%s", url, params)
+            headers = {"Accept": "application/json"}
+            auth = (self._api_key, "")
 
-        try:
-            retries = 1
-            while retries >= 0:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    response = await client.get(url, params=params, headers=headers, auth=auth)
+            logger.info("companies_house.request: url=%s params=%s", url, params)
 
-                    if response.status_code == 429:
-                        if retries > 0:
-                            logger.info("companies_house.retry: url=%s retry_count=1 (rate limited)", url)
-                            await asyncio.sleep(1.0)
-                            retries -= 1
-                            continue
-                        else:
-                            return self._error("rate_limited", "Companies House API rate limit reached. Please try again later.")
+            try:
+                retries = 1
+                while retries >= 0:
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        response = await client.get(url, params=params, headers=headers, auth=auth)
 
-                    if response.status_code == 401:
-                        return self._error(
-                            "unauthorized",
-                            "Authentication failed. Verify if your Companies House API key is correct and matches the environment (sandbox vs live)."
-                        )
+                        if response.status_code == 429:
+                            if retries > 0:
+                                logger.info("companies_house.retry: url=%s retry_count=1 (rate limited)", url)
+                                await asyncio.sleep(1.0)
+                                retries -= 1
+                                continue
+                            else:
+                                meta["error"] = "Rate limit reached"
+                                meta["status"] = "failed"
+                                return self._error("rate_limited", "Companies House API rate limit reached. Please try again later.")
 
-                    if response.status_code == 404:
-                        return self._error(
-                            "not_found",
-                            "The requested resource was not found on Companies House."
-                        )
+                        if response.status_code == 401:
+                            meta["error"] = "Authentication failed (401)"
+                            meta["status"] = "failed"
+                            return self._error(
+                                "unauthorized",
+                                "Authentication failed. Verify if your Companies House API key is correct and matches the environment (sandbox vs live)."
+                            )
 
-                    response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, dict):
-                        raise ValueError("Companies House returned a non-object response")
-                    return payload
-        except httpx.HTTPStatusError as exc:
-            logger.exception("companies_house.request: HTTP status error")
-            return self._error(
-                "http_error",
-                f"Companies House returned HTTP error status: {exc.response.status_code}",
-                str(exc)
-            )
-        except Exception as exc:
-            logger.exception("companies_house.request: unexpected error")
-            return self._error(
-                "api_unavailable",
-                "Companies House registry is currently unavailable.",
-                str(exc)
-            )
+                        if response.status_code == 404:
+                            meta["error"] = "Resource not found (404)"
+                            meta["status"] = "failed"
+                            return self._error(
+                                "not_found",
+                                "The requested resource was not found on Companies House."
+                            )
+
+                        response.raise_for_status()
+                        payload = response.json()
+                        if not isinstance(payload, dict):
+                            raise ValueError("Companies House returned a non-object response")
+                        return payload
+            except httpx.HTTPStatusError as exc:
+                logger.exception("companies_house.request: HTTP status error")
+                meta["error"] = f"HTTP error {exc.response.status_code}: {str(exc)}"
+                meta["status"] = "failed"
+                return self._error(
+                    "http_error",
+                    f"Companies House returned HTTP error status: {exc.response.status_code}",
+                    str(exc)
+                )
+            except Exception as exc:
+                logger.exception("companies_house.request: unexpected error")
+                meta["error"] = str(exc)
+                meta["status"] = "failed"
+                return self._error(
+                    "api_unavailable",
+                    "Companies House registry is currently unavailable.",
+                    str(exc)
+                )
 
     @classmethod
     def _read_cache(cls, key: str) -> Any | None:

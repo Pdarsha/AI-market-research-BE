@@ -52,29 +52,35 @@ class FinancialNewsMCPTool:
         returned. Network I/O runs in a worker thread so an async caller can fetch
         financial news alongside RAG.
         """
+        from server.services.audit_logger import audit_context
+
         ticker = ticker.strip().upper()
         if not ticker or not ticker.replace(".", "").replace("-", "").isalnum():
             raise ValueError("ticker must be a non-empty market symbol")
         limit = max(1, min(int(limit), 50))
 
-        cached = self._get_cached(ticker)
-        if cached is not None:
-            return self._with_limit(cached, limit, cached=True)
-        if not self._api_key:
-            logger.warning("financial_news: Alpha Vantage key is not configured")
-            return self._with_limit(self._empty(ticker), limit, cached=False)
+        with audit_context(
+            action="FINANCIAL_NEWS_MCP_CALL",
+            metadata={"ticker": ticker, "limit": limit, "cached": False}
+        ) as meta:
+            cached = self._get_cached(ticker)
+            if cached is not None:
+                meta["cached"] = True
+                return self._with_limit(cached, limit, cached=True)
+            if not self._api_key:
+                logger.warning("financial_news: Alpha Vantage key is not configured")
+                meta["error"] = "API key not configured"
+                meta["status"] = "failed"
+                return self._with_limit(self._empty(ticker), limit, cached=False)
 
-        try:
-            payload = await asyncio.to_thread(self._fetch, ticker)
-        except Exception:
-            logger.exception("financial_news: request failed for ticker=%s", ticker)
-            return self._with_limit(self._empty(ticker), limit, cached=False)
-
-        with self._cache_lock:
-            self._cache[ticker] = _CachedNews(
-                expires_at=time.monotonic() + max(0, self._cache_ttl), payload=payload
-            )
-        return self._with_limit(payload, limit, cached=False)
+            try:
+                payload = await asyncio.to_thread(self._fetch, ticker)
+                return self._with_limit(payload, limit, cached=False)
+            except Exception as exc:
+                logger.exception("financial_news: request failed for ticker=%s", ticker)
+                meta["error"] = str(exc)
+                meta["status"] = "failed"
+                return self._with_limit(self._empty(ticker), limit, cached=False)
 
     def _get_cached(self, ticker: str) -> dict[str, Any] | None:
         with self._cache_lock:

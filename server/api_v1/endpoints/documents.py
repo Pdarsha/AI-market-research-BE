@@ -58,6 +58,7 @@ def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Roic.ai transcript not available")
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="CITATION_GET_ROIC_TRANSCRIPT",
         user_id=str(current_user.id),
@@ -69,7 +70,12 @@ def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
 
     return JSONResponse(
         status_code=200,
-        content={"success": True, "error": None, "data": transcript, "message": "Roic.ai transcript fetched successfully."},
+        content={
+            "success": True,
+            "error": None,
+            "data": transcript,
+            "message": "Roic.ai transcript fetched successfully.",
+        },
     )
 
 
@@ -81,13 +87,8 @@ def get_citation(
     current_user=Depends(get_current_user),
 ):
     """Citation details for a chunk (``citation_id`` == ``DocumentChunk.id``)."""
-    chunk = (
-        db.query(DocumentChunk)
-        .filter(
-            DocumentChunk.id == citation_id,
-            DocumentChunk.user_id == str(current_user.id),
-        )
-        .first()
+    chunk = crud.document_chunk.get_chunks_by_id(
+        db, citation_id=citation_id, user_id=str(current_user.id)
     )
     if not chunk:
         raise HTTPException(status_code=404, detail="Citation not found")
@@ -107,6 +108,7 @@ def get_citation(
     )
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="CITATION_GET",
         user_id=str(current_user.id),
@@ -177,6 +179,7 @@ def get_document_viewer(
     )
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="DOCUMENT_VIEW",
         user_id=str(current_user.id),
@@ -227,14 +230,8 @@ def get_document_highlight(
 
     search_text = text
     if not search_text and chunk_id:
-        chunk = (
-            db.query(DocumentChunk)
-            .filter(
-                DocumentChunk.id == chunk_id,
-                DocumentChunk.document_id == document_id,
-                DocumentChunk.user_id == str(current_user.id),
-            )
-            .first()
+        chunk = crud.document_chunk.get_chunks_by_document_id(
+            db, chunk_id=chunk_id, document_id=document_id, user_id=str(current_user.id)
         )
         search_text = chunk.content if chunk else None
     if not search_text:
@@ -250,6 +247,7 @@ def get_document_highlight(
     )
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="DOCUMENT_HIGHLIGHT",
         user_id=str(current_user.id),
@@ -297,6 +295,7 @@ def get_document_file(
         raise HTTPException(status_code=404, detail="File not found on server")
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="DOCUMENT_GET_FILE",
         user_id=payload["user_id"],
@@ -340,6 +339,7 @@ def export_conversation_pdf(
         raise HTTPException(status_code=500, detail="PDF generation failed") from exc
 
     from server.services.audit_logger import AuditLogger
+
     AuditLogger.log(
         action="DOCUMENT_EXPORT",
         user_id=str(current_user.id),
@@ -352,7 +352,5 @@ def export_conversation_pdf(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{slugify(title)}.pdf"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{slugify(title)}.pdf"'},
     )

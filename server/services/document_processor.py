@@ -168,8 +168,8 @@ class DocumentProcessor:
             ),
         )
 
-        chunk_rows: list[DocumentChunk] = [
-            DocumentChunk(
+        chunk_schemas = [
+            schemas.DocumentChunkCreate(
                 document_id=document.id,
                 user_id=str(user_id),
                 workspace_id=str(workspace_id),
@@ -188,15 +188,14 @@ class DocumentProcessor:
             )
             for chunk, embedding in zip(chunks, embeddings)
         ]
-        db.add_all(chunk_rows)
-        db.commit()
+        crud.document_chunk.create_chunks(db, chunks=chunk_schemas)
 
         logger.info(
             "Ingested file=%s user=%s workspace=%s chunks=%d",
             file.filename,
             user_id,
             workspace_id,
-            len(chunk_rows),
+            len(chunk_schemas),
         )
         return document
 

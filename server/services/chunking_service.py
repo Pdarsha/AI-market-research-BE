@@ -58,29 +58,43 @@ class ChunkingService:
         page_number: int | None = None,
     ) -> list[Chunk]:
         """Return structured :class:`Chunk` objects for ``text``."""
-        if not text or not text.strip():
-            return []
+        from server.services.audit_logger import audit_context
 
-        step = self.chunk_size - self.chunk_overlap
-        chunks: list[Chunk] = []
-        index = 0
-        for start in range(0, len(text), step):
-            piece = text[start : start + self.chunk_size]
-            if piece.strip():
-                chunks.append(
-                    Chunk(
-                        text=piece,
-                        chunk_index=index,
-                        page_number=page_number,
-                        source=source,
-                        start_offset=start,
-                        end_offset=start + len(piece),
+        with audit_context(
+            action="TEXT_CHUNKING",
+            metadata={
+                "source": source,
+                "text_length": len(text) if text else 0,
+                "chunk_size": self.chunk_size,
+                "chunk_overlap": self.chunk_overlap,
+            }
+        ) as meta:
+            if not text or not text.strip():
+                meta["chunks_count"] = 0
+                return []
+
+            step = self.chunk_size - self.chunk_overlap
+            chunks: list[Chunk] = []
+            index = 0
+            for start in range(0, len(text), step):
+                piece = text[start : start + self.chunk_size]
+                if piece.strip():
+                    chunks.append(
+                        Chunk(
+                            text=piece,
+                            chunk_index=index,
+                            page_number=page_number,
+                            source=source,
+                            start_offset=start,
+                            end_offset=start + len(piece),
+                        )
                     )
-                )
-                index += 1
-            if start + self.chunk_size >= len(text):
-                break
-        return chunks
+                    index += 1
+                if start + self.chunk_size >= len(text):
+                    break
+
+            meta["chunks_count"] = len(chunks)
+            return chunks
 
 
 @lru_cache(maxsize=1)

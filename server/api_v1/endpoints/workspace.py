@@ -419,34 +419,12 @@ def delete_workspace_doc(
     ):
         raise HTTPException(status_code=404, detail="File not found")
 
-    chats = (
-        db.query(ChatSession)
-        .filter(
-            ChatSession.workspace_id == workspace_id,
-            ChatSession.user_id == str(current_user.id),
-        )
-        .all()
+    chats = crud.workspace.get_sessions_by_workspace_id(
+        db, workspace_id=workspace_id, user_id=str(current_user.id)
     )
-    for chat in chats:
-        messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat.id)
-        doc_ids = set()
-        for m in messages:
-            if m.document_ids:
-                doc_ids.update(m.document_ids)
-        if doc_id not in doc_ids:
-            continue
-        if doc_ids == {doc_id}:
-            db.delete(chat)  # cascades to its messages
-        else:
-            for m in messages:
-                if m.document_ids and doc_id in m.document_ids:
-                    m.document_ids = [d for d in m.document_ids if d != doc_id]
-                    db.add(m)
-                if m.source_documents and file.file_name in m.source_documents:
-                    m.source_documents = [
-                        n for n in m.source_documents if n != file.file_name
-                    ]
-                    db.add(m)
+    crud.document.delete_document_cleanup_chats(
+        db, doc_id=doc_id, file_name=file.file_name, chats=chats
+    )
 
     # Removing the document row cascades (ON DELETE CASCADE) to its
     # ``document_chunks`` rows, purging the file's embeddings from pgvector.

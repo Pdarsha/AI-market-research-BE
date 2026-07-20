@@ -41,3 +41,46 @@ class DocumentResponse(BaseModel):
     file_name: str
     file_format: str
     storage_path: Optional[str] = None
+
+class DocumentChunkBase(BaseModel):
+    document_id: str
+    user_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+
+    file_name: Optional[str] = None
+    chunk_number: Optional[int] = None
+    total_chunks: Optional[int] = None
+
+    content: Optional[str] = None
+
+    # Citation metadata
+    start_offset: Optional[int] = None
+    end_offset: Optional[int] = None
+
+    page_number: Optional[int] = None
+    section_title: Optional[str] = None
+
+    document_path: Optional[str] = None
+    document_url: Optional[str] = None
+
+class DocumentChunkCreate(DocumentChunkBase):
+    embedding: Optional[list[float]] = None
+
+
+class DocumentChunkUpdate(BaseModel):
+    file_name: Optional[str] = None
+    chunk_number: Optional[int] = None
+    total_chunks: Optional[int] = None
+
+    content: Optional[str] = None
+    embedding: Optional[list[float]] = None
+
+    start_offset: Optional[int] = None
+    end_offset: Optional[int] = None
+
+    page_number: Optional[int] = None
+    section_title: Optional[str] = None
+
+    document_path: Optional[str] = None
+    document_url: Optional[str] = None
+

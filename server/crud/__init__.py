@@ -5,3 +5,4 @@ from .crud_emial_otp import email_otp
 from .crud_genai import genai
 from .crud_user import user
 from .crud_workspace import workspace
+from .crud_document_chuck import document_chunk

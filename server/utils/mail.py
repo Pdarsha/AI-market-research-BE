@@ -184,13 +184,19 @@ def get_signup_template(otp):
 
 
 async def send_email(email, otp):
-    message = MessageSchema(
-        subject="OTP for email verification",
-        recipients=[email],
-        body=get_signup_template(otp),
-        subtype=MessageType.html,
-    )
+    from server.services.audit_logger import audit_context
 
-    fm = FastMail(conf)
-    await fm.send_message(message)
-    return True
+    with audit_context(
+        action="EMAIL_SEND",
+        metadata={"recipient": email, "subject": "OTP for email verification"}
+    ):
+        message = MessageSchema(
+            subject="OTP for email verification",
+            recipients=[email],
+            body=get_signup_template(otp),
+            subtype=MessageType.html,
+        )
+
+        fm = FastMail(conf)
+        await fm.send_message(message)
+        return True

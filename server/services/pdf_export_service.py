@@ -110,30 +110,42 @@ ol.sources { font-size: 8.5pt; color: #555555; }
 
 def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
     """Render the transcript and return the PDF file bytes."""
-    exported = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    body = "\n".join(
-        _message_html(m)
-        for m in messages
-        if not m.get("pending") and not m.get("error")
-    )
-    doc_html = (
-        "<body>"
-        f"<h1>{_esc(title)}</h1>"
-        f'<p class="meta">Exported {exported} · CapitalEdge</p>'
-        f"{body or '<p>No messages.</p>'}"
-        "</body>"
-    )
+    from server.services.audit_logger import audit_context
 
-    story = fitz.Story(html=doc_html, user_css=_CSS)
-    buffer = io.BytesIO()
-    writer = fitz.DocumentWriter(buffer)
-    mediabox = fitz.paper_rect("a4")
-    content_box = mediabox + (40, 44, -40, -44)
-    more = 1
-    while more:
-        device = writer.begin_page(mediabox)
-        more, _ = story.place(content_box)
-        story.draw(device)
-        writer.end_page()
-    writer.close()
-    return buffer.getvalue()
+    with audit_context(
+        action="PDF_EXPORT",
+        metadata={
+            "title": title,
+            "messages_count": len(messages),
+            "pdf_size_bytes": 0,
+        }
+    ) as meta:
+        exported = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        body = "\n".join(
+            _message_html(m)
+            for m in messages
+            if not m.get("pending") and not m.get("error")
+        )
+        doc_html = (
+            "<body>"
+            f"<h1>{_esc(title)}</h1>"
+            f'<p class="meta">Exported {exported} · CapitalEdge</p>'
+            f"{body or '<p>No messages.</p>'}"
+            "</body>"
+        )
+
+        story = fitz.Story(html=doc_html, user_css=_CSS)
+        buffer = io.BytesIO()
+        writer = fitz.DocumentWriter(buffer)
+        mediabox = fitz.paper_rect("a4")
+        content_box = mediabox + (40, 44, -40, -44)
+        more = 1
+        while more:
+            device = writer.begin_page(mediabox)
+            more, _ = story.place(content_box)
+            story.draw(device)
+            writer.end_page()
+        writer.close()
+        pdf_bytes = buffer.getvalue()
+        meta["pdf_size_bytes"] = len(pdf_bytes)
+        return pdf_bytes

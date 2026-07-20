@@ -4,6 +4,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
+from server.models.genai import ChatSession
 from server.models.workspace import Workspace
 from server.schemas.workspace import WorkspaceCreate, WorkspaceUpdate
 
@@ -60,6 +61,18 @@ class CRUDWorkspace(CRUDBase[Workspace, WorkspaceCreate, WorkspaceUpdate]):
         """
         db.delete(workspace)
         db.commit()
+
+    def get_sessions_by_workspace_id(
+        self, db: Session, *, workspace_id: str, user_id: str
+    ) -> list[Workspace]:
+        return (
+            db.query(ChatSession)
+            .filter(
+                ChatSession.workspace_id == workspace_id,
+                ChatSession.user_id == user_id,
+            )
+            .all()
+        )
 
 
 workspace = CRUDWorkspace(Workspace)
