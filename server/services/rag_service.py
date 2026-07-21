@@ -21,7 +21,6 @@ from functools import lru_cache
 from typing import Any
 
 import serpapi
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from server import crud
@@ -41,6 +40,7 @@ from server.utils.prompt import (
     roic_ai_classification_prompt,
     web_search_classification_prompt,
     companies_house_classification_prompt,
+    classify_intent_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -253,6 +253,9 @@ class RAGService:
         sec_context: str | None = None,
         roic_context: str | None = None,
         companies_house_context: str | None = None,
+        client: Any = None,
+        model: str | None = None,
+        intent: str | None = None,
     ) -> list[dict]:
         """Prompt generation.
 
@@ -267,6 +270,11 @@ class RAGService:
         every answer is followed by a parseable list of suggested follow-ups
         (see :meth:`split_answer_and_followups`).
         """
+        if intent is None and client is not None and model is not None:
+            intent = RAGService.classify_intent(client, question, model)
+        elif intent is None:
+            intent = "Other"
+
         if (
             retrieved_context is not None
             or web_context is not None
@@ -282,11 +290,14 @@ class RAGService:
                 sec_context=sec_context,
                 roic_context=roic_context,
                 companies_house_context=companies_house_context,
+                intent=intent,
             )
         else:
-            system_prompt = ai_assistent()
+            system_prompt = ai_assistent(intent=intent)
 
-        system_prompt += followup_instruction_block()
+        # Do not generate follow-up questions for Greeting, Small Talk, Simple Question, or Coding Request
+        if intent not in ("Greeting", "Small Talk", "Simple Question", "Coding Request"):
+            system_prompt += followup_instruction_block()
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
@@ -396,6 +407,36 @@ class RAGService:
             ):
                 ai_response += chunk.choices[0].delta.content
         return ai_response
+
+    @staticmethod
+    def classify_intent(client, question: str, model: str) -> str:
+        """Ask the LLM to classify the user's intent into one of the designated categories.
+
+        Defaults to 'Other' on error.
+        """
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": classify_intent_prompt()},
+                    {"role": "user", "content": f'User message:\n"{question}"\nIntent:'},
+                ],
+                max_tokens=15,
+                temperature=0,
+            )
+            intent = (completion.choices[0].message.content or "").strip()
+            valid_intents = {
+                "Greeting", "Small Talk", "Simple Question", "Technical Question",
+                "Coding Request", "Document Analysis", "Research / Deep Analysis",
+                "AI Agent Workflow", "Summarization", "Comparison", "Other"
+            }
+            for valid in valid_intents:
+                if intent.lower() == valid.lower() or intent.lower().replace(" ", "") == valid.lower().replace(" ", ""):
+                    return valid
+            return "Other"
+        except Exception:
+            logger.exception("rag.classify_intent: intent classification failed; defaulting to Other")
+            return "Other"
 
     @staticmethod
     def classify_requires_document(client, question: str, model: str) -> bool:
@@ -1468,13 +1509,15 @@ class RAGService:
         return (
             f'Perform a comprehensive, structured workspace analysis for "{ws_name}".\n\n'
             f"Recent Conversations Summary/Context:\n{chats_context_str or 'No previous chats.'}\n\n"
-            "Please synthesize the provided document contents and the recent chat conversations to generate a comprehensive workspace analysis report structured exactly with the following sections:\n\n"
+            "Please synthesize the provided document contents and the recent chat conversations to generate a comprehensive workspace analysis report. "
+            "Your output must be formatted using rich, professional Markdown with clear section headings, bold key metrics/themes, and clean bullet lists. "
+            "You must structure the report exactly with the following sections:\n\n"
             "1. **Workspace-wide Analysis**: A comprehensive overall summary of the workspace, its context, and its contents.\n"
-            "2. **Bulk Document Summarization**: Concise summaries across all relevant documents within the workspace, highlighting key themes and points from each.\n"
-            "3. **Trend Extraction**: Identification of recurring patterns, themes, and important trends across both documents and conversations.\n"
-            "4. **Risk Identification**: Detection of potential risks, issues, inconsistencies, or areas requiring attention/further due diligence.\n"
-            "5. **Topic Clustering**: Grouping of related documents, chats, and discussions into logical topics or categories.\n"
-            "6. **AI-Generated Observations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data."
+            "2. **Bulk Document Summarization**: Concise summaries across all relevant documents within the workspace, highlighting key themes, purposes, and points from each document in a bulleted list with bold document name lead-ins.\n"
+            "3. **Trend Extraction**: Identification of recurring patterns, themes, and important trends across both documents and conversations, highlighting key developments.\n"
+            "4. **Risk Identification**: Detection of potential risks, issues, inconsistencies, or areas requiring attention/further due diligence, using bullet points with bold risk severity levels.\n"
+            "5. **Topic Clustering**: Grouping of related documents, chats, and discussions into logical topics or categories. Include a clean markdown table summarizing the clusters (e.g. Columns: Category/Topic, Associated Documents/Chats, Key Theme).\n"
+            "6. **AI-Generated Observations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data, emphasizing strategic next steps."
         )
 
 

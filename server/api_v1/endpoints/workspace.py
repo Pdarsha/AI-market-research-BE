@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -131,7 +132,7 @@ def public_workspace(
                             m.created_at.isoformat() if m.created_at else None
                         ),
                     }
-                    for m in crud.chat_message.get_multi_by_chat(db, chat_id=c.id)
+                    for m in crud.chat_message.get_visible_by_chat(db, chat_id=c.id)
                 ],
             }
             for c in chats
@@ -175,9 +176,13 @@ def get_workspace(
     )
     data = serialize_workspace(workspace, chat_count=len(chats))
     data["chats"] = [serialize_chat(chat) for chat in chats]
+    workspace_files = crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
     data["files"] = [
-        serialize_document(f)
-        for f in crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
+        serialize_document(
+            f,
+            chat_count=crud.document.get_chat_count_for_document(db, doc_id=f.id),
+        )
+        for f in workspace_files
     ]
     from server.services.audit_logger import AuditLogger
     AuditLogger.log(
@@ -275,6 +280,7 @@ def delete_workspace(
 async def upload_docs(
     workspace_id: str,
     doc: UploadFile = File(...),
+    chat_id: Optional[str] = None,
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -294,16 +300,43 @@ async def upload_docs(
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
+    # Validate chat ownership when a chat_id is supplied.
+    chat_session = None
+    if chat_id:
+        chat_session = db.query(ChatSession).filter(
+            ChatSession.id == chat_id,
+            ChatSession.user_id == str(current_user.id),
+        ).first()
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
     logger.info(
-        "upload_docs: user=%s workspace=%s uploaded file=%s",
+        "upload_docs: user=%s workspace=%s chat=%s uploaded file=%s",
         getattr(current_user, "id", None),
         workspace_id,
+        chat_id,
         doc.filename,
     )
 
     document = await get_document_processor().process(
         db, file=doc, user_id=current_user.id, workspace_id=workspace_id
     )
+
+    if chat_session is not None:
+        from server.models.genai import ChatMessage
+        import uuid as _uuid
+        link_msg = ChatMessage(
+            id=str(_uuid.uuid4()),
+            chat_id=chat_session.id,
+            user_id=str(current_user.id),
+            workspace_id=workspace_id,
+            role="system",
+            content=f"[document_upload] {document.file_name}",
+            document_ids=[document.id],
+        )
+        db.add(link_msg)
+        db.commit()
+        db.refresh(link_msg)
 
     from server.services.audit_logger import AuditLogger
     AuditLogger.log(
@@ -314,15 +347,30 @@ async def upload_docs(
         endpoint="/v1/workspaces/upload-docs",
         http_method="POST",
         status="200",
-        metadata={"filename": doc.filename},
+        metadata={"filename": doc.filename, "chat_id": chat_id},
     )
+
+    # Compute the chat_count for the newly uploaded document (1 if linked, 0 otherwise).
+    chat_count = crud.document.get_chat_count_for_document(db, doc_id=document.id)
+
+    all_workspace_docs = crud.document.get_multi_by_workspace(
+        db, workspace_id=workspace_id
+    )
+    workspace_docs_serialized = []
+    for d in all_workspace_docs:
+        d_chat_count = crud.document.get_chat_count_for_document(db, doc_id=d.id)
+        workspace_docs_serialized.append(serialize_document(d, chat_count=d_chat_count))
 
     return JSONResponse(
         status_code=200,
         content={
             "success": True,
             "error": None,
-            "data": serialize_document(document),
+            "data": {
+                "document": serialize_document(document, chat_count=chat_count),
+                "workspace_documents": workspace_docs_serialized,
+                "chat_id": chat_id,
+            },
             "message": "File uploaded successfully.",
         },
     )
@@ -357,7 +405,13 @@ def list_workspace_docs(
         content={
             "success": True,
             "error": None,
-            "data": [serialize_document(f) for f in files],
+            "data": [
+                serialize_document(
+                    f,
+                    chat_count=crud.document.get_chat_count_for_document(db, doc_id=f.id),
+                )
+                for f in files
+            ],
             "message": "Workspace files fetched successfully.",
         },
     )
@@ -371,7 +425,7 @@ async def get_workspace_document(
     current_user=Depends(get_current_user),
 ):
     document = crud.document.get_document(
-        db, workspace_id, doc_id, str(current_user.id)
+        db, doc_id, str(current_user.id)
     )
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -392,7 +446,10 @@ async def get_workspace_document(
         content={
             "success": True,
             "error": None,
-            "data": serialize_document(document),
+            "data": serialize_document(
+                document,
+                chat_count=crud.document.get_chat_count_for_document(db, doc_id=document.id),
+            ),
             "message": "Document fetched successfully.",
         },
     )
@@ -425,6 +482,7 @@ def delete_workspace_doc(
     crud.document.delete_document_cleanup_chats(
         db, doc_id=doc_id, file_name=file.file_name, chats=chats
     )
+    db.commit()
 
     # Removing the document row cascades (ON DELETE CASCADE) to its
     # ``document_chunks`` rows, purging the file's embeddings from pgvector.

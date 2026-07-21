@@ -183,8 +183,8 @@ def serialize_chat(chat) -> dict:
     }
 
 
-def serialize_document(doc) -> dict:
-    return {
+def serialize_document(doc, chat_count: Optional[int] = None) -> dict:
+    data = {
         "id": doc.id,
         "workspace_id": doc.workspace_id,
         "file_name": doc.file_name,
@@ -192,6 +192,9 @@ def serialize_document(doc) -> dict:
         "storage_path": doc.storage_path,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
+    if chat_count is not None:
+        data["chat_count"] = chat_count
+    return data
 
 
 

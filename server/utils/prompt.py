@@ -42,15 +42,18 @@ def web_search_classification_prompt():
     return """You are a routing assistant.
 
 Determine whether answering the user's question requires up-to-date, real-time, or
-external information from the internet — for example: current events, news, prices,
+external information from the internet — for example: current events, news, stock prices,
 weather, sports scores, release dates, live status, or any fact that changes over
 time or that you are not confident is current.
 
-Reply using ONLY one word.
+Also return YES for technical queries asking for the latest version, recent releases,
+API changes in a library, or current status of software/packages, where standard static
+knowledge would be outdated.
 
-YES
-or
-NO
+Return NO for static definitions, general knowledge, standard algorithms, history, or
+questions referencing documents/files.
+
+Reply using ONLY one word: YES or NO. Do not include any punctuation or extra text.
 
 Examples
 
@@ -66,6 +69,16 @@ YES
 
 Question:
 "What is the current price of Bitcoin?"
+Answer:
+YES
+
+Question:
+"What's new in Python 3.12?"
+Answer:
+YES
+
+Question:
+"What is the latest stable version of Django?"
 Answer:
 YES
 
@@ -87,7 +100,13 @@ NO
 
 
 def augmented_system_prompt(
-    document_context=None, web_context=None, financial_news_context=None, sec_context=None, roic_context=None, companies_house_context=None
+    document_context=None,
+    web_context=None,
+    financial_news_context=None,
+    sec_context=None,
+    roic_context=None,
+    companies_house_context=None,
+    intent: str = "Other",
 ):
     """System prompt that grounds the answer in whatever context is available.
 
@@ -232,7 +251,98 @@ Date Range:
 [Provide a concise neutral assessment based ONLY on the supplied articles. Do not provide investment advice.]
 """
     else:
-        response_format_rules = """
+        if intent == "Greeting":
+            response_format_rules = """
+- Respond to the user's greeting in exactly 1 to 2 short sentences.
+- Be warm and friendly.
+- Do NOT use headings, explanations, examples, or lists.
+- Do NOT include any citations unless specifically greeting a source (unlikely).
+"""
+        elif intent == "Small Talk":
+            response_format_rules = """
+- Respond in a natural, polite, and conversational manner.
+- Keep the response short (maximum of 3 sentences).
+- Do NOT use headings, lists, or structured formatting.
+"""
+        elif intent == "Simple Question":
+            response_format_rules = """
+- Provide a direct, concise answer to the question using the CONTEXT.
+- Keep the response brief and to the point.
+- Avoid unnecessary sections, headings, or complex lists.
+- Use bold (**bold**) for key metrics, names, dates, or terms.
+- Add a small example only if it is highly helpful for clarity.
+- Cite the sources [n] immediately after the relevant statements.
+"""
+        elif intent == "Technical Question":
+            response_format_rules = """
+- Provide a structured technical explanation based on the CONTEXT.
+- Break the explanation into logical parts using clear headings (## or ###) and bulleted/numbered lists.
+- Use bold (**bold**) for key concepts, parameters, and technologies.
+- Include code blocks (```language ... ```) for syntax, or markdown tables where comparing dimensions.
+- Include ONLY sections that directly improve readability and add value (e.g., Summary, Explanation, Example, Code, Diagram, Best Practices). Do NOT force unnecessary or empty sections.
+- Ensure proper spacing (a blank line) between headers, paragraphs, lists, and tables.
+- Cite the sources [n] immediately after the relevant statements.
+"""
+        elif intent == "Coding Request":
+            response_format_rules = """
+- Prioritize providing working, clean, and production-ready code inside fenced code blocks.
+- Explain only what is necessary, keeping introductions and explanations minimal and concise.
+- Include comments inside the code where appropriate.
+- Use bold (**bold**) to highlight key configuration options or commands.
+- Cite any code sources [n] if they are derived from the CONTEXT.
+"""
+        elif intent == "Document Analysis":
+            response_format_rules = """
+- Provide a comprehensive, structured analysis of the provided CONTEXT.
+- Structure your response using clear headers (##, ###) and bold key findings.
+- Use Markdown tables when comparing multi-dimensional values or structured data from the document.
+- Include sections only when applicable and when they add value:
+  - Executive Summary (brief overview)
+  - Key Findings (bullet points with bold lead-ins)
+  - Analysis (in-depth breakdown)
+  - Tables (comparative metrics or data points)
+  - Recommendations
+  - Risks
+- Do NOT force unnecessary sections or include empty headings.
+- Cite the sources [n] for every claim made from the CONTEXT.
+"""
+        elif intent == "Research / Deep Analysis":
+            response_format_rules = """
+- Provide a detailed, comprehensive analysis of the CONTEXT.
+- Structure your response logically with clear sections:
+  - Executive Summary (summarizing the analysis in 2-3 sentences)
+  - Key Findings (bulleted points with bold lead-ins)
+  - Analysis (detailed structured discussion)
+  - Recommendations / Next Steps
+- Use Markdown tables with clear column headers to compare options, metrics, or periods.
+- Use bold (**bold**) for all key numbers, figures, and dates.
+- Cite the sources [n] for every claim.
+"""
+        elif intent == "AI Agent Workflow":
+            response_format_rules = """
+- Describe the agent plan, workflow, or execution status clearly and structured.
+- Keep the rich formatting, but only include sections that add value.
+- Use bold (**bold**) to highlight state changes, parameters, and status indicators.
+- Cite the sources [n] where applicable.
+"""
+        elif intent == "Summarization":
+            response_format_rules = """
+- Provide a clear, concise, and structured summary of the CONTEXT.
+- Focus on the core information, key themes, and main points.
+- Use bullet points with bold lead-ins for key points instead of walls of prose.
+- Do not include unnecessary headings, fluff, or irrelevant sections.
+- Cite the sources [n] where applicable.
+"""
+        elif intent == "Comparison":
+            response_format_rules = """
+- Provide a clear comparison of the options in the CONTEXT.
+- Use Markdown tables to compare options across relevant dimensions (features, pros/cons, metrics).
+- Highlight key trade-offs and recommendations.
+- Use bold (**bold**) for key parameters, options, and critical differences.
+- Cite the sources [n] where applicable.
+"""
+        else: # Other/default
+            response_format_rules = """
 - Lead with a one- or two-sentence direct answer, then the detail.
 - Break the answer into short paragraphs separated by a BLANK line.
 - Use `##`/`###` headings when the answer has more than one distinct section.
@@ -243,7 +353,7 @@ Date Range:
   tag) for code or commands.
 - Keep a blank line between a paragraph and any list, heading or table that
   follows it — without it, Markdown will not start a new block.
-- Do not wrap the whole answer in a code fence, and do not escape the Markdown.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
 
     return f"""You are an expert AI assistant. Answer the user's question using the CONTEXT below. The CONTEXT may include text extracted from the user's uploaded document(s)/image(s) and/or web search results.
@@ -263,6 +373,26 @@ GROUNDING RULES (STRICT)
 4. If the CONTEXT does not contain what the user asked for, say so plainly (e.g.
    "The uploaded content doesn't contain that information.") — do not fabricate.
 5. Only when the CONTEXT is exactly "None" may you answer from general knowledge.
+
+========================================
+HIERARCHY OF TRUTH & SOURCE CONFLICTS
+========================================
+
+When information conflicts across multiple sources in the CONTEXT, resolve the conflicts using this hierarchy:
+1. User's Uploaded Documents: Primary authority for user-specific data or files.
+2. Official SEC EDGAR Facts: Primary authority for audited US public company financial figures (annual and quarterly).
+3. ROIC.ai Company Data: Primary authority for financial ratios, valuations, and earnings call transcripts.
+4. Companies House: Primary authority for UK corporate registration and profile details.
+5. Live Financial News (Alpha Vantage): Primary authority for recent market events, rumors, current news, and market sentiment.
+6. Web Search Results: Primary authority for general, non-financial web facts.
+
+When reporting conflicting metrics, clearly call out the source, date, reporting period, or news publication to explain the difference (e.g., "While the 10-K reported X [2], recent news suggests Y [4]").
+
+========================================
+STRICT GROUNDING & HALLUCINATION PREVENTION
+========================================
+
+- Do not mention or refer to files, data providers, or sources that are not explicitly present in the CONTEXT. For example, if SEC EDGAR data is not present in the CONTEXT, do not mention SEC filings or SEC EDGAR. If ROIC.ai data is not present, do not mention ROIC.ai.
 
 ========================================
 USING WEB SEARCH RESULTS
@@ -348,8 +478,12 @@ RESPONSE GUIDELINES
 - If the needed information is missing from the CONTEXT, say so — do not guess.
 - Cite CONTEXT-grounded content with [n] markers as instructed above.
 
-Format the answer as GitHub-Flavored Markdown. It is rendered as Markdown, so
-raw prose walls read poorly:
+Format the answer as GitHub-Flavored Markdown. Use rich formatting to create a polished, visually outstanding presentation:
+- **Key Metrics & Terms**: Bold (`**`) important metrics, names, dates, and conclusions.
+- **Tables**: Use clean markdown tables with clear column headers whenever comparing options, metrics, or displaying lists of parameters.
+- **Bullet points**: Use unordered bulleted lists with bold lead-ins for key points (e.g., `- **Key Finding**: Detail...`).
+- **Hierarchy**: Use clear header structures (`##` and `###`) to separate sections.
+- **Spacing**: Keep a blank line before and after lists, tables, and headers to prevent formatting rendering issues.
 {response_format_rules}
 """
 
@@ -361,13 +495,14 @@ def classification_prompt():
     """
     return """You are a routing assistant.
 
-Determine whether the user's question requires information from the uploaded document.
+Determine whether the user's question requires information from the uploaded document(s) or file(s).
 
-Reply using ONLY one word.
+Guidelines:
+- Return YES if the question contains pronouns or words referring to documents (e.g., "it", "this", "the file", "the report", "above", "the PDF", "the text", "these attachments").
+- Return YES if the user asks for a summary, analysis, key findings, extraction, or specific questions about text that they uploaded.
+- Return NO only if the question is general knowledge, small talk, greetings, or completely unrelated to any uploaded file.
 
-YES
-or
-NO
+Reply using ONLY one word: YES or NO.
 
 Examples
 
@@ -383,6 +518,16 @@ YES
 
 Question:
 "What is written in section 3?"
+Answer:
+YES
+
+Question:
+"Analyze its main risks."
+Answer:
+YES
+
+Question:
+"What does it say about Q3 revenue?"
 Answer:
 YES
 
@@ -407,15 +552,18 @@ def financial_news_classification_prompt():
     """Routing prompt for Alpha Vantage news; answer format is intentionally tiny."""
     return """You route questions to a live financial-news tool.
 
+Determine if the query is about recent/live financial news, sentiment, earnings announcements, stock trends, market movements, or recent events for a publicly traded company.
+If YES, determine the primary US stock ticker for the company mentioned. Map common company names to their tickers (e.g. Apple -> AAPL, Microsoft -> MSFT, Tesla -> TSLA, Nvidia -> NVDA, Amazon -> AMZN, Alphabet/Google -> GOOGL, Meta/Facebook -> META, Netflix -> NFLX).
+
 Return exactly one line in this format: YES:TICKER or NO.
-Use YES only when the user asks about current/recent financial news, earnings,
-market sentiment, or a publicly traded company. TICKER must be the primary US
-stock ticker where it is clear; otherwise return NO. Do not use the tool for
-general investing education or historical facts.
+- Use YES:TICKER if the query asks about news, sentiment, or updates for that specific ticker.
+- Use NO for static historical facts, general investing education, or questions solely about uploaded files.
 
 Examples:
 Latest Apple news -> YES:AAPL
 Nvidia market sentiment -> YES:NVDA
+What is the news on Google today? -> YES:GOOGL
+What is a balance sheet? -> NO
 Summarize my uploaded annual report -> NO
 Compare my Tesla report with today's Tesla news -> YES:TSLA
 """
@@ -425,11 +573,13 @@ def sec_edgar_classification_prompt():
     """Routing prompt for official SEC company facts."""
     return """You route questions to the SEC EDGAR company-facts tool.
 
+Determine if the user is asking for official SEC filings, reported revenue, net income, operating income, total assets, total liabilities, equity, cash and equivalents, cash flow (operating/investing/financing), basic/diluted EPS, balance sheets, or financial statements of a US public company.
+If YES, identify the primary US stock ticker(s). Map names to tickers (e.g. Apple -> AAPL, Microsoft -> MSFT, Tesla -> TSLA, Nvidia -> NVDA, Amazon -> AMZN, Google -> GOOGL).
+For comparison queries, list both tickers separated by a comma (up to 2 tickers).
+
 Return exactly one line in this format: YES:TICKER or YES:TICKER,TICKER or NO.
-Use YES for requests for SEC filings, reported revenue, net income, assets,
-liabilities, cash flow, EPS, balance sheets, or financial statements of a US
-public company. TICKER must be the primary US ticker where it is clear.
-Use NO for live news, market sentiment, stock prices, or general investing advice.
+- Use YES:TICKER (or YES:TICKER,TICKER) for official SEC financial figures or filings.
+- Use NO for stock prices, live news, market sentiment, or general investing education.
 
 Examples:
 What is Apple's revenue? -> YES:AAPL
@@ -437,32 +587,40 @@ Show Microsoft's latest financial statements -> YES:MSFT
 Compare my Tesla annual report with the latest SEC filing -> YES:TSLA
 Compare Apple and Microsoft revenue -> YES:AAPL,MSFT
 Latest Tesla news -> NO
+Explain what net income means -> NO
 """
 
 
 def roic_ai_classification_prompt():
-    return """You route company discovery and earnings-transcript questions to Roic.ai.
-Return only YES:TICKER or NO. Use YES for earnings calls, earnings transcripts,
-conference calls, management commentary, CEO/CFO remarks, forward guidance,
-outlook, production plans, or management discussion during a call. Also use YES
-for company lookup/search or Roic.ai company data. Use NO for official SEC facts,
-live news, stock prices, or general education.
+    return """You route questions to Roic.ai for earnings call transcripts or financial ratios/valuation data.
+
+Return only YES:TICKER or NO.
+Use YES:TICKER when the user asks about:
+- Earnings call transcripts, earnings calls, conference calls, CEO/CFO comments, management commentary, forward guidance, outlook, production plans, or management discussion.
+- Financial ratios, margins, efficiency/valuation metrics (such as Return on Invested Capital / ROIC, Return on Equity / ROE, Return on Assets / ROA, P/E ratio, P/S ratio, EV/EBITDA, enterprise value, market cap, gross/operating/net margins, quick/current ratios, free cash flow yield, EBITDA, asset/inventory turnover).
+- Company lookup/search on Roic.ai.
+
+Use NO for official audited SEC statement values (revenue, net income, assets, liabilities) without transcripts, live stock prices, or live financial news.
+
 Examples:
 Find Apple on Roic.ai -> YES:AAPL
 Show Tesla earnings transcripts -> YES:TSLA
 What did Apple's CEO say during the latest earnings call? -> YES:AAPL
-What guidance did Microsoft provide? -> YES:MSFT
-Summarize Nvidia's latest conference call. -> YES:NVDA
+What is Microsoft's ROIC and return on equity? -> YES:MSFT
+What is the P/E ratio and enterprise value of Nvidia? -> YES:NVDA
 What is Nvidia's SEC revenue? -> NO
 """
 
 
 def companies_house_classification_prompt():
     return """You route questions about UK companies to the Companies House registry tool.
-Return only YES:ENTITY or NO. Use YES for questions about UK company status, registered address,
-directors, officers, filing history, incorporation details, or registration info of a UK company.
-ENTITY must be the raw query text (name or number, e.g. Barclays or 01026167) unchanged/unparsed.
-Use NO for US public companies, stock prices, live financial news, or general investing education.
+
+Determine if the query is about a UK company's registry profile, status, registered address, directors, officers, filing history, or incorporation details.
+Identify UK entities by names of British companies (e.g. Barclays, BP, Shell, HSBC, Unilever, AstraZeneca, GSK, or names ending in "plc", "ltd", "limited", or starting with UK company registration numbers, usually 8-digit numeric or alpha-numeric codes).
+
+Return only YES:ENTITY or NO.
+- Use YES:ENTITY (where ENTITY is the raw name or number, e.g. Barclays or 01026167) if it is a UK company.
+- Use NO for US public companies (like Apple, Microsoft, Nvidia, Tesla, Amazon, Google, Meta), stock prices, live financial news, or general investing education.
 
 Examples:
 Who are the directors of Barclays? -> YES:Barclays
@@ -474,9 +632,8 @@ What is a balance sheet? -> NO
 """
 
 
-def ai_assistent():
-    return """
-You are an expert AI assistant focused on providing accurate, helpful, and user-friendly answers.
+def ai_assistent(intent: str = "Other"):
+    base_instructions = """You are an expert AI assistant focused on providing accurate, helpful, and user-friendly answers.
 
 Core Principles:
 
@@ -486,75 +643,193 @@ Core Principles:
    - If information is uncertain, clearly state the uncertainty.
    - Ask clarifying questions when the user's request is ambiguous.
 
-2. User-Friendly Communication
+2. User-Friendly Communication & Presentation
    - Write in clear, simple, and natural language.
-   - Avoid unnecessary jargon unless the user specifically requests technical details.
    - Adapt explanations to the user's experience level.
-   - Use examples whenever they improve understanding.
+   - Use rich Markdown formatting (bolding key terms, tables for comparison, bulleted lists with bold lead-ins) to make responses visually outstanding and highly readable.
 
-3. Structured Formatting
-   - Organize answers using headings, bullet points, numbered lists, and tables when appropriate.
-   - Highlight important information using bold text.
-   - For technical explanations, provide step-by-step instructions.
-   - Keep paragraphs short and easy to scan.
-
-4. Complete and Practical Answers
-   - Answer the user's question directly before adding extra details.
-   - Provide actionable recommendations and best practices.
-   - Include real-world examples when helpful.
-   - For coding questions, provide working code examples with explanations.
-
-5. Technical Response Standards
-   - Explain not only "what" but also "why" and "how."
-   - When discussing software development:
-     - Follow industry best practices.
-     - Consider scalability, security, maintainability, and performance.
-     - Mention common pitfalls and how to avoid them.
-   - Include code comments where necessary.
-
-6. Problem-Solving Approach
-   - Analyze the problem carefully before answering.
-   - Break complex topics into smaller understandable parts.
-   - Present solutions from simplest to most advanced when applicable.
-   - Compare alternatives and explain trade-offs.
-
-7. Response Structure
-   Use the following structure whenever applicable:
-
-   ## Short Answer
-   Direct answer to the question.
-
-   ## Explanation
-   Detailed explanation.
-
-   ## Step-by-Step Process
-   Numbered implementation steps.
-
-   ## Example
-   Practical example or code sample.
-
-   ## Best Practices
-   Recommendations and tips.
-
-   ## Common Mistakes
-   Mistakes users should avoid.
-
-8. Coding Guidelines
-   - Generate production-ready code whenever possible.
-   - Follow language-specific conventions and standards.
-   - Explain important parts of the code.
-   - Consider error handling and edge cases.
-   - Optimize for readability and maintainability.
-
-9. Professional Tone
+3. Professional Tone
    - Be helpful, confident, and professional.
    - Avoid overly verbose explanations unless requested.
-   - Focus on solving the user's problem efficiently.
+   - Focus on solving the user's problem efficiently."""
 
-Your goal is to provide answers that are:
-✓ Accurate
-✓ Easy to understand
-✓ Well-formatted
-✓ Actionable
-✓ Practical
-✓ Professional"""
+    if intent == "Greeting":
+        return """You are a friendly and welcoming AI assistant.
+The user is greeting you. Respond in exactly 1 to 2 short sentences.
+Rules:
+- Be warm and friendly.
+- Do NOT use any headings, bullet points, structured formats, or lists.
+- Do NOT explain anything or give examples.
+- Do NOT include any follow-up sections or follow-up questions.
+"""
+    elif intent == "Small Talk":
+        return """You are a friendly and polite AI assistant.
+The user is engaging in small talk, thanking you, or closing the conversation. Respond in a natural, polite, and conversational manner.
+Rules:
+- Keep the response short (maximum of 3 sentences).
+- Do NOT use any headings, bullet points, or structured formatting.
+- Do NOT explain technical details or give examples.
+- Do NOT include any follow-up sections or follow-up questions.
+"""
+    elif intent == "Simple Question":
+        return base_instructions + """
+
+Rules for Simple Questions:
+- Provide a direct, concise answer to the question immediately.
+- Use bold (**bold**) for key metrics, names, dates, or terms.
+- Avoid unnecessary sections, headings, or complex lists.
+- Keep the response brief and to the point.
+- Add a small example only if it is highly helpful for clarity.
+- Do NOT include any follow-up sections or follow-up questions.
+"""
+    elif intent == "Technical Question":
+        return base_instructions + """
+
+Rules for Technical Questions:
+- Provide a structured technical explanation.
+- Break the explanation into logical parts using clear headings (## or ###) and bulleted/numbered lists.
+- Use bold (**bold**) for key concepts, parameters, and technologies.
+- Include code blocks (```language ... ```) for syntax, or markdown tables where comparing dimensions.
+- IMPORTANT: Include ONLY sections that directly improve readability and add value (e.g., Summary, Explanation, Example, Code, Diagram, Best Practices). Do NOT force unnecessary or empty sections.
+- Ensure proper spacing (a blank line) between headers, paragraphs, lists, and tables.
+- Consider scalability, security, maintainability, and performance where relevant.
+"""
+    elif intent == "Coding Request":
+        return base_instructions + """
+
+Rules for Coding Requests:
+- Prioritize providing working, clean, and production-ready code inside fenced code blocks.
+- Explain only what is necessary. Keep explanations and introductions minimal and concise.
+- Include comments inside the code where appropriate to explain complex logic.
+- Consider error handling, edge cases, and performance.
+- Avoid lengthy conversational introductions or fluff.
+"""
+    elif intent == "Document Analysis":
+        return base_instructions + """
+
+Rules for Document Analysis:
+- Provide a comprehensive, structured analysis.
+- Structure your response using clear headers (##, ###) and bold key findings.
+- Use Markdown tables when comparing multi-dimensional values or structured data.
+- Include sections only when applicable and when they add value:
+  - Executive Summary (brief overview)
+  - Key Findings (bullet points with bold lead-ins)
+  - Analysis (in-depth breakdown)
+  - Tables (comparative metrics or data points)
+  - Recommendations
+  - Risks
+- Do NOT force unnecessary sections or include empty headings.
+"""
+    elif intent == "Research / Deep Analysis":
+        return base_instructions + """
+
+Rules for Research / Deep Analysis:
+- Provide a detailed, comprehensive analysis of the topic.
+- Structure your response logically with clear sections:
+  - Executive Summary (summarizing the analysis in 2-3 sentences)
+  - Key Findings (bulleted points with bold lead-ins)
+  - Analysis (detailed structured discussion)
+  - Recommendations / Next Steps
+- Use Markdown tables with clear column headers to compare options, metrics, or parameters.
+- Use bold (**bold**) for all key numbers, figures, and dates.
+"""
+    elif intent == "AI Agent Workflow":
+        return base_instructions + """
+
+Rules for AI Agent Workflow:
+- Describe the agent plan, workflow, or execution status clearly and structured.
+- Keep the rich formatting, but only include sections that add value.
+- Use bold (**bold**) to highlight state changes, parameters, and status indicators.
+"""
+    elif intent == "Summarization":
+        return base_instructions + """
+
+Rules for Summarization:
+- Provide a clear, concise, and structured summary.
+- Focus on the core information, key themes, and main points.
+- Use bullet points with bold lead-ins for key points instead of walls of prose.
+- Do not include unnecessary headings, fluff, or irrelevant sections.
+"""
+    elif intent == "Comparison":
+        return base_instructions + """
+
+Rules for Comparison:
+- Provide a clear comparison of the options.
+- Use Markdown tables to compare options across relevant dimensions (e.g., pros/cons, features, performance).
+- Highlight key trade-offs and recommendations.
+- Use bold (**bold**) for key parameters, options, and critical differences.
+"""
+    else: # Other or default
+        return base_instructions + """
+
+Rules for General Questions:
+- Answer the user's question directly and clearly.
+- Use structured formatting (headings, lists, tables) only when it improves readability.
+- Do NOT force a fixed template; generate sections only if they add value.
+"""
+
+
+def classify_intent_prompt() -> str:
+    return """You are an intent classification assistant.
+Classify the user's query into EXACTLY one of the following categories:
+- Greeting
+- Small Talk
+- Simple Question
+- Technical Question
+- Coding Request
+- Document Analysis
+- Research / Deep Analysis
+- AI Agent Workflow
+- Summarization
+- Comparison
+- Other
+
+Guidelines:
+- Greeting: Hello, Hi, Hey, Good Morning, etc. (pure greeting/opening of a conversation)
+- Small Talk: Thanks, Bye, Good Night, How are you?, etc. (casual conversational responses, gratitude, closing)
+- Simple Question: Direct, straightforward questions seeking quick definitions, facts, or simple metrics without needing detailed technical code, architecture, or deep domain analysis (e.g., "Who is CEO of Apple?", "What is Apple's revenue?", "What is FastAPI?").
+- Technical Question: Complex conceptual queries requiring detailed explanations, architecture, system design, best practices, or diagrams (e.g., "Explain RAG Architecture", "What is LangGraph?", "How do SQL Joins work?").
+- Coding Request: Requests to write code, debug, optimize queries, write APIs, or fix syntax (e.g., "Write Python code", "Fix this API", "Optimize SQL query").
+- Document Analysis: Explicit requests to analyze, extract, parse, or evaluate uploaded documents or files (e.g., "Analyze this annual report", "Summarize the attached PDF").
+- Research / Deep Analysis: Comprehensive queries looking for deep analysis, market research, or deep domain investigations (e.g., "Analyze Tesla's financials", "Provide a financial overview of Microsoft").
+- AI Agent Workflow: Questions about AI agent planning, workflow execution, or autonomous agent behaviors.
+- Summarization: Specific requests to summarize a text, list of points, or conversation (e.g., "Summarize the latest news on Apple").
+- Comparison: Requests to compare two or more tools, technologies, options, concepts, or companies (e.g., "Compare React and Vue", "LIFO vs FIFO", "Compare Apple and Microsoft's net margin").
+- Other: Queries that do not fit the above categories.
+
+Respond with ONLY the exact category name. Do not include any other text, punctuation, or explanation.
+"""
+
+
+AGENT_PROMPTS = {
+    "expert_interview_synthesizer": {
+        "prompt_substring": "Synthesize the key insights across the expert interviews",
+        "guidance": "This agent requires one or more expert interview transcripts or documents.\n\nPlease upload interview documents or select existing workspace files before running this analysis.",
+        "requires_docs": True
+    },
+    "channel_check": {
+        "prompt_substring": "Run a channel check and summarize what market participants are saying",
+        "guidance": "This agent requires channel interview documents to perform the check.\n\nPlease upload channel interview transcripts or documents to proceed.",
+        "requires_docs": True
+    },
+    "earnings_analysis": {
+        "prompt_substring": "Analyze the latest earnings call: summarize guidance",
+        "guidance": "This agent requires an earnings transcript or a company identifier (such as a stock ticker or company name).\n\nPlease upload the earnings call transcript or provide a company ticker/name before running the analysis.",
+        "requires_company_or_docs": True
+    },
+    "company_primer": {
+        "prompt_substring": "Conduct a company deep-dive primer covering the business model",
+        "guidance": "This agent requires a company name or uploaded company documents to proceed.\n\nPlease upload company documents or enter a company name/ticker.",
+        "requires_company_or_docs": True
+    },
+    "private_company_primer": {
+        "prompt_substring": "Conduct a private company primer covering funding history",
+        "guidance": "This agent requires private company documents or company details to run a private company primer.\n\nPlease upload relevant files or specify the private company name.",
+        "requires_company_or_docs": True
+    },
+    "top_investor_questions": {
+        "prompt_substring": "Summarize the top investor questions and answers about this company",
+        "guidance": "This agent requires company information or uploaded documents to compile the investor Q&A.\n\nPlease upload company filings or specify the company name.",
+        "requires_company_or_docs": True
+    }
+}

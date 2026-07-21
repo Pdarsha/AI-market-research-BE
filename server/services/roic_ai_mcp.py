@@ -38,14 +38,13 @@ class RoicAIMCPTool:
         from server.services.audit_logger import audit_context
 
         query = query.strip()
-        if not query:
-            return self._error("invalid_request", "Provide a company name or ticker.")
+        if not query or len(query) > 100:
+            return self._error("invalid_request", "Provide a valid company name or ticker (max 100 characters).")
         limit = max(1, min(int(limit), 20))
 
         with audit_context(
             action="ROIC_AI_MCP_CALL",
             metadata={
-                "query": query,
                 "limit": limit,
                 "transcript": transcript,
             }

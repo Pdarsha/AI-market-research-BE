@@ -31,6 +31,23 @@ class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate
             .all()
         )
 
+    def get_visible_by_chat(
+        self,
+        db: Session,
+        *,
+        chat_id: str,
+        skip: int = 0,
+        limit: int = 1000,
+    ):
+        return [
+            m
+            for m in self.get_multi_by_chat(db, chat_id=chat_id, skip=skip, limit=limit)
+            if not (
+                m.role == "system"
+                and (m.content or "").startswith("[document_upload]")
+            )
+        ]
+
     def get_latest_document_ids(self, db: Session, *, chat_id: str) -> Optional[list]:
         """Most recent ``document_ids`` referenced within a chat.
 
