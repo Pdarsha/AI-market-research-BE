@@ -1,6 +1,7 @@
 from .crud_chat_message import chat_message
 from .crud_chat_session import chat_session
 from .crud_document import document
+from .crud_document_chat_link import document_chat_link
 from .crud_emial_otp import email_otp
 from .crud_genai import genai
 from .crud_user import user

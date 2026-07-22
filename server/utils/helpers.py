@@ -183,7 +183,9 @@ def serialize_chat(chat) -> dict:
     }
 
 
-def serialize_document(doc, chat_count: Optional[int] = None) -> dict:
+def serialize_document(
+    doc, chat_count: Optional[int] = None, chat_ids: Optional[list] = None
+) -> dict:
     data = {
         "id": doc.id,
         "workspace_id": doc.workspace_id,
@@ -194,6 +196,8 @@ def serialize_document(doc, chat_count: Optional[int] = None) -> dict:
     }
     if chat_count is not None:
         data["chat_count"] = chat_count
+    if chat_ids is not None:
+        data["chat_ids"] = chat_ids
     return data
 
 

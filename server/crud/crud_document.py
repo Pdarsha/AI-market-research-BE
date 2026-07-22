@@ -2,11 +2,10 @@ from typing import Optional, TypeVar
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, String
-from server.models.genai import ChatMessage
+from sqlalchemy import func
 
 from server.crud.base import CRUDBase
-from server.models.workspace import Document
+from server.models.workspace import Document, DocumentChatLink
 from server.schemas.workspace import CreateDocument, updateDocument
 
 UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
@@ -44,33 +43,25 @@ class CRUDDocument(CRUDBase[Document, CreateDocument, updateDocument]):
     def get_chat_count_for_document(self, db: Session, *, doc_id: str) -> int:
         """Return the number of distinct chat sessions that reference *doc_id*.
 
-        ``ChatMessage.document_ids`` is a JSON array column.  We cast it to text
-        and use a LIKE search so the query works on both PostgreSQL (jsonb) and
-        SQLite (stored as JSON text) without dialect-specific operators.
+        Reads from the ``document_chat_links`` table — the single source of
+        truth — instead of scanning ``chat_messages.document_ids`` JSON columns.
         """
-        count = (
-            db.query(func.count(func.distinct(ChatMessage.chat_id)))
-            .filter(
-                ChatMessage.document_ids.isnot(None),
-                cast(ChatMessage.document_ids, String).like(f"%{doc_id}%"),
-            )
+        return (
+            db.query(func.count(func.distinct(DocumentChatLink.chat_id)))
+            .filter(DocumentChatLink.document_id == doc_id)
             .scalar()
-        )
-        return count or 0
+        ) or 0
 
     def get_chat_ids_for_document(self, db: Session, *, doc_id: str) -> list[str]:
-        """Return the distinct chat IDs that reference *doc_id*."""
-        from server.models.genai import ChatMessage
-
+        """Return the chat IDs of all chats that reference *doc_id*."""
         rows = (
-            db.query(func.distinct(ChatMessage.chat_id))
-            .filter(
-                ChatMessage.document_ids.isnot(None),
-                cast(ChatMessage.document_ids, String).like(f"%{doc_id}%"),
-            )
+            db.query(DocumentChatLink.chat_id)
+            .filter(DocumentChatLink.document_id == doc_id)
+            .distinct()
             .all()
         )
         return [r[0] for r in rows if r[0]]
+
 
     def delete_document_cleanup_chats(
         self, db: Session, *, doc_id: str, file_name: str, chats: list
@@ -104,6 +95,11 @@ class CRUDDocument(CRUDBase[Document, CreateDocument, updateDocument]):
                     modified = True
                 if modified:
                     db.add(m)
+
+        # Also clean up the explicit association table.
+        db.query(DocumentChatLink).filter(
+            DocumentChatLink.document_id == doc_id
+        ).delete(synchronize_session=False)
 
 
 document = CRUDDocument(Document)

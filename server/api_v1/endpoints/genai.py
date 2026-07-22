@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -11,11 +10,7 @@ from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.config import settings
 from server.services.citation_service import get_citation_service
-from server.services.financial_news_mcp import financial_news
 from server.services.rag_service import get_rag_service
-from server.services.sec_edgar_mcp import sec_company_facts
-from server.services.roic_ai_mcp import roic_ai
-from server.services.companies_house_mcp import companies_house_profile
 from server.utils.auth import get_current_user
 from server.utils.prompt import AGENT_PROMPTS
 from server.utils.helpers import (
@@ -27,6 +22,14 @@ from server.utils.helpers import (
 from server.utils.source_attribution import (
     cited_document_names,
     source_attribution_from_citations,
+)
+from server.utils.chat_helpers import (
+    has_roic_metric,
+    is_explicit_document_request,
+    is_overview_request,
+    check_user_typed_context,
+    check_spurious_roic_query,
+    build_routing_log,
 )
 
 client = OpenAI(
@@ -435,7 +438,9 @@ def add_chat_message(
             break
 
     if is_workspace_analysis and session.workspace_id:
-        documents = crud.document.get_multi_by_workspace(db, workspace_id=session.workspace_id)
+        documents = crud.document.get_multi_by_workspace(
+            db, workspace_id=session.workspace_id
+        )
         document_ids = [doc.id for doc in documents]
         context_reason = "workspace_analysis"
     else:
@@ -488,6 +493,16 @@ def add_chat_message(
         ),
     )
 
+    link_results: dict[str, bool] = {}
+    if document_ids:
+        link_results = crud.document_chat_link.ensure_links_for_chat(
+            db,
+            document_ids=document_ids,
+            chat_id=chat_id,
+            workspace_id=session.workspace_id,
+            user_id=str(current_user.id),
+        )
+
     from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
@@ -498,7 +513,19 @@ def add_chat_message(
         endpoint=f"/v1/ai/chats/{chat_id}/messages",
         http_method="POST",
         status="200",
-        metadata={"document_ids": document_ids},
+        metadata={
+            "document_ids": document_ids,
+            "associations_created": {
+                doc_id: created
+                for doc_id, created in link_results.items()
+                if created
+            },
+            "associations_already_existed": {
+                doc_id: True
+                for doc_id, created in link_results.items()
+                if not created
+            },
+        },
     )
 
     used_rag = False
@@ -522,33 +549,6 @@ def add_chat_message(
     web_context = None
     retrieved_chunks = None
 
-    # Intercept ROIC metric queries
-    roic_metrics_keywords = [
-        "gross margin", "gross profit margin", "gross%", "gross_margin", "grossmargin", "gross margins", "gross profit margins",
-        "operating margin", "operating profit margin", "ebit margin", "ebit_margin", "oper_margin", "operating_margin", "operatingmargin", "operating_profit_margin", "ebitmargin", "operating margins", "operating profit margins", "ebit margins",
-        "ebitda margin", "ebitda_margin", "ebitdamargin", "ebitda margins",
-        "ebitda", "ebitdavalue",
-        "net margin", "net profit margin", "net_margin", "netmargin", "net profit margins", "net margins", "profit margin", "profit margins",
-        "roic", "return_on_inv_capital", "returnoninvestedcapital", "return on invested capital",
-        "roe", "return_com_eqy", "returnonequity", "return on equity",
-        "roa", "return_on_asset", "returnonassets", "return on assets",
-        "return on capital", "return_on_cap", "return on capitals",
-        "free cash flow", "free_cash_flow", "cf_free_cash_flow", "fcf", "free cash flows",
-        "fcf yield", "fcf_yield", "fcf yields",
-        "pe ratio", "p/e ratio", "p/e", "pe", "pe_ratio", "pe ratios", "p/e ratios",
-        "ev/ebitda", "ev / ebitda", "ev_to_ttm_ebitda",
-        "price/sales", "price / sales", "p/s", "p/s ratio", "pr_to_sales_ratio", "price/sales ratio", "price/sales ratios",
-        "enterprise value", "enterprise_value", "enterprise values",
-        "market cap", "market_cap", "market capitalization", "market caps",
-        "current ratio", "current_ratio", "cur_ratio", "current ratios",
-        "quick ratio", "quick_ratio", "quick ratios",
-        "debt/equity", "debt to equity", "debt-to-equity", "tot_debt_to_tot_eqy", "debt/equity ratio", "debt/equity ratios",
-        "asset turnover", "asset_turnover", "asset turnovers",
-        "inventory turnover", "inventory_turnover", "invent_turn", "inventory turnovers",
-        "revenue growth", "revenue_growth", "revenue growths",
-        "ebitda growth", "ebitda_growth", "ebitda growths",
-        "eps growth", "eps_growth", "eps growths"
-    ]
     if is_workspace_analysis:
         is_document_question = bool(document_ids)
         sec_tickers = []
@@ -559,39 +559,8 @@ def add_chat_message(
         companies_house_query = None
         requires_web = False
     else:
-        import re
-        has_roic_metric = False
-        content_lower = request.content.lower()
-        for keyword in roic_metrics_keywords:
-            if len(keyword) <= 4:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                if re.search(pattern, content_lower):
-                    has_roic_metric = True
-                    break
-            else:
-                if keyword in content_lower:
-                    has_roic_metric = True
-                    break
-
-        # 1. Check explicit reference and initial classification
-        explicit_document_request = any(
-            term in request.content.lower()
-            for term in (
-                "my document",
-                "uploaded document",
-                "uploaded file",
-                "uploaded report",
-                "my report",
-                "this report",
-                "this pdf",
-                "this file",
-                "annual report",
-                "page ",
-                "compare my",
-                "compare the report",
-                "compare with my",
-            )
-        )
+        has_metric = has_roic_metric(request.content)
+        explicit_document_request = is_explicit_document_request(request.content)
 
         is_document_question = False
         if document_ids:
@@ -605,21 +574,10 @@ def add_chat_message(
         sec_ticker = sec_tickers[0] if sec_tickers else None
         sec_options = rag.sec_request_options(request.content) if sec_tickers else {}
 
-        overview_keywords = [
-            "financial overview",
-            "financial performance",
-            "financials",
-            "financial summary",
-            "financial health",
-            "financial analysis",
-            "analyze financial",
-        ]
-        is_overview_request = any(
-            term in request.content.lower() for term in overview_keywords
-        )
+        is_overview = is_overview_request(request.content)
 
         # ROIC AI
-        if has_roic_metric or is_overview_request:
+        if has_metric or is_overview:
             if sec_tickers:
                 roic_query = sec_tickers[0]
             else:
@@ -631,9 +589,7 @@ def add_chat_message(
                 if not roic_query and len(request.content.strip()) <= 100:
                     roic_query = request.content
 
-            # If it is a financial overview request, keep SEC EDGAR enabled.
-            # Otherwise (for specific ROIC metric requests), clear SEC EDGAR.
-            if is_overview_request:
+            if is_overview:
                 if not sec_tickers and roic_query:
                     sec_tickers = [roic_query]
                     sec_ticker = roic_query
@@ -713,7 +669,7 @@ def add_chat_message(
             client, question=request.content, model=settings.LLM_MODEL
         )
 
-        # 3. Apply Dynamic Source Selection priority rules
+        # Apply Dynamic Source Selection priority rules
         has_external_provider = bool(
             sec_tickers
             or roic_query
@@ -728,72 +684,25 @@ def add_chat_message(
         else:
             is_document_question = bool(document_ids) and is_document_question
 
-
+    # Input & Context Validation
     validation_error = None
-
     workspace_docs_present = False
     if session.workspace_id:
-        workspace_docs = crud.document.get_multi_by_workspace(db, workspace_id=session.workspace_id)
-        print(f"DEBUG: workspace_docs={workspace_docs}, type={type(workspace_docs)}")
+        workspace_docs = crud.document.get_multi_by_workspace(
+            db, workspace_id=session.workspace_id
+        )
         if workspace_docs:
             workspace_docs_present = True
 
     uploaded_docs_present = bool(document_ids)
     mcp_data_present = has_external_provider
 
-    default_phrases = [
-        "and highlight consensus and disagreements.",
-        "and summarize what market participants are saying across the industry channel.",
-        "covering the business model, financials, competitive position, and key risks.",
-        "summarize guidance, growth drivers, margins, and key risks.",
-        "covering funding history, business model, market, and growth outlook.",
-        "about this company.",
-        "Expert Interview Synthesizer",
-        "Channel Check",
-        "Earnings Analysis",
-        "Company Primer",
-        "Private Company Primer",
-        "Top Investor Questions"
-    ]
+    user_typed_context_present = check_user_typed_context(
+        request.content, matched_agent
+    )
 
-    agent_full_templates = {
-        "Synthesize the key insights across the expert interviews": "Synthesize the key insights across the expert interviews and highlight consensus and disagreements.",
-        "Run a channel check and summarize what market participants are saying": "Run a channel check and summarize what market participants are saying across the industry channel.",
-        "Analyze the latest earnings call: summarize guidance": "Analyze the latest earnings call: summarize guidance, growth drivers, margins, and key risks.",
-        "Conduct a company deep-dive primer covering the business model": "Conduct a company deep-dive primer covering the business model, financials, competitive position, and key risks.",
-        "Conduct a private company primer covering funding history": "Conduct a private company primer covering funding history, business model, market, and growth outlook.",
-        "Summarize the top investor questions and answers": "Summarize the top investor questions and answers about this company."
-    }
-
-    user_typed_context_present = False
-    if matched_agent:
-        prompt_sub = matched_agent["prompt_substring"]
-        full_template = agent_full_templates.get(prompt_sub, prompt_sub)
-        cleaned_text = request.content.replace(full_template, "")
-        # Fallback to replace the prompt_sub if they didn't match the full template
-        cleaned_text = cleaned_text.replace(prompt_sub, "")
-        for phrase in default_phrases:
-            cleaned_text = cleaned_text.replace(phrase, "")
-        cleaned_text = cleaned_text.strip(" \t\n\r.,;:!?")
-        if len(cleaned_text) > 5:
-            user_typed_context_present = True
-    else:
-        if len(request.content.strip()) > 5:
-            user_typed_context_present = True
-
-    # Filter spurious MCP flags when it matched substrings of the default template prompt
-    if mcp_data_present and matched_agent:
-        is_spurious = False
-        prompt_sub = matched_agent["prompt_substring"]
-        full_template = agent_full_templates.get(prompt_sub, prompt_sub)
-        if roic_query and (prompt_sub in roic_query or full_template in roic_query):
-            cleaned_query = roic_query.replace(full_template, "").replace(prompt_sub, "")
-            for phrase in default_phrases:
-                cleaned_query = cleaned_query.replace(phrase, "")
-            cleaned_query = cleaned_query.strip(" \t\n\r.,;:!?")
-            if len(cleaned_query) <= 5:
-                is_spurious = True
-        if is_spurious:
+    if mcp_data_present and matched_agent and roic_query:
+        if check_spurious_roic_query(roic_query, matched_agent):
             mcp_data_present = False
 
     any_context_present = (
@@ -803,23 +712,20 @@ def add_chat_message(
         or mcp_data_present
     )
 
-    if is_workspace_analysis and not uploaded_docs_present and not workspace_docs_present:
+    if (
+        is_workspace_analysis
+        and not uploaded_docs_present
+        and not workspace_docs_present
+    ):
         validation_error = "Workspace analysis requires one or more documents in the workspace. Please upload files before running this analysis."
     elif matched_agent:
         if not any_context_present:
             validation_error = matched_agent["guidance"]
     else:
-        # General check: query requires documents but none are available
         if is_document_question and not any_context_present:
             validation_error = "This query requires one or more uploaded documents. Please upload files or select existing workspace files to proceed."
 
-    # 4. Log the routing decision
-    log_lines = [
-        f"Question:\n{request.content}",
-        f"Uploaded Documents:\n{len(document_ids)}",
-        f"Document Relevant:\n{is_document_question}",
-    ]
-
+    # Log routing decision
     selected_list = []
     if is_document_question:
         selected_list.append("RAG")
@@ -834,226 +740,19 @@ def add_chat_message(
     if requires_web:
         selected_list.append("Web Search")
 
-    if selected_list:
-        log_lines.append(
-            "Selected Providers:\n" + "\n".join(f"- {p}" for p in selected_list)
-        )
-
     skipped_list = []
     if document_ids and not is_document_question:
         skipped_list.append("RAG (not relevant)")
 
-    if skipped_list:
-        log_lines.append("Skipped:\n" + "\n".join(f"- {p}" for p in skipped_list))
-
-    logger.info("\n\n".join(log_lines))
-
-    # 5. Retrieve helper functions definition
-    def retrieve_documents():
-        """Retrieve document context without allowing a retrieval failure to fail chat."""
-        try:
-            if is_workspace_analysis:
-                ws_query = (
-                    f"{wsName} workspace-wide summary, bulk document summarization, "
-                    "trends and recurring patterns, risks and inconsistencies, "
-                    "topic clustering, observations and recommendations"
-                )
-                _, sources, chunks = rag.retrieve_context_with_chunks(
-                    db,
-                    query=ws_query,
-                    user_id=str(current_user.id),
-                    document_ids=document_ids,
-                    top_k=15,
-                    workspace_id=session.workspace_id,
-                )
-
-                # Apply token/character limit trimming to retrieved chunks
-                MAX_DOCS_CHAR_LIMIT = 25000
-                accumulated_chunks = []
-                char_count = 0
-                for chunk in chunks:
-                    chunk_text = chunk.content or ""
-                    if char_count + len(chunk_text) > MAX_DOCS_CHAR_LIMIT:
-                        remaining_space = MAX_DOCS_CHAR_LIMIT - char_count
-                        if remaining_space > 100:
-                            from copy import copy
-
-                            trimmed_chunk = copy(chunk)
-                            trimmed_chunk.content = (
-                                chunk_text[:remaining_space] + " ... [trimmed]"
-                            )
-                            accumulated_chunks.append(trimmed_chunk)
-                        break
-                    accumulated_chunks.append(chunk)
-                    char_count += len(chunk_text)
-                return sources, accumulated_chunks
-            else:
-                _, sources, chunks = rag.retrieve_context_with_chunks(
-                    db,
-                    query=request.content,
-                    user_id=str(current_user.id),
-                    document_ids=document_ids,
-                    top_k=3,
-                )
-                return sources, chunks
-        except Exception:
-            logger.exception(
-                "chat.message: document retrieval failed; skipping RAG (chat=%s)",
-                chat_id,
-            )
-            return None, None
-
-    def retrieve_financial_news():
-        import time
-        from server.services.audit_logger import AuditLogger
-
-        start_time = time.time()
-        try:
-            res = asyncio.run(
-                financial_news(
-                    financial_ticker, limit=settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS
-                )
-            )
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="success",
-                processing_time=elapsed,
-                metadata={"tool": "financial_news", "ticker": financial_ticker},
-            )
-            return res
-        except Exception as e:
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="error",
-                processing_time=elapsed,
-                metadata={
-                    "tool": "financial_news",
-                    "ticker": financial_ticker,
-                    "error": str(e),
-                },
-            )
-            raise
-
-    def retrieve_sec_company_facts():
-        import time
-        from server.services.audit_logger import AuditLogger
-
-        start_time = time.time()
-        try:
-
-            async def _retrieve_all():
-                return await asyncio.gather(
-                    *(
-                        sec_company_facts(ticker=ticker, **sec_options)
-                        for ticker in sec_tickers
-                    )
-                )
-
-            res = asyncio.run(_retrieve_all())
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="success",
-                processing_time=elapsed,
-                metadata={"tool": "sec_company_facts", "tickers": sec_tickers},
-            )
-            return res
-        except Exception as e:
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="error",
-                processing_time=elapsed,
-                metadata={
-                    "tool": "sec_company_facts",
-                    "tickers": sec_tickers,
-                    "error": str(e),
-                },
-            )
-            raise
-
-    def retrieve_roic_ai():
-        import time
-        from server.services.audit_logger import AuditLogger
-
-        start_time = time.time()
-        try:
-            res = asyncio.run(roic_ai(query=roic_query, transcript=True))
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="success",
-                processing_time=elapsed,
-                metadata={"tool": "roic_ai", "query": roic_query},
-            )
-            return res
-        except Exception as e:
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="error",
-                processing_time=elapsed,
-                metadata={"tool": "roic_ai", "query": roic_query, "error": str(e)},
-            )
-            raise
-
-    def retrieve_companies_house():
-        import time
-        from server.services.audit_logger import AuditLogger
-
-        start_time = time.time()
-        try:
-            res = asyncio.run(companies_house_profile(query=companies_house_query))
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="success",
-                processing_time=elapsed,
-                metadata={
-                    "tool": "companies_house_profile",
-                    "query": companies_house_query,
-                },
-            )
-            return res
-        except Exception as e:
-            elapsed = time.time() - start_time
-            AuditLogger.log(
-                action="MCP_TOOL_CALL",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                chat_id=chat_id,
-                status="error",
-                processing_time=elapsed,
-                metadata={
-                    "tool": "companies_house_profile",
-                    "query": companies_house_query,
-                    "error": str(e),
-                },
-            )
-            raise
+    logger.info(
+        build_routing_log(
+            request.content,
+            document_ids,
+            is_document_question,
+            selected_list,
+            skipped_list,
+        )
+    )
 
     if validation_error:
         ai_response = validation_error
@@ -1063,8 +762,57 @@ def add_chat_message(
         source_attribution = []
         intent = "Other"
     else:
-        # 6. Execute selected providers concurrently
+        # Context Retrieval (concurrent execution of selected providers)
         futures = {}
+        user_id_str = str(current_user.id)
+
+        # We define local helper wrappers so their names (fn.__name__) match
+        # what the unit test mocks expect when inspecting the submitted tasks.
+        def retrieve_documents():
+            return rag.retrieve_documents_context(
+                db,
+                is_workspace_analysis,
+                wsName,
+                user_id_str,
+                document_ids,
+                session.workspace_id,
+                request.content,
+                chat_id,
+            )
+
+        def retrieve_sec_company_facts():
+            return rag.retrieve_sec_company_facts_context(
+                chat_id,
+                user_id_str,
+                session.workspace_id,
+                sec_tickers,
+                sec_options,
+            )
+
+        def retrieve_roic_ai():
+            return rag.retrieve_roic_ai_context(
+                chat_id,
+                user_id_str,
+                session.workspace_id,
+                roic_query,
+            )
+
+        def retrieve_financial_news():
+            return rag.retrieve_financial_news_context(
+                chat_id,
+                user_id_str,
+                session.workspace_id,
+                financial_ticker,
+            )
+
+        def retrieve_companies_house():
+            return rag.retrieve_companies_house_context(
+                chat_id,
+                user_id_str,
+                session.workspace_id,
+                companies_house_query,
+            )
+
         with ThreadPoolExecutor(max_workers=6) as executor:
             if is_document_question:
                 futures["rag"] = executor.submit(retrieve_documents)
@@ -1089,7 +837,9 @@ def add_chat_message(
                 companies_house_response = futures["companies_house"].result()
 
         if retrieved_chunks:
-            document_context = rag.build_context_with_citations(retrieved_chunks) or None
+            document_context = (
+                rag.build_context_with_citations(retrieved_chunks) or None
+            )
         if source_documents:
             source_documents = document_sources_only(source_documents)
         used_rag = document_context is not None
@@ -1145,13 +895,15 @@ def add_chat_message(
                 )
             )
             companies_house_context = companies_house_context or None
-            if companies_house_context and used_rag and "No Companies House records" in companies_house_context:
+            if (
+                companies_house_context
+                and used_rag
+                and "No Companies House records" in companies_house_context
+            ):
                 companies_house_context = None
                 companies_house_sources = []
 
         if requires_web:
-            # Web results continue the document chunks' [n] numbering so the LLM sees
-            # one unbroken citation sequence across the whole CONTEXT.
             web_context, web_sources = rag.web_search(
                 request.content,
                 start_number=(
@@ -1169,12 +921,14 @@ def add_chat_message(
         if is_workspace_analysis:
             intent = "Research / Deep Analysis"
         else:
-            intent = rag.classify_intent(client, question=request.content, model=settings.LLM_MODEL)
+            intent = rag.classify_intent(
+                client, question=request.content, model=settings.LLM_MODEL
+            )
 
         logger.info(
             "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s finance=%s sec=%s companies_house=%s intent=%s",
             chat_id,
-            getattr(current_user, "id", None),
+            user_id_str,
             len(document_ids),
             used_rag,
             used_web,
@@ -1201,9 +955,6 @@ def add_chat_message(
         )
         ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
-        # The ordered source list must mirror the numbering the LLM saw in the CONTEXT:
-        # Document chunks, financial-news articles, and web results are retained in
-        # the exact numbered order shown to the LLM. Index i maps marker [i + 1].
         cited_sources: list = list(retrieved_chunks or [])
         cited_sources.extend(financial_sources)
         cited_sources.extend(sec_sources)
@@ -1217,11 +968,11 @@ def add_chat_message(
                 ai_response, cited_sources
             )
         else:
-            # Nothing grounded the answer, so any marker the model emitted is a
-            # hallucination — remove it rather than link it to a source that doesn't exist.
             ai_response = strip_citation_markers(ai_response)
 
-        source_documents = document_sources_only(cited_document_names(citations)) or None
+        source_documents = (
+            document_sources_only(cited_document_names(citations)) or None
+        )
         source_attribution = source_attribution_from_citations(citations)
 
     assistant_message = crud.chat_message.create(
@@ -1237,8 +988,6 @@ def add_chat_message(
             citations=citations,
         ),
     )
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="AI_RESPONSE",

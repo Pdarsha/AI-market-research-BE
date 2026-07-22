@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from server.db.base_class import Base
@@ -65,6 +65,55 @@ class Document(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    chat_links = relationship(
+        "DocumentChatLink",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DocumentChatLink(Base):
+    """Explicit association between a document and a chat session.
+
+    Created whenever a document is uploaded into (or first used within) a chat.
+    This is the single source of truth for 'how many chats reference this document'
+    and replaces the fragile LIKE-query over ChatMessage.document_ids JSON columns.
+
+    A (document_id, chat_id) pair is unique — duplicates are prevented at both
+    the application layer (idempotent upsert) and the database layer (unique index).
+    """
+
+    id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
+    document_id = Column(
+        String,
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    chat_id = Column(
+        String,
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    workspace_id = Column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chat_id", name="uq_document_chat_link"),
+    )
+
+    document = relationship("Document", back_populates="chat_links")
+    chat = relationship("ChatSession")
+
 
 
 class DocumentChunk(Base):

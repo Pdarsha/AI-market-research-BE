@@ -1520,6 +1520,253 @@ class RAGService:
             "6. **AI-Generated Observations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data, emphasizing strategic next steps."
         )
 
+    def retrieve_documents_context(
+        self,
+        db: Session,
+        is_workspace_analysis: bool,
+        wsName: str,
+        user_id: str,
+        document_ids: list,
+        workspace_id: str | None,
+        content: str,
+        chat_id: str,
+    ):
+        try:
+            if is_workspace_analysis:
+                ws_query = (
+                    f"{wsName} workspace-wide summary, bulk document summarization, "
+                    "trends and recurring patterns, risks and inconsistencies, "
+                    "topic clustering, observations and recommendations"
+                )
+                _, sources, chunks = self.retrieve_context_with_chunks(
+                    db,
+                    query=ws_query,
+                    user_id=user_id,
+                    document_ids=document_ids,
+                    top_k=15,
+                    workspace_id=workspace_id,
+                )
+
+                # Apply token/character limit trimming to retrieved chunks
+                MAX_DOCS_CHAR_LIMIT = 25000
+                accumulated_chunks = []
+                char_count = 0
+                for chunk in chunks:
+                    chunk_text = chunk.content or ""
+                    if char_count + len(chunk_text) > MAX_DOCS_CHAR_LIMIT:
+                        remaining_space = MAX_DOCS_CHAR_LIMIT - char_count
+                        if remaining_space > 100:
+                            from copy import copy
+                            trimmed_chunk = copy(chunk)
+                            trimmed_chunk.content = (
+                                chunk_text[:remaining_space] + " ... [trimmed]"
+                            )
+                            accumulated_chunks.append(trimmed_chunk)
+                        break
+                    accumulated_chunks.append(chunk)
+                    char_count += len(chunk_text)
+                return sources, accumulated_chunks
+            else:
+                _, sources, chunks = self.retrieve_context_with_chunks(
+                    db,
+                    query=content,
+                    user_id=user_id,
+                    document_ids=document_ids,
+                    top_k=3,
+                )
+                return sources, chunks
+        except Exception:
+            logger.exception(
+                "chat.message: document retrieval failed; skipping RAG (chat=%s)",
+                chat_id,
+            )
+            return None, None
+
+    def retrieve_financial_news_context(
+        self,
+        chat_id: str,
+        user_id: str,
+        workspace_id: str | None,
+        financial_ticker: str,
+    ):
+        import time
+        import asyncio
+        from server.services.audit_logger import AuditLogger
+        from server.services.financial_news_mcp import financial_news
+
+        start_time = time.time()
+        try:
+            res = asyncio.run(
+                financial_news(
+                    financial_ticker, limit=settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS
+                )
+            )
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "financial_news", "ticker": financial_ticker},
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "financial_news",
+                    "ticker": financial_ticker,
+                    "error": str(e),
+                },
+            )
+            raise
+
+    def retrieve_sec_company_facts_context(
+        self,
+        chat_id: str,
+        user_id: str,
+        workspace_id: str | None,
+        sec_tickers: list,
+        sec_options: dict,
+    ):
+        import time
+        import asyncio
+        from server.services.audit_logger import AuditLogger
+        from server.services.sec_edgar_mcp import sec_company_facts
+
+        start_time = time.time()
+        try:
+            async def _retrieve_all():
+                return await asyncio.gather(
+                    *(
+                        sec_company_facts(ticker=ticker, **sec_options)
+                        for ticker in sec_tickers
+                    )
+                )
+
+            res = asyncio.run(_retrieve_all())
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "sec_company_facts", "tickers": sec_tickers},
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "sec_company_facts",
+                    "tickers": sec_tickers,
+                    "error": str(e),
+                },
+            )
+            raise
+
+    def retrieve_roic_ai_context(
+        self,
+        chat_id: str,
+        user_id: str,
+        workspace_id: str | None,
+        roic_query: str,
+    ):
+        import time
+        import asyncio
+        from server.services.audit_logger import AuditLogger
+        from server.services.roic_ai_mcp import roic_ai
+
+        start_time = time.time()
+        try:
+            res = asyncio.run(roic_ai(query=roic_query, transcript=True))
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={"tool": "roic_ai", "query": roic_query},
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={"tool": "roic_ai", "query": roic_query, "error": str(e)},
+            )
+            raise
+
+    def retrieve_companies_house_context(
+        self,
+        chat_id: str,
+        user_id: str,
+        workspace_id: str | None,
+        companies_house_query: str,
+    ):
+        import time
+        import asyncio
+        from server.services.audit_logger import AuditLogger
+        from server.services.companies_house_mcp import companies_house_profile
+
+        start_time = time.time()
+        try:
+            res = asyncio.run(companies_house_profile(query=companies_house_query))
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="success",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "companies_house_profile",
+                    "query": companies_house_query,
+                },
+            )
+            return res
+        except Exception as e:
+            elapsed = time.time() - start_time
+            AuditLogger.log(
+                action="MCP_TOOL_CALL",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                status="error",
+                processing_time=elapsed,
+                metadata={
+                    "tool": "companies_house_profile",
+                    "query": companies_house_query,
+                    "error": str(e),
+                },
+            )
+            raise
+
+
 
 @lru_cache(maxsize=1)
 def get_rag_service() -> RAGService:

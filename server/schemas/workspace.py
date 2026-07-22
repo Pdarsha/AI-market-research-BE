@@ -84,3 +84,22 @@ class DocumentChunkUpdate(BaseModel):
     document_path: Optional[str] = None
     document_url: Optional[str] = None
 
+
+class DocumentChatLinkBase(BaseModel):
+    document_id: str
+    chat_id: str
+    workspace_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DocumentChatLinkCreate(DocumentChatLinkBase):
+    pass
+
+
+class DocumentChatLinkUpdate(BaseModel):
+    pass
+
+
