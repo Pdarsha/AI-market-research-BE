@@ -28,6 +28,14 @@ from server.config import settings
 from server.models.workspace import DocumentChunk
 from server.services.embedding_service import EmbeddingService, get_embedding_service
 from server.services.rerank_service import get_rerank_service
+import time
+import asyncio
+from copy import copy
+from server.services.audit_logger import AuditLogger
+from server.services.financial_news_mcp import financial_news
+from server.services.sec_edgar_mcp import sec_company_facts
+from server.services.roic_ai_mcp import roic_ai
+from server.services.companies_house_mcp import companies_house_profile
 from server.services.financial_news_mcp import FinancialNewsMCPTool
 from server.utils.prompt import (
     FOLLOWUP_MARKER,
@@ -75,8 +83,6 @@ class RAGService:
         When re-ranking is disabled (``settings.RAG_RERANK_ENABLED``) the vector
         top-k is returned directly.
         """
-        import time
-        from server.services.audit_logger import AuditLogger
 
         start_time = time.time()
         try:
@@ -1230,6 +1236,9 @@ class RAGService:
                 "publisher": "SEC EDGAR",
                 "source_type": "sec_edgar",
                 "ticker": ticker,
+                "filing_type": form,
+                "filing_date": filing_date,
+                "accession_number": latest.get("accession_number"),
             }]
 
         financials = sec_data.get("financials") or {}
@@ -1295,6 +1304,9 @@ class RAGService:
                     "publisher": "SEC EDGAR",
                     "source_type": "sec_edgar",
                     "ticker": ticker,
+                    "filing_type": f_type,
+                    "filing_date": f_date,
+                    "accession_number": item.get("accession_number"),
                 })
         else:
             fallback_url = f"https://www.sec.gov/edgar/data/{cik_numeric}" if cik_numeric else "https://www.sec.gov/edgar/searchedgar/companysearch"
@@ -1556,7 +1568,6 @@ class RAGService:
                     if char_count + len(chunk_text) > MAX_DOCS_CHAR_LIMIT:
                         remaining_space = MAX_DOCS_CHAR_LIMIT - char_count
                         if remaining_space > 100:
-                            from copy import copy
                             trimmed_chunk = copy(chunk)
                             trimmed_chunk.content = (
                                 chunk_text[:remaining_space] + " ... [trimmed]"
@@ -1589,10 +1600,6 @@ class RAGService:
         workspace_id: str | None,
         financial_ticker: str,
     ):
-        import time
-        import asyncio
-        from server.services.audit_logger import AuditLogger
-        from server.services.financial_news_mcp import financial_news
 
         start_time = time.time()
         try:
@@ -1637,10 +1644,6 @@ class RAGService:
         sec_tickers: list,
         sec_options: dict,
     ):
-        import time
-        import asyncio
-        from server.services.audit_logger import AuditLogger
-        from server.services.sec_edgar_mcp import sec_company_facts
 
         start_time = time.time()
         try:
@@ -1688,10 +1691,6 @@ class RAGService:
         workspace_id: str | None,
         roic_query: str,
     ):
-        import time
-        import asyncio
-        from server.services.audit_logger import AuditLogger
-        from server.services.roic_ai_mcp import roic_ai
 
         start_time = time.time()
         try:
@@ -1727,10 +1726,6 @@ class RAGService:
         workspace_id: str | None,
         companies_house_query: str,
     ):
-        import time
-        import asyncio
-        from server.services.audit_logger import AuditLogger
-        from server.services.companies_house_mcp import companies_house_profile
 
         start_time = time.time()
         try:
@@ -1768,7 +1763,221 @@ class RAGService:
 
 
 
+
+    @staticmethod
+    def rewrite_query(client, question: str, history: list[dict], model: str) -> tuple[str, str, str]:
+        history_text = "None"
+        if history:
+            history_text = ""
+            for msg in history[-4:]:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                history_text += f"{role}: {msg.get('content', '')}\n"
+
+        prompt = f"""Given the following conversation history and the latest user query, perform three tasks:
+1. Rewrite the query to be fully self-contained, resolving any pronouns (it, their, they, the company) to the actual company name from the history.
+2. Identify the active company/entity being discussed.
+3. Extract any other specific entities mentioned in the query.
+
+Format your response EXACTLY as:
+REWRITTEN: <self-contained query>
+COMPANY: <company name or NONE>
+ENTITIES: <comma separated entities or NONE>
+
+History:
+{history_text}
+
+Latest Query: {question}
+"""
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=256
+            )
+            resp = (completion.choices[0].message.content or "").strip()
+            
+            rewritten = question
+            company = ""
+            entities = ""
+            
+            for line in resp.split("\n"):
+                line = line.strip()
+                if line.startswith("**") and "**" in line[2:]:
+                    line = line.replace("**", "", 2)
+                line = re.sub(r'^\d+\.\s*', '', line)
+                
+                if line.startswith("REWRITTEN:"):
+                    rewritten = line.split("REWRITTEN:", 1)[1].strip()
+                elif line.startswith("COMPANY:"):
+                    c = line.split("COMPANY:", 1)[1].strip()
+                    if c.upper() != "NONE":
+                        company = c
+                elif line.startswith("ENTITIES:"):
+                    e = line.split("ENTITIES:", 1)[1].strip()
+                    if e.upper() != "NONE":
+                        entities = e
+                        
+            return rewritten, company, entities
+        except Exception:
+            return question, "", ""
+
+    @staticmethod
+    def resolve_company(client, company: str, model: str) -> tuple[str, str, bool]:
+        if not company or company.upper() == "NONE":
+            return "", "", False
+            
+        prompt = f"""Resolve the following company entity to its official name and primary stock ticker (if public).
+
+Company: {company}
+
+Format EXACTLY as:
+RESOLVED_NAME: <official name>
+TICKER: <ticker or NONE>
+"""
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=64
+            )
+            resp = (completion.choices[0].message.content or "").strip()
+            
+            resolved_name = company
+            ticker = ""
+            is_sec = False
+            
+            for line in resp.split("\n"):
+                if line.startswith("RESOLVED_NAME:"):
+                    resolved_name = line[14:].strip()
+                elif line.startswith("TICKER:"):
+                    t = line[7:].strip()
+                    if t.upper() != "NONE":
+                        ticker = t
+                        
+            # Deterministic SEC check using the actual SEC EDGAR provider
+            try:
+                import asyncio
+                from server.services.sec_edgar_mcp import SECEDGARClient
+                sec_client = SECEDGARClient()
+                sec_res = asyncio.run(sec_client.resolve_company(company=resolved_name, ticker=ticker))
+                if "error" not in sec_res:
+                    is_sec = True
+                    if sec_res.get("ticker"):
+                        ticker = sec_res["ticker"]
+                    if sec_res.get("company"):
+                        resolved_name = sec_res["company"]
+                else:
+                    is_sec = False
+            except Exception:
+                is_sec = False
+                    
+            return resolved_name, ticker, is_sec
+        except Exception:
+            return company, "", False
+
+    @staticmethod
+    def classify_mcp_intent(client, question: str, model: str) -> str:
+        lowered = question.lower()
+        
+        # Keyword-based routing for SEC / Finance
+        sec_keywords = [
+            "sec filing", "10-k", "10-q", "8-k", "annual report", "quarterly report",
+            "financial statements", "balance sheet", "cash flow"
+        ]
+        if any(kw in lowered for kw in sec_keywords):
+            return "SEC_FILINGS"
+            
+        finance_keywords = ["stock price", "share price", "revenue", "earnings"]
+        if any(kw in lowered for kw in finance_keywords):
+            return "FINANCIAL_MARKET_DATA"
+
+        prompt = f"""Classify the user query into one of these intents based on what external tool it requires:
+SEC_FILINGS: User wants official company filings, balance sheets, or deep financial statements.
+FINANCIAL_MARKET_DATA: User wants live stock prices, share prices, or latest financial news.
+ROIC: User wants earnings call transcripts, or financial ratios/valuation metrics.
+COMPANY_INFORMATION: User is asking for general information, history, or overview of a specific company.
+COMPANIES_HOUSE: User wants UK company profiles, officers, or filing history.
+WEB_SEARCH: User wants general information that requires a live web search.
+OTHER: User is asking a general question, small talk, or about their uploaded documents.
+
+Query: {question}
+
+Return ONLY the exact intent name from the list above.
+"""
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=16
+            )
+            intent = (completion.choices[0].message.content or "").strip()
+            if intent in ["SEC_FILINGS", "FINANCIAL_MARKET_DATA", "ROIC", "COMPANIES_HOUSE", "WEB_SEARCH", "OTHER"]:
+                return intent
+            return "WEB_SEARCH"
+        except Exception:
+            return "WEB_SEARCH"
+
+    @staticmethod
+    def has_useful_data(response: Any) -> bool:
+        if not response:
+            return False
+
+        if isinstance(response, str):
+            lowered = response.lower()
+            if "no data" in lowered or "did not return" in lowered or "not found" in lowered:
+                return False
+            return len(response.strip()) > 0
+
+        if isinstance(response, list):
+            if not response:
+                return False
+            return any(RAGService.has_useful_data(item) for item in response)
+
+        if isinstance(response, dict):
+            # Do NOT fallback on technical errors, so if there's an explicit error we return True 
+            # to let the existing error handling deal with it, EXCEPT if it's a 'not found' error.
+            err = response.get("error")
+            if err:
+                if isinstance(err, str) and ("not found" in err.lower() or "no data" in err.lower() or "no records" in err.lower()):
+                    return False
+                if isinstance(err, dict):
+                    msg = err.get("message", "").lower()
+                    if "not found" in msg or "no data" in msg or "no records" in msg:
+                        return False
+                return True # Technical error (e.g. timeout, auth, 500) -> bypass fallback
+
+            # If it's not an error, we check if it has business fields.
+            # Empty dict is no data.
+            if not response:
+                return False
+
+            # Alpha vantage / News
+            if "feed" in response and not response["feed"]:
+                return False
+            if "articles" in response and not response["articles"]:
+                return False
+            
+            # SEC facts/submissions
+            if "facts" in response and not response["facts"]:
+                return False
+            if "submissions" in response and not response["submissions"]:
+                return False
+                
+            # ROIC / Companies House
+            if "data" in response and not response["data"]:
+                return False
+            if "items" in response and not response["items"]:
+                return False
+
+            return True
+
+        return True
+
 @lru_cache(maxsize=1)
 def get_rag_service() -> RAGService:
     """Return the shared :class:`RAGService` singleton."""
     return RAGService(embedding_service=get_embedding_service())
+

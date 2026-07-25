@@ -478,8 +478,22 @@ def add_chat_message(
             model=settings.LLM_MODEL,
         )
     else:
+        optimized_prompt, conversation_company, extracted_entities = rag.rewrite_query(
+            client, request.content, history, model=settings.LLM_MODEL
+        )
+        company_to_resolve = conversation_company if conversation_company else optimized_prompt
+        resolved_company, resolved_ticker, is_sec_registrant = rag.resolve_company(
+            client, company_to_resolve, model=settings.LLM_MODEL
+        )
         stored_content = request.content
-        optimized_prompt = request.content
+        
+        logger.info(
+            "Conversation History:\n%s\n\n"
+            "Latest User Message:\n%s\n\n"
+            "Resolved Company:\n%s\n\n"
+            "Rewritten Query:\n%s",
+            history, request.content, resolved_company, optimized_prompt
+        )
 
     user_message = crud.chat_message.create(
         db=db,
@@ -558,115 +572,154 @@ def add_chat_message(
         financial_ticker = None
         companies_house_query = None
         requires_web = False
+        conversation_company = ""
+        extracted_entities = ""
+        resolved_company = ""
+        resolved_ticker = ""
+        is_sec_registrant = False
+        intent = "WORKSPACE_ANALYSIS"
+        routing_reason = "Workspace Analysis Explicitly Requested"
     else:
-        has_metric = has_roic_metric(request.content)
-        explicit_document_request = is_explicit_document_request(request.content)
+        company_to_resolve = conversation_company if conversation_company else optimized_prompt
+        resolved_company, resolved_ticker, is_sec_registrant = rag.resolve_company(
+            client, company_to_resolve, model=settings.LLM_MODEL
+        )
 
+        explicit_document_request = is_explicit_document_request(optimized_prompt)
         is_document_question = False
         if document_ids:
             is_document_question = rag.classify_requires_document(
-                client, question=request.content, model=settings.LLM_MODEL
+                client, question=optimized_prompt, model=settings.LLM_MODEL
             )
 
-        sec_tickers = rag.classify_sec_edgar_tickers(
-            client, question=request.content, model=settings.LLM_MODEL
-        )
-        sec_ticker = sec_tickers[0] if sec_tickers else None
-        sec_options = rag.sec_request_options(request.content) if sec_tickers else {}
+        intent = rag.classify_mcp_intent(client, question=optimized_prompt, model=settings.LLM_MODEL)
 
-        is_overview = is_overview_request(request.content)
-
-        # ROIC AI
-        if has_metric or is_overview:
-            if sec_tickers:
-                roic_query = sec_tickers[0]
-            else:
-                roic_query = rag.classify_roic_ai_query(
-                    client, question=request.content, model=settings.LLM_MODEL
-                )
-                if not roic_query:
-                    roic_query = rag.transcript_company_query(request.content)
-                if not roic_query and len(request.content.strip()) <= 100:
-                    roic_query = request.content
-
-            if is_overview:
-                if not sec_tickers and roic_query:
-                    sec_tickers = [roic_query]
-                    sec_ticker = roic_query
-                    sec_options = rag.sec_request_options(request.content)
-            else:
-                sec_tickers = []
-                sec_ticker = None
-                sec_options = {}
-        else:
-            roic_query = (
-                None
-                if sec_tickers
-                else rag.classify_roic_ai_query(
-                    client, question=request.content, model=settings.LLM_MODEL
-                )
-            )
-            if (
-                not roic_query
-                and not sec_tickers
-                and rag.is_earnings_transcript_query(request.content)
-            ):
-                roic_query = rag.transcript_company_query(request.content)
-
-        # Alpha Vantage / Financial News
+        sec_tickers = []
+        sec_ticker = None
+        sec_options = {}
+        roic_query = None
         financial_ticker = None
-        wants_news = any(
-            term in request.content.lower()
-            for term in [
-                "news",
-                "sentiment",
-                "article",
-                "feed",
-                "recent story",
-                "recent stories",
-            ]
-        )
-        if not sec_tickers and not roic_query or wants_news:
-            financial_ticker = rag.classify_financial_news_ticker(
-                client, question=request.content, model=settings.LLM_MODEL
-            )
-            if not financial_ticker:
-                finance_words = {
-                    "article",
-                    "articles",
-                    "earnings",
-                    "financial",
-                    "market",
-                    "news",
-                    "sentiment",
-                }
-                if any(word in request.content.lower() for word in finance_words):
-                    for message in reversed(prior_messages):
-                        for citation in message.citations or []:
-                            if citation.get(
-                                "source_type"
-                            ) == "financial_news" and citation.get("ticker"):
-                                financial_ticker = citation["ticker"]
-                                break
-                        if financial_ticker:
-                            break
+        companies_house_query = None
+        requires_web = False
+        routing_reason = "Intent matches provider."
 
-        # Companies House
-        companies_house_query = rag.classify_companies_house_query(
-            client, question=request.content, model=settings.LLM_MODEL
-        )
-        if companies_house_query:
-            sec_tickers = []
-            sec_ticker = None
-            sec_options = {}
-            roic_query = None
-            financial_ticker = None
+        active_identifier = resolved_ticker or resolved_company
 
-        # Web Search
-        requires_web = not (
-            financial_ticker or sec_ticker or roic_query or companies_house_query
-        ) and rag.classify_requires_web_search(
-            client, question=request.content, model=settings.LLM_MODEL
+        # Provider-first Evaluation
+        sec_applicable, sec_reason = False, "Not evaluated."
+        alpha_applicable, alpha_reason = False, "Not evaluated."
+        roic_applicable, roic_reason = False, "Not evaluated."
+        ch_applicable, ch_reason = False, "Not evaluated."
+
+        mcp_selected = False
+        selected_provider = "None"
+        
+        if resolved_company or resolved_ticker:
+            active_id = resolved_ticker or resolved_company
+            lowered = optimized_prompt.lower()
+            
+            # 1. SEC EDGAR Evaluation
+            sec_keywords = ["10-k", "10-q", "8-k", "filing", "annual report", "quarterly report", "sec submission", "company filing"]
+            has_sec = intent == "SEC_FILINGS" or any(kw in lowered for kw in sec_keywords)
+            if has_sec:
+                if is_sec_registrant:
+                    sec_applicable = True
+                    sec_reason = "Applicable (SEC Registrant = True)"
+                    sec_tickers = [resolved_ticker or resolved_company]
+                    sec_ticker = sec_tickers[0]
+                    sec_options = rag.sec_request_options(optimized_prompt)
+                    mcp_selected = True
+                    selected_provider = "SEC EDGAR"
+                else:
+                    sec_reason = "SEC Registrant = False"
+            else:
+                sec_reason = "No SEC keywords or intent."
+
+            # 2. Alpha Vantage Evaluation
+            if not mcp_selected:
+                alpha_keywords = ["stock price", "market price", "revenue", "eps", "financial metrics", "market data", "dividend", "financial performance"]
+                has_alpha = intent == "FINANCIAL_MARKET_DATA" or any(kw in lowered for kw in alpha_keywords)
+                if has_alpha:
+                    alpha_applicable = True
+                    alpha_reason = "Applicable (Finance match)"
+                    financial_ticker = active_id
+                    mcp_selected = True
+                    selected_provider = "Alpha Vantage"
+                else:
+                    alpha_reason = "No Finance keywords or intent."
+
+            # 3. ROIC Evaluation
+            if not mcp_selected:
+                roic_keywords = ["company fundamental", "balance sheet", "income statement", "cash flow", "valuation", "ratio", "business fundamental"]
+                has_roic = intent in ["ROIC", "COMPANY_INFORMATION"] or any(kw in lowered for kw in roic_keywords)
+                if has_roic:
+                    roic_applicable = True
+                    roic_reason = "Applicable (ROIC match)"
+                    roic_query = active_id
+                    mcp_selected = True
+                    selected_provider = "ROIC"
+                else:
+                    roic_reason = "No ROIC keywords or intent."
+
+            # 4. Companies House Evaluation
+            if not mcp_selected:
+                ch_keywords = ["uk company", "uk registration", "companies house"]
+                has_ch = intent == "COMPANIES_HOUSE" or any(kw in lowered for kw in ch_keywords)
+                if has_ch:
+                    ch_applicable = True
+                    ch_reason = "Applicable (Companies House match)"
+                    companies_house_query = active_id
+                    mcp_selected = True
+                    selected_provider = "Companies House"
+                else:
+                    ch_reason = "No Companies House keywords or intent."
+
+            # 5. Metadata Default Fallback
+            if not mcp_selected:
+                if is_sec_registrant:
+                    sec_applicable = True
+                    sec_reason = "Metadata Fallback (SEC Registrant = True)"
+                    sec_tickers = [resolved_ticker or resolved_company]
+                    sec_ticker = sec_tickers[0]
+                    sec_options = rag.sec_request_options(optimized_prompt)
+                    mcp_selected = True
+                    selected_provider = "SEC EDGAR"
+                elif resolved_ticker:
+                    roic_applicable = True
+                    roic_reason = "Metadata Fallback (Public Company)"
+                    roic_query = active_id
+                    mcp_selected = True
+                    selected_provider = "ROIC"
+        else:
+            reason_msg = "No company resolved."
+            sec_reason = reason_msg
+            alpha_reason = reason_msg
+            roic_reason = reason_msg
+            ch_reason = reason_msg
+
+        # Fallback to Web Search
+        fallback_triggered = False
+        fallback_reason = "None"
+        if not mcp_selected:
+            requires_web = True
+            routing_reason = "No applicable MCP provider detected, fallback to web search."
+            fallback_triggered = True
+            fallback_reason = "No applicable MCP service detected."
+            selected_provider = "Web Search"
+
+        logger.info(
+            f"Planner Evaluation\n\n"
+            f"Resolved Company:\n{resolved_company or 'None'}\n\n"
+            f"Resolved Ticker:\n{resolved_ticker or 'None'}\n\n"
+            f"SEC Registrant:\n{is_sec_registrant}\n\n"
+            f"Evaluated Providers:\n\n"
+            f"SEC:\nApplicable = {sec_applicable}\nReason = {sec_reason}\n\n"
+            f"Alpha Vantage:\nApplicable = {alpha_applicable}\nReason = {alpha_reason}\n\n"
+            f"ROIC:\nApplicable = {roic_applicable}\nReason = {roic_reason}\n\n"
+            f"Companies House:\nApplicable = {ch_applicable}\nReason = {ch_reason}\n\n"
+            f"Selected Provider:\n{selected_provider}\n\n"
+            f"Fallback Triggered:\n{fallback_triggered}\n\n"
+            f"Fallback Reason:\n{fallback_reason}\n\n"
         )
 
         # Apply Dynamic Source Selection priority rules
@@ -746,11 +799,19 @@ def add_chat_message(
 
     logger.info(
         build_routing_log(
-            request.content,
-            document_ids,
-            is_document_question,
-            selected_list,
-            skipped_list,
+            content=request.content,
+            document_ids=document_ids,
+            is_document_question=is_document_question,
+            selected_providers=selected_list,
+            skipped_providers=skipped_list,
+            rewritten_query=optimized_prompt if optimized_prompt != request.content else "",
+            conversation_company=conversation_company,
+            extracted_entities=extracted_entities,
+            resolved_company=resolved_company,
+            resolved_ticker=resolved_ticker,
+            sec_registrant=is_sec_registrant,
+            intent=intent,
+            routing_reason=routing_reason
         )
     )
 
@@ -776,7 +837,7 @@ def add_chat_message(
                 user_id_str,
                 document_ids,
                 session.workspace_id,
-                request.content,
+                optimized_prompt,
                 chat_id,
             )
 
@@ -868,7 +929,7 @@ def add_chat_message(
                 ]
                 sec_context = "SEC EDGAR data is unavailable: " + (
                     "; ".join(error_messages) or "no validated facts were returned."
-                )
+                ) + "\n\nCRITICAL INSTRUCTION: Since the requested SEC filing data is unavailable, explicitly state that no filing was found and explain why using the error above. DO NOT fabricate or replace the answer with generic educational content."
         if roic_response:
             roic_context, roic_sources = rag.build_roic_context(
                 roic_response,
@@ -876,7 +937,7 @@ def add_chat_message(
                 + len(financial_sources)
                 + len(sec_sources)
                 + 1,
-                query=request.content,
+                query=optimized_prompt,
             )
             roic_context = roic_context or None
             if roic_context and used_rag and "ROIC.ai Error" in roic_context:
@@ -903,9 +964,49 @@ def add_chat_message(
                 companies_house_context = None
                 companies_house_sources = []
 
+        # Post-Provider Validation Layer
+        mcp_executed = bool(financial_news_response or sec_company_facts_response or roic_response or companies_house_response)
+        has_data = False
+        
+        if financial_news_response and rag.has_useful_data(financial_news_response):
+            has_data = True
+        if sec_company_facts_response and rag.has_useful_data(sec_company_facts_response):
+            has_data = True
+        if roic_response and rag.has_useful_data(roic_response):
+            has_data = True
+        if companies_house_response and rag.has_useful_data(companies_house_response):
+            has_data = True
+            
+        fallback_triggered = False
+        if mcp_executed and not has_data:
+            if sec_company_facts_response is not None:
+                # Per requirements, SEC EDGAR must not fallback to web search.
+                # It must use the generated sec_context to explicitly state no filing was found.
+                pass
+            else:
+                fallback_triggered = True
+                requires_web = True
+                fallback_reason = "Provider returned no usable business data."
+                selected_prov = "Alpha Vantage" if financial_news_response else "ROIC" if roic_response else "Companies House" if companies_house_response else "Unknown"
+                logger.info(
+                    f"Planner Selected:\n{selected_prov}\n\n"
+                    "Provider Response:\nEmpty\n\n"
+                    "Fallback Triggered:\nTrue\n\n"
+                    "Fallback Provider:\nWeb Search\n\n"
+                    f"Search Query:\n{optimized_prompt}\n\n"
+                    "Fallback Reason:\nProvider returned no usable business data."
+                )
+                # Clear empty/error contexts and sources so they don't corrupt citation indices
+                financial_context = None
+                financial_sources = []
+                roic_context = None
+                roic_sources = []
+                companies_house_context = None
+                companies_house_sources = []
+
         if requires_web:
             web_context, web_sources = rag.web_search(
-                request.content,
+                optimized_prompt,
                 start_number=(
                     len(retrieved_chunks or [])
                     + len(financial_sources)
@@ -918,27 +1019,71 @@ def add_chat_message(
             web_context = web_context or None
             used_web = web_context is not None
 
+            if fallback_triggered:
+                logger.info(
+                    "Fallback Triggered: True\n"
+                    f"Search Query: {optimized_prompt}\n"
+                    f"Search Results Count: {len(web_sources) if web_sources else 0}\n"
+                    f"Generated Web Context Length: {len(web_context) if web_context else 0}\n"
+                )
+
         if is_workspace_analysis:
             intent = "Research / Deep Analysis"
         else:
             intent = rag.classify_intent(
-                client, question=request.content, model=settings.LLM_MODEL
+                client, question=optimized_prompt, model=settings.LLM_MODEL
             )
 
+        exec_result = "Success" if has_data else "Empty" if mcp_executed else "Skipped"
+        rows_returned = "N/A"
+        if has_data:
+            if financial_news_response: rows_returned = len(financial_news_response) if isinstance(financial_news_response, list) else 1
+            if sec_company_facts_response: rows_returned = len(sec_company_facts_response) if isinstance(sec_company_facts_response, list) else 1
+            if roic_response: rows_returned = 1
+            if companies_house_response: rows_returned = len(companies_house_response) if isinstance(companies_house_response, list) else 1
+            
+        final_provider = "Web Search" if requires_web and (fallback_triggered or not mcp_executed) else selected_provider
+
+        evaluated_providers = (
+            f"SEC={sec_applicable}, AlphaVantage={alpha_applicable}, ROIC={roic_applicable}, CompaniesHouse={ch_applicable}"
+        )
+        
+        final_sources = []
+        if financial_context: final_sources.append("Alpha Vantage")
+        if sec_context: final_sources.append("SEC EDGAR")
+        if roic_context: final_sources.append("ROIC")
+        if companies_house_context: final_sources.append("Companies House")
+        if web_context: final_sources.append("Web Search")
+        if document_context: final_sources.append("RAG Docs")
+
         logger.info(
-            "chat.message: chat=%s user=%s attached_docs=%d used_rag=%s used_web=%s finance=%s sec=%s companies_house=%s intent=%s",
-            chat_id,
-            user_id_str,
-            len(document_ids),
-            used_rag,
-            used_web,
-            financial_ticker,
-            sec_tickers,
-            companies_house_query,
-            intent,
+            f"--- ROUTING PIPELINE AUDIT ---\n"
+            f"Resolved Company: {resolved_company or 'None'}\n"
+            f"Resolved Ticker: {resolved_ticker or 'None'}\n"
+            f"Evaluated Providers: {evaluated_providers}\n"
+            f"Executed Provider: {selected_provider}\n"
+            f"Rows Returned: {rows_returned}\n"
+            f"Has Useful Data: {has_data}\n"
+            f"Fallback Triggered: {fallback_triggered or (not mcp_selected)}\n"
+            f"Fallback Reason: {fallback_reason}\n"
+            f"Final Provider: {final_provider}\n"
+            f"Final Context Sources: {', '.join(final_sources) or 'None'}\n"
+            f"------------------------------\n"
         )
 
         llm_history = [] if context_reason == "new_upload" else history
+        
+        logger.info(
+            "Prompt Context Summary\n\n"
+            f"Finance Context: {bool(financial_context)}\n"
+            f"SEC Context: {bool(sec_context)}\n"
+            f"ROIC Context: {bool(roic_context)}\n"
+            f"Companies House Context: {bool(companies_house_context)}\n"
+            f"Web Context: {bool(web_context)}\n"
+            f"RAG Context: {bool(document_context)}\n\n"
+            f"Final Context Sources: {[s.get('source_type') for s in (financial_sources + sec_sources + roic_sources + companies_house_sources + (web_sources or []) + list(retrieved_chunks or []))]}"
+        )
+        
         messages = rag.build_messages(
             history=llm_history,
             question=optimized_prompt,

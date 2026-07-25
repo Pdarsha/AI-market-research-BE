@@ -194,17 +194,7 @@ Hallucination Prevention:
 - Do not write statements like: "Apple is acquiring AI chip startups."
 - Instead, write: "According to recent reports, Apple is exploring potential acquisitions of AI chip startups."
 """
-    else:
-        financial_news_section = """
-========================================
-USING LIVE FINANCIAL NEWS
-========================================
 
-- Clearly distinguish uploaded-document information from live Alpha Vantage news.
-- When both are present, combine them into one answer and explain meaningful
-  conflicts (for example, an older report versus current sentiment).
-- Do not infer facts not present in the supplied articles.
-"""
 
     if financial_news_context:
         response_format_rules = """

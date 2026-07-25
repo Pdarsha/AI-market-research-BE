@@ -123,9 +123,32 @@ def check_spurious_roic_query(roic_query: str, matched_agent: dict) -> bool:
             return True
     return False
 
-def build_routing_log(content: str, document_ids: list, is_document_question: bool, selected_providers: list, skipped_providers: list) -> str:
+def build_routing_log(
+    content: str, 
+    document_ids: list, 
+    is_document_question: bool, 
+    selected_providers: list, 
+    skipped_providers: list,
+    rewritten_query: str = "",
+    conversation_company: str = "",
+    extracted_entities: str = "",
+    resolved_company: str = "",
+    resolved_ticker: str = "",
+    sec_registrant: bool = False,
+    intent: str = "",
+    routing_reason: str = ""
+) -> str:
     log_lines = [
-        f"Question:\n{content}",
+        f"Original Question:\n{content}",
+        f"Rewritten Question:\n{rewritten_query}",
+        f"Conversation Company:\n{conversation_company}",
+        f"Extracted Entities:\n{extracted_entities}",
+        f"Resolved Company:\n{resolved_company}",
+        f"Resolved Ticker:\n{resolved_ticker}",
+        f"SEC Registrant:\n{sec_registrant}",
+        f"Detected Intent:\n{intent}",
+        f"Planner Decision:\nMCP Executed" if selected_providers else f"Planner Decision:\nFallback",
+        f"Routing Reason:\n{routing_reason}",
         f"Uploaded Documents:\n{len(document_ids)}",
         f"Document Relevant:\n{is_document_question}",
     ]

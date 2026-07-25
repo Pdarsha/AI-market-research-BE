@@ -616,6 +616,7 @@ class SECEDGARClient:
             "filing_html_url": filing_html_url,
             "filing_index_url": filing_index_url,
             "filing_document_url": filing_document_url,
+            "accession_number": accn,
         }
 
     @classmethod
