@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel
 
@@ -53,6 +53,7 @@ class ChatMessageRequest(BaseModel):
     document_ids: Optional[list[str]] = None
     workspace_id: Optional[str] = None
     title: Optional[str] = None
+    mode: Optional[Literal["auto", "think_longer", "deep_research"]] = "auto"
 
 
 class CitationMetadata(BaseModel):
@@ -97,6 +98,7 @@ class ChatMessageCreate(ChatMessageBase):
     document_ids: Optional[list[str]] = None
     source_documents: Optional[list] = None
     citations: Optional[list[CitationMetadata]] = None
+    mode_used: Optional[str] = None
 
 
 class ChatMessageUpdate(BaseModel):

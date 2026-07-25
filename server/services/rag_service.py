@@ -55,6 +55,9 @@ logger = logging.getLogger(__name__)
 
 serp_client = serpapi.Client(api_key=settings.SERPAPI_KEY)
 
+class ThinkLongerUnavailable(Exception):
+    """Raised when the Think Longer service is unavailable or fails."""
+    pass
 
 class RAGService:
     """Embed a query and retrieve the most relevant document chunks."""
@@ -413,6 +416,32 @@ class RAGService:
             ):
                 ai_response += chunk.choices[0].delta.content
         return ai_response
+
+    @staticmethod
+    def generate_think_longer_response(client, *, messages: list[dict], model: str, reasoning_effort: str) -> str:
+        """LLM response generation for Think Longer mode with reasoning effort."""
+        try:
+            ai_response = ""
+            completion = client.chat.completions.create(
+                model=model, 
+                messages=messages, 
+                max_tokens=4096, 
+                stream=True, 
+                temperature=0,
+                extra_body={"reasoning": {"effort": reasoning_effort}}
+            )
+            for chunk in completion:
+                if (
+                    chunk.choices
+                    and chunk.choices[0].delta
+                    and chunk.choices[0].delta.content
+                ):
+                    ai_response += chunk.choices[0].delta.content
+            return ai_response
+        except Exception as e:
+            logger.warning("generate_think_longer_response failed: %s", str(e))
+            raise ThinkLongerUnavailable(str(e)) from e
+
 
     @staticmethod
     def classify_intent(client, question: str, model: str) -> str:

@@ -1,4 +1,6 @@
 import logging
+import os
+import mimetypes
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -8,9 +10,11 @@ from openai import OpenAI
 
 from server import crud, schemas
 from server.api_v1.deps import get_db
-from server.config import settings
+from server.config import settings, WORKSPACE_DOCS_DIR
 from server.services.citation_service import get_citation_service
-from server.services.rag_service import get_rag_service
+from server.services.rag_service import get_rag_service, ThinkLongerUnavailable
+from datetime import datetime, time, timezone
+from server.services.audit_logger import AuditLogger
 from server.utils.auth import get_current_user
 from server.utils.prompt import AGENT_PROMPTS
 from server.utils.helpers import (
@@ -24,9 +28,7 @@ from server.utils.source_attribution import (
     source_attribution_from_citations,
 )
 from server.utils.chat_helpers import (
-    has_roic_metric,
     is_explicit_document_request,
-    is_overview_request,
     check_user_typed_context,
     check_spurious_roic_query,
     build_routing_log,
@@ -65,8 +67,6 @@ def create_chat_session(
             user_id=str(current_user.id), title=title, workspace_id=workspace_id
         ),
     )
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_CREATE",
@@ -107,7 +107,6 @@ def list_chat_sessions(
     sessions = crud.chat_session.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
     )
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_LIST",
@@ -156,8 +155,6 @@ def delete_chat_session(
 
     workspace_id = session.workspace_id
     crud.chat_session.remove(db, id=session.id)
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_DELETE",
@@ -210,8 +207,6 @@ def public_chat_session(
         }
         for msg in conversation
     ]
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="CHAT_GET_PUBLIC",
         workspace_id=session.workspace_id,
@@ -266,10 +261,6 @@ def get_chat_session(
         if doc_id not in doc_info_cache:
             doc = crud.document.get(db, doc_id)
             if doc:
-                import os
-                import mimetypes
-                from server.config import WORKSPACE_DOCS_DIR
-
                 size = 0
                 if doc.storage_path:
                     file_name_only = os.path.basename(doc.storage_path)
@@ -323,7 +314,6 @@ def get_chat_session(
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }
         )
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_GET",
@@ -373,8 +363,6 @@ def update_chat_title(
         raise HTTPException(status_code=404, detail="Chat session not found")
 
     crud.chat_session.update(db, db_obj=session, obj_in={"title": request.title})
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_UPDATE",
@@ -516,8 +504,6 @@ def add_chat_message(
             workspace_id=session.workspace_id,
             user_id=str(current_user.id),
         )
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="USER_MESSAGE",
@@ -1095,9 +1081,49 @@ def add_chat_message(
             companies_house_context=companies_house_context,
             intent=intent,
         )
-        raw_response = rag.generate_response(
-            client, messages=messages, model=settings.LLM_MODEL
-        )
+        mode_used = "auto"
+
+        if getattr(request, "mode", None) == "think_longer":
+            today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
+            daily_calls = crud.chat_message.count_user_daily_calls(
+                db=db,
+                user_id=str(current_user.id),
+                mode_prefix="think_longer",
+                since=today_start
+            )
+            
+            has_context = any([
+                document_context, web_context, financial_context, 
+                sec_context, roic_context, companies_house_context
+            ])
+
+            if daily_calls >= settings.THINK_LONGER_DAILY_LIMIT:
+                logger.info(f"Think Longer skipped: user {current_user.id} reached daily limit ({daily_calls}/{settings.THINK_LONGER_DAILY_LIMIT})")
+                raw_response = rag.generate_response(client, messages=messages, model=settings.LLM_MODEL)
+            elif not has_context:
+                logger.info("Think Longer skipped: no context to reason over")
+                raw_response = rag.generate_response(client, messages=messages, model=settings.LLM_MODEL)
+            else:
+                try:
+                    raw_response = rag.generate_think_longer_response(
+                        client,
+                        messages=messages,
+                        model=settings.THINK_LONGER_MODEL,
+                        reasoning_effort=settings.THINK_LONGER_REASONING_EFFORT,
+                    )
+                    mode_used = "think_longer"
+                except ThinkLongerUnavailable as e:
+                    logger.warning("Falling back to standard model for think_longer mode")
+                    logger.exception("Error during think_longer response generation: %s", str(e))
+                    raw_response = rag.generate_response(
+                        client, messages=messages, model=settings.THINK_LONGER_FALLBACK_MODEL
+                    )
+                    mode_used = "think_longer_fallback"
+        else:
+            raw_response = rag.generate_response(
+                client, messages=messages, model=settings.LLM_MODEL
+            )
+
         ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
         cited_sources: list = list(retrieved_chunks or [])
@@ -1131,6 +1157,7 @@ def add_chat_message(
             document_ids=document_ids or None,
             source_documents=source_documents,
             citations=citations,
+            mode_used=mode_used,
         ),
     )
 
@@ -1145,6 +1172,8 @@ def add_chat_message(
         metadata={
             "citations_count": len(citations) if citations else 0,
             "follow_up_questions": follow_up_questions,
+            "mode_requested": getattr(request, "mode", None),
+            "mode_used": mode_used,
         },
     )
 
@@ -1160,6 +1189,7 @@ def add_chat_message(
                 "response": ai_response,
                 "document_ids": document_ids,
                 "active_document_ids": document_ids,
+                "mode_used": mode_used,
                 "uploaded_document_ids": (
                     document_ids if context_reason == "new_upload" else []
                 ),

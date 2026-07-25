@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import desc
@@ -82,6 +83,16 @@ class CRUDChatMessage(CRUDBase[ChatMessage, ChatMessageCreate, ChatMessageUpdate
             .first()
         )
         return cited_document_names(latest.citations) if latest else None
+
+    def count_user_daily_calls(self, db: Session, *, user_id: str, mode_prefix: str, since: datetime) -> int:
+        """Count the number of daily calls for a user."""
+        return (
+            db.query(ChatMessage).filter(
+                ChatMessage.user_id == str(user_id),
+                ChatMessage.mode_used.startswith(mode_prefix),
+                ChatMessage.created_at >= since
+            ).count()
+        )
 
 
 chat_message = CRUDChatMessage(ChatMessage)

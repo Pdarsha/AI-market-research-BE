@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     )
 
     LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
+    THINK_LONGER_MODEL: str = os.getenv("THINK_LONGER_MODEL", "openai/gpt-5.6-terra")
+    THINK_LONGER_REASONING_EFFORT: str = os.getenv("THINK_LONGER_REASONING_EFFORT", "medium")
+    THINK_LONGER_FALLBACK_MODEL: str = os.getenv("THINK_LONGER_FALLBACK_MODEL", os.getenv("LLM_MODEL", "openai/gpt-4.1-mini"))
+    THINK_LONGER_DAILY_LIMIT: int = int(os.getenv("THINK_LONGER_DAILY_LIMIT", "10"))
 
     # -- OpenAI embeddings -------------------------------------------------
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
