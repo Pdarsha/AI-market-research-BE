@@ -33,6 +33,7 @@ from server.utils.chat_helpers import (
     check_spurious_roic_query,
     build_routing_log,
 )
+from server.services.deep_research import DeepResearchOrchestrator
 
 client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
@@ -1119,6 +1120,59 @@ def add_chat_message(
                         client, messages=messages, model=settings.THINK_LONGER_FALLBACK_MODEL
                     )
                     mode_used = "think_longer_fallback"
+
+        elif getattr(request, "mode", None) == "deep_research":
+            orchestrator = DeepResearchOrchestrator(client, rag, db, current_user, session)
+            
+            initial_contexts = []
+            if document_context: initial_contexts.append(document_context)
+            if web_context: initial_contexts.append(web_context)
+            if financial_context: initial_contexts.append(financial_context)
+            if sec_context: initial_contexts.append(sec_context)
+            if roic_context: initial_contexts.append(roic_context)
+            if companies_house_context: initial_contexts.append(companies_house_context)
+            
+            initial_context_str = "\n\n".join(initial_contexts)
+            
+            final_research_context, all_chunks, all_news, all_sec, all_roic, all_ch, all_web = orchestrator.execute(
+                initial_query=optimized_prompt,
+                chat_id=chat_id,
+                document_ids=document_ids,
+                history=llm_history,
+                initial_context=initial_context_str
+            )
+            
+            if all_chunks: retrieved_chunks = list(retrieved_chunks or []) + all_chunks
+            if all_news: financial_sources.extend(all_news)
+            if all_sec: sec_sources.extend(all_sec)
+            if all_roic: roic_sources.extend(all_roic)
+            if all_ch: companies_house_sources.extend(all_ch)
+            if all_web:
+                if web_sources is None: web_sources = []
+                web_sources.extend(all_web)
+            
+            report_prompt = (
+                f"Using the following comprehensive and consolidated research context, generate a detailed and well-structured final research report that fully addresses the original query: '{optimized_prompt}'. "
+                "Adapt the structure naturally based on the user's request, potentially including Executive Summary, Background, Key Findings, Detailed Analysis, Supporting Evidence, Risks, Opportunities, Recommendations, and Conclusion.\n\n"
+                f"Context:\n{final_research_context}"
+            )
+            
+            messages = [{"role": "user", "content": report_prompt}]
+            try:
+                raw_response = rag.generate_think_longer_response(
+                    client,
+                    messages=messages,
+                    model=settings.DEEP_RESEARCH_MODEL,
+                    reasoning_effort=settings.DEEP_RESEARCH_REASONING_EFFORT,
+                )
+                mode_used = "deep_research"
+            except ThinkLongerUnavailable as e:
+                logger.warning("Falling back to standard model for deep_research mode")
+                logger.exception("Error during deep_research response generation: %s", str(e))
+                raw_response = rag.generate_response(
+                    client, messages=messages, model=settings.THINK_LONGER_FALLBACK_MODEL
+                )
+                mode_used = "deep_research_fallback"
         else:
             raw_response = rag.generate_response(
                 client, messages=messages, model=settings.LLM_MODEL

@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     THINK_LONGER_REASONING_EFFORT: str = os.getenv("THINK_LONGER_REASONING_EFFORT", "medium")
     THINK_LONGER_FALLBACK_MODEL: str = os.getenv("THINK_LONGER_FALLBACK_MODEL", os.getenv("LLM_MODEL", "openai/gpt-4.1-mini"))
     THINK_LONGER_DAILY_LIMIT: int = int(os.getenv("THINK_LONGER_DAILY_LIMIT", "10"))
+    
+    DEEP_RESEARCH_MODEL: str = os.getenv("DEEP_RESEARCH_MODEL", "openai/gpt-5.6-terra")
+    DEEP_RESEARCH_REASONING_EFFORT: str = os.getenv("DEEP_RESEARCH_REASONING_EFFORT", "high")
 
     # -- OpenAI embeddings -------------------------------------------------
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")

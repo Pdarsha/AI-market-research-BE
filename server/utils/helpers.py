@@ -19,6 +19,7 @@ _MIME_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "doc": "application/msword",
+    "md": "text/markdown",
     "txt": "text/plain",
     "csv": "text/csv",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
