@@ -19,7 +19,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
+from server.services.audit_logger import audit_context
 from server.config import settings
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,10 @@ _MODELS_SUPPORTING_DIMENSIONS = ("text-embedding-3",)
 
 _sync_client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
-    base_url="https://openrouter.ai/api/v1",
 )
 
 _async_client = AsyncOpenAI(
     api_key=settings.OPENAI_API_KEY,
-    base_url="https://openrouter.ai/api/v1",
 )
 
 
@@ -76,7 +74,6 @@ class EmbeddingService:
         if self._client is None:
             self._client = OpenAI(
                 api_key=self._require_api_key(),
-                base_url=self._base_url,
                 max_retries=self._max_retries,
             )
         return self._client
@@ -86,7 +83,6 @@ class EmbeddingService:
         if self._aclient is None:
             self._aclient = AsyncOpenAI(
                 api_key=self._require_api_key(),
-                base_url=self._base_url,
                 max_retries=self._max_retries,
             )
         return self._aclient
@@ -138,19 +134,19 @@ class EmbeddingService:
         reraise=True,
     )
     def _embed_batch_sync(self, batch: list[str]) -> list[list[float]]:
-        from server.services.audit_logger import audit_context
+
         with audit_context(
             action="EMBEDDING_GENERATION",
             metadata={
                 "model": self.model,
                 "batch_size": len(batch),
                 "async": False,
-            }
+            },
         ):
             try:
                 # response = self.client.embeddings.create(**self._request_kwargs(batch))
                 response = _sync_client.embeddings.create(
-                    model="openai/text-embedding-3-small", input=batch
+                    model="text-embedding-3-small", input=batch
                 )
             except OpenAIError as exc:
                 logger.exception(
@@ -185,19 +181,19 @@ class EmbeddingService:
         reraise=True,
     )
     async def _embed_batch_async(self, batch: list[str]) -> list[list[float]]:
-        from server.services.audit_logger import audit_context
+
         with audit_context(
             action="EMBEDDING_GENERATION",
             metadata={
                 "model": self.model,
                 "batch_size": len(batch),
                 "async": True,
-            }
+            },
         ):
             try:
                 # response = await self.aclient.embeddings.create(**self._request_kwargs(batch))
                 response = await _async_client.embeddings.create(
-                    model="openai/text-embedding-3-small", input=batch
+                    model="text-embedding-3-small", input=batch
                 )
             except OpenAIError as exc:
                 logger.exception(

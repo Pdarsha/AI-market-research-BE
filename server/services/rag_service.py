@@ -13,7 +13,8 @@ top-k are passed to the LLM.
 """
 
 from __future__ import annotations
-
+import openai
+import re
 import json
 import logging
 import re
@@ -284,6 +285,25 @@ class RAGService:
         elif intent is None:
             intent = "Other"
 
+        def _truncate(text: str | None, max_chars: int) -> str | None:
+            if text and len(text) > max_chars:
+                return text[:max_chars] + "\n\n... [Truncated for token limits]"
+            return text
+
+        retrieved_context = _truncate(retrieved_context, 5000)
+        web_context = _truncate(web_context, 2000)
+        financial_news_context = _truncate(financial_news_context, 2000)
+        sec_context = _truncate(sec_context, 2000)
+        roic_context = _truncate(roic_context, 2000)
+        companies_house_context = _truncate(companies_house_context, 2000)
+        
+        # Aggressively trim history: keep only last 2 messages (1 interaction turn) and truncate their content
+        if history:
+            history = history[-2:]
+            for msg in history:
+                if msg.get("content") and isinstance(msg["content"], str):
+                    msg["content"] = _truncate(msg["content"], 1500)
+
         if (
             retrieved_context is not None
             or web_context is not None
@@ -405,9 +425,37 @@ class RAGService:
         the chunks are aggregated into the final response string.
         """
         ai_response = ""
-        completion = client.chat.completions.create(
-            model=model, messages=messages, max_tokens=1024, stream=True, temperature=0
-        )
+        
+        token_kwargs = {}
+        if "gpt-5" in model.lower():
+            token_kwargs["max_completion_tokens"] = 1024
+            token_kwargs["temperature"] = 1
+        else:
+            token_kwargs["max_tokens"] = 1024
+            token_kwargs["temperature"] = 0
+            
+        try:
+            completion = client.chat.completions.create(
+                model=model, messages=messages, stream=True, **token_kwargs
+            )
+        except openai.APIStatusError as e:
+            if e.status_code == 402 and "can only afford" in str(e):
+                match = re.search(r"can only afford (\d+)", str(e))
+                if match:
+                    affordable_tokens = int(match.group(1))
+                    # Retry with the exact affordable tokens
+                    if "gpt-5" in model.lower():
+                        token_kwargs["max_completion_tokens"] = affordable_tokens
+                    else:
+                        token_kwargs["max_tokens"] = affordable_tokens
+                    completion = client.chat.completions.create(
+                        model=model, messages=messages, stream=True, **token_kwargs
+                    )
+                else:
+                    raise e
+            else:
+                raise e
+                
         for chunk in completion:
             if (
                 chunk.choices
@@ -422,14 +470,41 @@ class RAGService:
         """LLM response generation for Think Longer mode with reasoning effort."""
         try:
             ai_response = ""
-            completion = client.chat.completions.create(
-                model=model, 
-                messages=messages, 
-                max_tokens=4096, 
-                stream=True, 
-                temperature=0,
-                extra_body={"reasoning": {"effort": reasoning_effort}}
-            )
+            
+            token_kwargs = {}
+            if "gpt-5" in model.lower():
+                token_kwargs["max_completion_tokens"] = 4096
+                token_kwargs["temperature"] = 1
+            else:
+                token_kwargs["max_tokens"] = 4096
+                token_kwargs["temperature"] = 0
+
+            try:
+                completion = client.chat.completions.create(
+                    model=model, 
+                    messages=messages, 
+                    stream=True, 
+                    **token_kwargs
+                )
+            except openai.APIStatusError as e:
+                if e.status_code == 402 and "can only afford" in str(e):
+                    match = re.search(r"can only afford (\d+)", str(e))
+                    if match:
+                        affordable_tokens = int(match.group(1))
+                        if "gpt-5" in model.lower():
+                            token_kwargs["max_completion_tokens"] = affordable_tokens
+                        else:
+                            token_kwargs["max_tokens"] = affordable_tokens
+                        completion = client.chat.completions.create(
+                            model=model, 
+                            messages=messages, 
+                            stream=True, 
+                            **token_kwargs
+                        )
+                    else:
+                        raise e
+                else:
+                    raise e
             for chunk in completion:
                 if (
                     chunk.choices
@@ -456,7 +531,7 @@ class RAGService:
                     {"role": "system", "content": classify_intent_prompt()},
                     {"role": "user", "content": f'User message:\n"{question}"\nIntent:'},
                 ],
-                max_tokens=15,
+                **({"max_completion_tokens": 15} if "gpt-5" in model.lower() else {"max_tokens": 15}),
                 temperature=0,
             )
             intent = (completion.choices[0].message.content or "").strip()
@@ -488,7 +563,7 @@ class RAGService:
                     {"role": "system", "content": classification_prompt()},
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
-                max_tokens=1024,
+                **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
@@ -521,7 +596,7 @@ class RAGService:
                     {"role": "system", "content": web_search_classification_prompt()},
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
-                max_tokens=1024,
+                **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
@@ -555,7 +630,7 @@ class RAGService:
                     {"role": "system", "content": financial_news_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                max_tokens=16,
+                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
@@ -573,7 +648,7 @@ class RAGService:
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": roic_ai_classification_prompt()}, {"role": "user", "content": question}],
-                max_tokens=16,
+                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
@@ -592,7 +667,7 @@ class RAGService:
                     {"role": "system", "content": companies_house_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                max_tokens=16,
+                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip()
@@ -904,7 +979,7 @@ class RAGService:
                     {"role": "system", "content": sec_edgar_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                max_tokens=16,
+                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
                 temperature=0,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
@@ -1822,7 +1897,7 @@ Latest Query: {question}
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=256
+                **({"max_completion_tokens": 256} if "gpt-5" in model.lower() else {"max_tokens": 256})
             )
             resp = (completion.choices[0].message.content or "").strip()
             
@@ -1869,7 +1944,7 @@ TICKER: <ticker or NONE>
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=64
+                **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
             )
             resp = (completion.choices[0].message.content or "").strip()
             
@@ -1907,6 +1982,35 @@ TICKER: <ticker or NONE>
             return company, "", False
 
     @staticmethod
+    def resolve_multiple_companies(client, query: str, model: str) -> list[str]:
+        if not query or query.upper() == "NONE":
+            return []
+            
+        prompt = f"""Extract all mentioned public companies from the following text and resolve them to their primary stock tickers.
+        
+Text: {query}
+
+Format your response EXACTLY as a comma-separated list of tickers, or NONE if no public companies are found.
+Example: AAPL, MSFT, GOOGL
+"""
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
+            )
+            resp = (completion.choices[0].message.content or "").strip()
+            
+            if resp.upper() == "NONE":
+                return []
+                
+            tickers = [t.strip().upper() for t in resp.split(",") if t.strip()]
+            return tickers
+        except Exception:
+            return []
+
+    @staticmethod
     def classify_mcp_intent(client, question: str, model: str) -> str:
         lowered = question.lower()
         
@@ -1925,6 +2029,7 @@ TICKER: <ticker or NONE>
         prompt = f"""Classify the user query into one of these intents based on what external tool it requires:
 SEC_FILINGS: User wants official company filings, balance sheets, or deep financial statements.
 FINANCIAL_MARKET_DATA: User wants live stock prices, share prices, or latest financial news.
+WATCHLIST_NEWS: User is asking for news updates or information specifically about their watchlist or portfolio of companies.
 ROIC: User wants earnings call transcripts, or financial ratios/valuation metrics.
 COMPANY_INFORMATION: User is asking for general information, history, or overview of a specific company.
 COMPANIES_HOUSE: User wants UK company profiles, officers, or filing history.
@@ -1940,10 +2045,10 @@ Return ONLY the exact intent name from the list above.
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=16
+                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16})
             )
             intent = (completion.choices[0].message.content or "").strip()
-            if intent in ["SEC_FILINGS", "FINANCIAL_MARKET_DATA", "ROIC", "COMPANIES_HOUSE", "WEB_SEARCH", "OTHER"]:
+            if intent in ["SEC_FILINGS", "FINANCIAL_MARKET_DATA", "WATCHLIST_NEWS", "ROIC", "COMPANIES_HOUSE", "WEB_SEARCH", "OTHER"]:
                 return intent
             return "WEB_SEARCH"
         except Exception:

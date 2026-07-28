@@ -14,7 +14,12 @@ class DeepResearchOrchestrator:
         self.session = session
 
     def generate_sub_queries(self, main_query: str) -> List[str]:
-        prompt = f"Analyze the following research request and break it down into 3-5 specific, distinct sub-questions that need to be answered to fully address the prompt.\n\nRequest: {main_query}\n\nFormat your response as a simple list of questions, one per line."
+        prompt = f"""Analyze the following research request and determine the user's objective (e.g., Information request, Comparison, Recommendation, Investigation, Market/Technical/Financial/Legal research). 
+Based on this objective, break the request into 3-5 logical research topics or sub-questions that must be independently investigated to fully address the prompt.
+
+Request: {main_query}
+
+Format your response strictly as a simple list of topics/questions, one per line, with no bullet points or numbering."""
         try:
             completion = self.client.chat.completions.create(
                 model=settings.DEEP_RESEARCH_MODEL,
@@ -187,18 +192,20 @@ class DeepResearchOrchestrator:
         if not combined.strip():
             return ""
             
-        prompt = f"""You are an expert research analyst. You have collected information from multiple independent retrieval pipelines.
+        prompt = f"""You are an expert research analyst. You have collected evidence from multiple independent retrieval pipelines.
 
-Your task is to validate and consolidate this information into a single, unified, highly structured research context.
+Your task is to validate and consolidate this evidence into a single, unified, highly structured research context.
 
 Instructions:
-1. Remove any duplicate findings.
-2. Detect and resolve conflicting information (prefer higher-confidence or more recent evidence).
-3. Organize the information logically by topic or entity.
-4. PRESERVE ALL CITATIONS (e.g. [1], [2], [company_facts], [financial_news]). Do not lose citation markers.
-5. Provide a clean, consolidated text that can be directly used as the context for generating a final research report.
+1. Validate Evidence: Identify duplicate information, supporting evidence, conflicting evidence, weak evidence, and missing evidence.
+2. Prioritize Evidence: Prefer multiple independent confirmations over primary sources, over official documentation, over research papers, over reliable web sources, over single-source claims.
+3. Remove Duplicates: Merge identical findings.
+4. Handle Contradictions: Do not ignore conflicting information. Explicitly explain it.
+5. Identify Evidence Gaps: Highlight weak evidence or missing information.
+6. PRESERVE ALL CITATIONS (e.g. [1], [2], [company_facts], [financial_news]). Do not lose citation markers.
+7. Provide a clean, consolidated text that combines findings logically (relationships, trends, patterns, contradictions, trade-offs, risks) to be directly used for generating a final research report.
 
-Raw Collected Data:
+Raw Collected Evidence:
 {combined}
 """
         try:
