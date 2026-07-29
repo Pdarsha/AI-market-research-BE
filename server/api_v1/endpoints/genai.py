@@ -472,9 +472,22 @@ def add_chat_message(
             client, request.content, history, model=settings.LLM_MODEL
         )
         company_to_resolve = conversation_company if conversation_company else optimized_prompt
-        resolved_company, resolved_ticker, is_sec_registrant = rag.resolve_company(
-            client, company_to_resolve, model=settings.LLM_MODEL
-        )
+        
+        with ThreadPoolExecutor(max_workers=3) as planner_exec:
+            fut_resolve = planner_exec.submit(
+                rag.resolve_company, client, company_to_resolve, model=settings.LLM_MODEL
+            )
+            fut_doc = planner_exec.submit(
+                rag.classify_requires_document, client, question=optimized_prompt, model=settings.LLM_MODEL
+            ) if document_ids else None
+            fut_intent = planner_exec.submit(
+                rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
+            )
+            
+            resolved_company, resolved_ticker, is_sec_registrant = fut_resolve.result()
+            precomputed_is_document_question = fut_doc.result() if fut_doc else False
+            precomputed_intent = fut_intent.result()
+
         stored_content = request.content
         
         logger.info(
@@ -582,17 +595,8 @@ def add_chat_message(
         roic_applicable, roic_reason = False, "Bypassed (Workspace Analysis)"
         ch_applicable, ch_reason = False, "Bypassed (Workspace Analysis)"
     else:
-        company_to_resolve = conversation_company if conversation_company else optimized_prompt
-        resolved_company, resolved_ticker, is_sec_registrant = rag.resolve_company(
-            client, company_to_resolve, model=settings.LLM_MODEL
-        )
-
         explicit_document_request = is_explicit_document_request(optimized_prompt)
-        is_document_question = False
-        if document_ids:
-            is_document_question = rag.classify_requires_document(
-                client, question=optimized_prompt, model=settings.LLM_MODEL
-            )
+        is_document_question = precomputed_is_document_question
 
         live_internet_keywords = ["latest", "live", "current", "news today"]
         requires_live_internet = any(kw in optimized_prompt.lower() for kw in live_internet_keywords)
@@ -625,7 +629,7 @@ def add_chat_message(
             fallback_triggered = False
             fallback_reason = "Bypassed (Hard Routing)"
         else:
-            intent = rag.classify_mcp_intent(client, question=optimized_prompt, model=settings.LLM_MODEL)
+            intent = precomputed_intent
             
             sec_tickers = []
             sec_ticker = None

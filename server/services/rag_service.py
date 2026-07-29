@@ -532,7 +532,7 @@ class RAGService:
                     {"role": "user", "content": f'User message:\n"{question}"\nIntent:'},
                 ],
                 **({"max_completion_tokens": 15} if "gpt-5" in model.lower() else {"max_tokens": 15}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             intent = (completion.choices[0].message.content or "").strip()
             valid_intents = {
@@ -564,7 +564,7 @@ class RAGService:
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
                 **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             requires = answer.startswith("Y")
@@ -597,7 +597,7 @@ class RAGService:
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
                 **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             requires = answer.startswith("Y")
@@ -631,7 +631,7 @@ class RAGService:
                     {"role": "user", "content": question},
                 ],
                 **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
@@ -649,7 +649,7 @@ class RAGService:
                 model=model,
                 messages=[{"role": "system", "content": roic_ai_classification_prompt()}, {"role": "user", "content": question}],
                 **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
@@ -668,7 +668,7 @@ class RAGService:
                     {"role": "user", "content": question},
                 ],
                 **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip()
             if answer.upper().startswith("YES:"):
@@ -980,7 +980,7 @@ class RAGService:
                     {"role": "user", "content": question},
                 ],
                 **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(
@@ -1896,7 +1896,7 @@ Latest Query: {question}
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
                 **({"max_completion_tokens": 256} if "gpt-5" in model.lower() else {"max_tokens": 256})
             )
             resp = (completion.choices[0].message.content or "").strip()
@@ -1943,7 +1943,7 @@ TICKER: <ticker or NONE>
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
                 **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
             )
             resp = (completion.choices[0].message.content or "").strip()
@@ -1997,7 +1997,7 @@ Example: AAPL, MSFT, GOOGL
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
                 **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
             )
             resp = (completion.choices[0].message.content or "").strip()
@@ -2044,7 +2044,7 @@ Return ONLY the exact intent name from the list above.
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                **({} if model.startswith(("o1", "o2", "o3")) else {"temperature": 0}),
                 **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16})
             )
             intent = (completion.choices[0].message.content or "").strip()

@@ -9,6 +9,7 @@ consumed from sync request handlers and async ingestion paths alike.
 from __future__ import annotations
 
 import logging
+import asyncio
 from functools import lru_cache
 
 from openai import AsyncOpenAI, OpenAI, OpenAIError
@@ -166,11 +167,17 @@ class EmbeddingService:
         if not texts:
             return []
         clean = self._sanitize(texts)
-        vectors: list[list[float]] = []
+        tasks = []
         for start in range(0, len(clean), self.batch_size):
-            vectors.extend(
-                await self._embed_batch_async(clean[start : start + self.batch_size])
+            tasks.append(
+                self._embed_batch_async(clean[start : start + self.batch_size])
             )
+
+        results = await asyncio.gather(*tasks)
+        vectors: list[list[float]] = []
+        for batch_result in results:
+            vectors.extend(batch_result)
+
         return vectors
 
     @retry(
