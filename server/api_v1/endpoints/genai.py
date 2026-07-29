@@ -1,4 +1,6 @@
 import logging
+import os
+import mimetypes
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -8,9 +10,11 @@ from openai import OpenAI
 
 from server import crud, schemas
 from server.api_v1.deps import get_db
-from server.config import settings
+from server.config import settings, WORKSPACE_DOCS_DIR
 from server.services.citation_service import get_citation_service
-from server.services.rag_service import get_rag_service
+from server.services.rag_service import get_rag_service, ThinkLongerUnavailable
+from datetime import datetime, time, timezone
+from server.services.audit_logger import AuditLogger
 from server.utils.auth import get_current_user
 from server.utils.prompt import AGENT_PROMPTS
 from server.utils.helpers import (
@@ -24,17 +28,17 @@ from server.utils.source_attribution import (
     source_attribution_from_citations,
 )
 from server.utils.chat_helpers import (
-    has_roic_metric,
     is_explicit_document_request,
-    is_overview_request,
     check_user_typed_context,
     check_spurious_roic_query,
     build_routing_log,
 )
+from server.services.deep_research import DeepResearchOrchestrator
+from server.utils.prompt import think_longer_reasoning_prompt
+import time as _time
 
 client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
-    base_url="https://openrouter.ai/api/v1",
 )
 
 logging.basicConfig(
@@ -65,8 +69,6 @@ def create_chat_session(
             user_id=str(current_user.id), title=title, workspace_id=workspace_id
         ),
     )
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_CREATE",
@@ -107,7 +109,6 @@ def list_chat_sessions(
     sessions = crud.chat_session.get_multi(
         db, user_id=str(current_user.id), skip=skip, limit=limit
     )
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_LIST",
@@ -156,8 +157,6 @@ def delete_chat_session(
 
     workspace_id = session.workspace_id
     crud.chat_session.remove(db, id=session.id)
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_DELETE",
@@ -210,8 +209,6 @@ def public_chat_session(
         }
         for msg in conversation
     ]
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="CHAT_GET_PUBLIC",
         workspace_id=session.workspace_id,
@@ -266,10 +263,6 @@ def get_chat_session(
         if doc_id not in doc_info_cache:
             doc = crud.document.get(db, doc_id)
             if doc:
-                import os
-                import mimetypes
-                from server.config import WORKSPACE_DOCS_DIR
-
                 size = 0
                 if doc.storage_path:
                     file_name_only = os.path.basename(doc.storage_path)
@@ -323,7 +316,6 @@ def get_chat_session(
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }
         )
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_GET",
@@ -373,8 +365,6 @@ def update_chat_title(
         raise HTTPException(status_code=404, detail="Chat session not found")
 
     crud.chat_session.update(db, db_obj=session, obj_in={"title": request.title})
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CHAT_UPDATE",
@@ -517,8 +507,6 @@ def add_chat_message(
             user_id=str(current_user.id),
         )
 
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="USER_MESSAGE",
         user_id=str(current_user.id),
@@ -574,11 +562,25 @@ def add_chat_message(
         requires_web = False
         conversation_company = ""
         extracted_entities = ""
+        
+        is_document_intent = False
+        requires_live_internet = False
+        explicit_document_request = False
         resolved_company = ""
         resolved_ticker = ""
         is_sec_registrant = False
         intent = "WORKSPACE_ANALYSIS"
         routing_reason = "Workspace Analysis Explicitly Requested"
+        
+        mcp_selected = False
+        selected_provider = "RAG"
+        fallback_triggered = False
+        fallback_reason = "Not applicable (Workspace Analysis)"
+        
+        sec_applicable, sec_reason = False, "Bypassed (Workspace Analysis)"
+        alpha_applicable, alpha_reason = False, "Bypassed (Workspace Analysis)"
+        roic_applicable, roic_reason = False, "Bypassed (Workspace Analysis)"
+        ch_applicable, ch_reason = False, "Bypassed (Workspace Analysis)"
     else:
         company_to_resolve = conversation_company if conversation_company else optimized_prompt
         resolved_company, resolved_ticker, is_sec_registrant = rag.resolve_company(
@@ -592,33 +594,77 @@ def add_chat_message(
                 client, question=optimized_prompt, model=settings.LLM_MODEL
             )
 
-        intent = rag.classify_mcp_intent(client, question=optimized_prompt, model=settings.LLM_MODEL)
+        live_internet_keywords = ["latest", "live", "current", "news today"]
+        requires_live_internet = any(kw in optimized_prompt.lower() for kw in live_internet_keywords)
 
-        sec_tickers = []
-        sec_ticker = None
-        sec_options = {}
-        roic_query = None
-        financial_ticker = None
-        companies_house_query = None
-        requires_web = False
-        routing_reason = "Intent matches provider."
-
-        active_identifier = resolved_ticker or resolved_company
-
-        # Provider-first Evaluation
-        sec_applicable, sec_reason = False, "Not evaluated."
-        alpha_applicable, alpha_reason = False, "Not evaluated."
-        roic_applicable, roic_reason = False, "Not evaluated."
-        ch_applicable, ch_reason = False, "Not evaluated."
-
-        mcp_selected = False
-        selected_provider = "None"
-        
-        if resolved_company or resolved_ticker:
-            active_id = resolved_ticker or resolved_company
-            lowered = optimized_prompt.lower()
+        # HARD ROUTING RULE for Uploaded Documents
+        is_document_intent = is_document_question or explicit_document_request
+        if document_ids and is_document_intent and not requires_live_internet:
+            intent = "UPLOADED_DOCUMENT"
+            sec_tickers = []
+            sec_ticker = None
+            sec_options = {}
+            roic_query = None
+            financial_ticker = None
+            companies_house_query = None
+            requires_web = False
+            routing_reason = "Hard Routing: Active document intent detected."
+            mcp_selected = False
+            selected_provider = "RAG"
+            resolved_company = ""
+            resolved_ticker = ""
+            is_sec_registrant = False
+            active_id = ""
+            is_document_question = True
             
-            # 1. SEC EDGAR Evaluation
+            sec_applicable, sec_reason = False, "Bypassed (Hard Routing)"
+            alpha_applicable, alpha_reason = False, "Bypassed (Hard Routing)"
+            roic_applicable, roic_reason = False, "Bypassed (Hard Routing)"
+            ch_applicable, ch_reason = False, "Bypassed (Hard Routing)"
+            
+            fallback_triggered = False
+            fallback_reason = "Bypassed (Hard Routing)"
+        else:
+            intent = rag.classify_mcp_intent(client, question=optimized_prompt, model=settings.LLM_MODEL)
+            
+            sec_tickers = []
+            sec_ticker = None
+            sec_options = {}
+            roic_query = None
+            financial_ticker = None
+            companies_house_query = None
+            requires_web = False
+            routing_reason = "Intent matches provider."
+            
+            active_identifier = resolved_ticker or resolved_company
+            
+            # Provider-first Evaluation
+            sec_applicable, sec_reason = False, "Not evaluated."
+            alpha_applicable, alpha_reason = False, "Not evaluated."
+            roic_applicable, roic_reason = False, "Not evaluated."
+            ch_applicable, ch_reason = False, "Not evaluated."
+            
+            mcp_selected = False
+            selected_provider = "None"
+        if selected_provider != "RAG":
+            if not resolved_company and not resolved_ticker:
+                reason_msg = "No company resolved."
+                sec_reason = reason_msg
+                alpha_reason = reason_msg
+                roic_reason = reason_msg
+                ch_reason = reason_msg
+                
+                # Skip to fallback logic
+                fallback_triggered = True
+                fallback_reason = "No applicable MCP service detected."
+                requires_web = True
+                routing_reason = "No applicable MCP provider detected, fallback to web search."
+                selected_provider = "Web Search"
+            else:
+                active_id = resolved_ticker or resolved_company
+                lowered = optimized_prompt.lower()
+                
+                # 1. SEC EDGAR Evaluation
             sec_keywords = ["10-k", "10-q", "8-k", "filing", "annual report", "quarterly report", "sec submission", "company filing"]
             has_sec = intent == "SEC_FILINGS" or any(kw in lowered for kw in sec_keywords)
             if has_sec:
@@ -647,6 +693,22 @@ def add_chat_message(
                     selected_provider = "Alpha Vantage"
                 else:
                     alpha_reason = "No Finance keywords or intent."
+
+            # Watchlist News Evaluation
+            if not mcp_selected:
+                has_watchlist = intent == "WATCHLIST_NEWS" or "watchlist" in lowered or "portfolio" in lowered
+                if has_watchlist:
+                    source_text = extracted_entities or conversation_company or optimized_prompt
+                    extracted_companies = rag.resolve_multiple_companies(client, source_text, model=settings.LLM_MODEL)
+                    if extracted_companies:
+                        alpha_applicable = True
+                        alpha_reason = "Applicable (Watchlist News match)"
+                        financial_ticker = ",".join(extracted_companies)
+                        mcp_selected = True
+                        selected_provider = "Alpha Vantage"
+                        resolved_company = financial_ticker
+                        resolved_ticker = financial_ticker
+                        active_id = financial_ticker
 
             # 3. ROIC Evaluation
             if not mcp_selected:
@@ -690,22 +752,21 @@ def add_chat_message(
                     roic_query = active_id
                     mcp_selected = True
                     selected_provider = "ROIC"
-        else:
-            reason_msg = "No company resolved."
-            sec_reason = reason_msg
-            alpha_reason = reason_msg
-            roic_reason = reason_msg
-            ch_reason = reason_msg
-
-        # Fallback to Web Search
-        fallback_triggered = False
-        fallback_reason = "None"
-        if not mcp_selected:
-            requires_web = True
-            routing_reason = "No applicable MCP provider detected, fallback to web search."
-            fallback_triggered = True
-            fallback_reason = "No applicable MCP service detected."
-            selected_provider = "Web Search"
+                    
+            # Fallback to Web Search
+            fallback_triggered = False
+            fallback_reason = "None"
+            if not mcp_selected:
+                requires_web = True
+                routing_reason = "No applicable MCP provider detected, fallback to web search."
+                fallback_triggered = True
+                fallback_reason = "No applicable MCP service detected."
+                selected_provider = "Web Search"
+        # Guard: If RAG was hard-routed, make sure no MCP override happened
+        if document_ids and is_document_intent and not requires_live_internet:
+            requires_web = False
+            selected_provider = "RAG"
+            is_document_question = True
 
         logger.info(
             f"Planner Evaluation\n\n"
@@ -722,20 +783,20 @@ def add_chat_message(
             f"Fallback Reason:\n{fallback_reason}\n\n"
         )
 
-        # Apply Dynamic Source Selection priority rules
-        has_external_provider = bool(
-            sec_tickers
-            or roic_query
-            or financial_ticker
-            or companies_house_query
-            or requires_web
-        )
-        if matched_agent and bool(document_ids):
-            is_document_question = True
-        elif has_external_provider:
-            is_document_question = explicit_document_request and is_document_question
-        else:
-            is_document_question = bool(document_ids) and is_document_question
+    # Apply Dynamic Source Selection priority rules
+    has_external_provider = bool(
+        sec_tickers
+        or roic_query
+        or financial_ticker
+        or companies_house_query
+        or requires_web
+    )
+    if matched_agent and bool(document_ids):
+        is_document_question = True
+    elif has_external_provider and not (document_ids and is_document_intent and not requires_live_internet):
+        is_document_question = explicit_document_request and is_document_question
+    else:
+        is_document_question = bool(document_ids) and is_document_question
 
     # Input & Context Validation
     validation_error = None
@@ -1056,18 +1117,27 @@ def add_chat_message(
         if web_context: final_sources.append("Web Search")
         if document_context: final_sources.append("RAG Docs")
 
+        if bool(document_ids) and is_document_intent and final_provider == "Web Search":
+            logger.warning(
+                "WARNING:\n"
+                "Document exists but planner selected Web Search.\n\n"
+                f"Reason:\n{routing_reason}\n\n"
+                "Expected Provider:\nRAG"
+            )
+
         logger.info(
             f"--- ROUTING PIPELINE AUDIT ---\n"
-            f"Resolved Company: {resolved_company or 'None'}\n"
-            f"Resolved Ticker: {resolved_ticker or 'None'}\n"
-            f"Evaluated Providers: {evaluated_providers}\n"
-            f"Executed Provider: {selected_provider}\n"
-            f"Rows Returned: {rows_returned}\n"
-            f"Has Useful Data: {has_data}\n"
+            f"Active Documents: {bool(document_ids)}\n"
+            f"Document Intent: {is_document_intent}\n"
+            f"RAG Classifier Result: {is_document_question}\n"
+            f"Planner Document Relevant: {selected_provider == 'RAG' or bool(document_ids)}\n"
+            f"Selected Provider: {selected_provider}\n"
             f"Fallback Triggered: {fallback_triggered or (not mcp_selected)}\n"
             f"Fallback Reason: {fallback_reason}\n"
-            f"Final Provider: {final_provider}\n"
-            f"Final Context Sources: {', '.join(final_sources) or 'None'}\n"
+            f"Chunks Retrieved: {bool(retrieved_chunks)}\n"
+            f"Chunk Count: {len(retrieved_chunks) if retrieved_chunks else 0}\n"
+            f"RAG Executed: {used_rag}\n"
+            f"Web Search Executed: {used_web}\n"
             f"------------------------------\n"
         )
 
@@ -1081,7 +1151,7 @@ def add_chat_message(
             f"Companies House Context: {bool(companies_house_context)}\n"
             f"Web Context: {bool(web_context)}\n"
             f"RAG Context: {bool(document_context)}\n\n"
-            f"Final Context Sources: {[s.get('source_type') for s in (financial_sources + sec_sources + roic_sources + companies_house_sources + (web_sources or []) + list(retrieved_chunks or []))]}"
+            f"Final Context Sources: {[s.get('source_type') if isinstance(s, dict) else getattr(s, 'source_type', 'DocumentChunk') for s in (financial_sources + sec_sources + roic_sources + companies_house_sources + (web_sources or []) + list(retrieved_chunks or []))]}"
         )
         
         messages = rag.build_messages(
@@ -1095,9 +1165,143 @@ def add_chat_message(
             companies_house_context=companies_house_context,
             intent=intent,
         )
-        raw_response = rag.generate_response(
-            client, messages=messages, model=settings.LLM_MODEL
+        mode_used = "auto"
+        start_time = _time.time()
+        fallback_reason = None
+        selected_model = settings.LLM_MODEL
+        provider = "openai"
+
+        if getattr(request, "mode", None) == "think_longer":
+            today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
+            daily_calls = crud.chat_message.count_user_daily_calls(
+                db=db,
+                user_id=str(current_user.id),
+                mode_prefix="think_longer",
+                since=today_start
+            )
+            
+            has_context = any([
+                document_context, web_context, financial_context, 
+                sec_context, roic_context, companies_house_context
+            ])
+
+            if daily_calls >= settings.THINK_LONGER_DAILY_LIMIT:
+                fallback_reason = f"user {current_user.id} reached daily limit ({daily_calls}/{settings.THINK_LONGER_DAILY_LIMIT})"
+                logger.info(f"Think Longer skipped: {fallback_reason}")
+                selected_model = settings.LLM_MODEL
+                raw_response = rag.generate_response(client, messages=messages, model=settings.LLM_MODEL)
+            elif not has_context:
+                fallback_reason = "no context to reason over"
+                logger.info("Think Longer skipped: no context to reason over")
+                selected_model = settings.LLM_MODEL
+                raw_response = rag.generate_response(client, messages=messages, model=settings.LLM_MODEL)
+            else:
+                try:
+                    think_longer_messages = messages + [{"role": "system", "content": think_longer_reasoning_prompt()}]
+                    selected_model = settings.THINK_LONGER_MODEL
+                    raw_response = rag.generate_think_longer_response(
+                        client,
+                        messages=think_longer_messages,
+                        model=settings.THINK_LONGER_MODEL,
+                        reasoning_effort=settings.THINK_LONGER_REASONING_EFFORT,
+                    )
+                    mode_used = "think_longer"
+                except ThinkLongerUnavailable as e:
+                    fallback_reason = str(e)
+                    logger.warning("Falling back to standard model for think_longer mode")
+                    logger.exception("Error during think_longer response generation: %s", fallback_reason)
+                    selected_model = settings.THINK_LONGER_FALLBACK_MODEL
+                    raw_response = rag.generate_response(
+                        client, messages=messages, model=settings.THINK_LONGER_FALLBACK_MODEL
+                    )
+                    mode_used = "think_longer_fallback"
+
+        elif getattr(request, "mode", None) == "deep_research":
+            orchestrator = DeepResearchOrchestrator(client, rag, db, current_user, session)
+            
+            initial_contexts = []
+            if document_context: initial_contexts.append(document_context)
+            if web_context: initial_contexts.append(web_context)
+            if financial_context: initial_contexts.append(financial_context)
+            if sec_context: initial_contexts.append(sec_context)
+            if roic_context: initial_contexts.append(roic_context)
+            if companies_house_context: initial_contexts.append(companies_house_context)
+            
+            initial_context_str = "\n\n".join(initial_contexts)
+            
+            final_research_context, all_chunks, all_news, all_sec, all_roic, all_ch, all_web = orchestrator.execute(
+                initial_query=optimized_prompt,
+                chat_id=chat_id,
+                document_ids=document_ids,
+                history=llm_history,
+                initial_context=initial_context_str
+            )
+            
+            if all_chunks: retrieved_chunks = list(retrieved_chunks or []) + all_chunks
+            if all_news: financial_sources.extend(all_news)
+            if all_sec: sec_sources.extend(all_sec)
+            if all_roic: roic_sources.extend(all_roic)
+            if all_ch: companies_house_sources.extend(all_ch)
+            if all_web:
+                if web_sources is None: web_sources = []
+                web_sources.extend(all_web)
+            
+            if final_research_context and len(final_research_context) > 10000:
+                final_research_context = final_research_context[:10000] + "\n\n... [Truncated for context length limits]"
+
+            report_prompt = (
+                f"You are a professional research analyst. Using the following comprehensive and consolidated research context, generate a detailed, structured, and final research report that fully addresses the original query: '{optimized_prompt}'.\n\n"
+                "Your report MUST contain the following sections:\n"
+                "# Executive Summary (Summarize the research)\n"
+                "# Research Objective (Clearly state what was investigated)\n"
+                "# Research Methodology (Briefly explain topics researched, sources consulted, and evidence synthesis process)\n"
+                "# Key Findings (Present the most important discoveries, prioritized)\n"
+                "# Detailed Analysis (Explain every topic separately. Include Evidence, Interpretation, Reasoning, Implications)\n"
+                "# Cross-Topic Analysis (Explain relationships, trends, and patterns between topics)\n"
+                "# Trade-Off Analysis (Explain competing viewpoints, e.g., Benefits vs Risks, Short-term vs Long-term)\n"
+                "# Evidence Gaps (Identify unknowns, missing information, areas for further research. Do not invent answers)\n"
+                "# Recommendations (Provide evidence-based recommendations. Explain why they follow from the research)\n"
+                "# Final Conclusion (Synthesize the entire report. Do not repeat earlier sections. Provide final judgment)\n"
+                "# Confidence Assessment (Rate confidence as High, Moderate, or Low and explain why)\n\n"
+                f"Context:\n{final_research_context}"
+            )
+            
+            messages = [{"role": "user", "content": report_prompt}]
+            try:
+                selected_model = settings.DEEP_RESEARCH_MODEL
+                raw_response = rag.generate_think_longer_response(
+                    client,
+                    messages=messages,
+                    model=settings.DEEP_RESEARCH_MODEL,
+                    reasoning_effort=settings.DEEP_RESEARCH_REASONING_EFFORT,
+                )
+                mode_used = "deep_research"
+            except ThinkLongerUnavailable as e:
+                fallback_reason = str(e)
+                logger.warning("Falling back to standard model for deep_research mode")
+                logger.exception("Error during deep_research response generation: %s", fallback_reason)
+                selected_model = settings.THINK_LONGER_FALLBACK_MODEL
+                raw_response = rag.generate_response(
+                    client, messages=messages, model=settings.THINK_LONGER_FALLBACK_MODEL
+                )
+                mode_used = "deep_research_fallback"
+        else:
+            selected_model = settings.LLM_MODEL
+            raw_response = rag.generate_response(
+                client, messages=messages, model=settings.LLM_MODEL
+            )
+
+        execution_time = _time.time() - start_time
+        logger.info(
+            f"--- LLM GENERATION AUDIT ---\n"
+            f"Mode: {mode_used}\n"
+            f"Model: {selected_model}\n"
+            f"Provider: {provider}\n"
+            f"Execution Time: {execution_time:.2f}s\n"
+            f"Fallback Reason: {fallback_reason}\n"
+            f"----------------------------\n"
         )
+
         ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
 
         cited_sources: list = list(retrieved_chunks or [])
@@ -1131,6 +1335,7 @@ def add_chat_message(
             document_ids=document_ids or None,
             source_documents=source_documents,
             citations=citations,
+            mode_used=mode_used,
         ),
     )
 
@@ -1145,6 +1350,8 @@ def add_chat_message(
         metadata={
             "citations_count": len(citations) if citations else 0,
             "follow_up_questions": follow_up_questions,
+            "mode_requested": getattr(request, "mode", None),
+            "mode_used": mode_used,
         },
     )
 
@@ -1160,6 +1367,7 @@ def add_chat_message(
                 "response": ai_response,
                 "document_ids": document_ids,
                 "active_document_ids": document_ids,
+                "mode_used": mode_used,
                 "uploaded_document_ids": (
                     document_ids if context_reason == "new_upload" else []
                 ),

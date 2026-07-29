@@ -3,7 +3,7 @@
 Single responsibility: turn raw file bytes into plain text. It knows nothing
 about chunking, embeddings, or storage. Supported inputs:
 
-* Documents: ``.txt``, ``.docx``, ``.doc``, ``.pdf``, ``.csv``, ``.xlsx``, ``.xls``
+* Documents: ``.txt``, ``.md``, ``.docx``, ``.doc``, ``.pdf``, ``.csv``, ``.xlsx``, ``.xls``
 * Images: ``.png``, ``.jpg``, ``.jpeg``, ``.tiff``, ``.tif``, ``.bmp``, ``.webp``
 
 Image OCR runs an OpenCV preprocessing pipeline (grayscale, denoise, threshold,
@@ -952,6 +952,7 @@ class OCRService:
 
     _EXTRACTORS: dict[str, tuple[str, Callable[[bytes], str]]] = {
         ".txt": ("txt", _extract_txt),
+        ".md": ("md", _extract_txt),
         ".docx": ("docx", _extract_docx),
         ".doc": ("doc", _extract_doc),
         ".pdf": ("pdf", _extract_pdf),

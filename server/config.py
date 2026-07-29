@@ -51,7 +51,14 @@ class Settings(BaseSettings):
         os.getenv("COMPANIES_HOUSE_CACHE_TTL", "3600")
     )
 
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4.1-mini")
+    THINK_LONGER_MODEL: str = os.getenv("THINK_LONGER_MODEL", "gpt-5.6-terra")
+    THINK_LONGER_REASONING_EFFORT: str = os.getenv("THINK_LONGER_REASONING_EFFORT", "medium")
+    THINK_LONGER_FALLBACK_MODEL: str = os.getenv("THINK_LONGER_FALLBACK_MODEL", os.getenv("LLM_MODEL", "gpt-4.1-mini"))
+    THINK_LONGER_DAILY_LIMIT: int = int(os.getenv("THINK_LONGER_DAILY_LIMIT", "10"))
+    
+    DEEP_RESEARCH_MODEL: str = os.getenv("DEEP_RESEARCH_MODEL", "gpt-5.6-terra")
+    DEEP_RESEARCH_REASONING_EFFORT: str = os.getenv("DEEP_RESEARCH_REASONING_EFFORT", "high")
 
     # -- OpenAI embeddings -------------------------------------------------
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -80,7 +87,7 @@ class Settings(BaseSettings):
     # -- Re-ranking (two-stage retrieval) --------------------------------
     RAG_RERANK_ENABLED: bool = os.getenv("RAG_RERANK_ENABLED", "true").lower() == "true"
     RAG_RERANK_CANDIDATES: int = int(os.getenv("RAG_RERANK_CANDIDATES", "20"))
-    RERANK_MODEL: str = os.getenv("RERANK_MODEL", "openai/gpt-4.1-mini")
+    RERANK_MODEL: str = os.getenv("RERANK_MODEL", "gpt-4.1-mini")
     RAG_MAX_CONTEXT_CHUNKS: int = int(os.getenv("RAG_MAX_CONTEXT_CHUNKS", "12"))
     RAG_HNSW_EF_SEARCH: int = int(os.getenv("RAG_HNSW_EF_SEARCH", "200"))
 

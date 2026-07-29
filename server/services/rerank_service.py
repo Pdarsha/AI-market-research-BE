@@ -24,6 +24,7 @@ from typing import Callable, Sequence, TypeVar
 from openai import OpenAI
 
 from server.config import settings
+from server.services.audit_logger import audit_context
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,6 @@ class RerankService:
         if self._client is None:
             self._client = OpenAI(
                 api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_BASE_URL or "https://openrouter.ai/api/v1",
             )
         return self._client
 
@@ -66,8 +66,6 @@ class RerankService:
         unparseable model response, the original order (truncated to ``top_k``) is
         returned so retrieval still succeeds.
         """
-        from server.services.audit_logger import audit_context
-
         candidates_count = len(items)
         with audit_context(
             action="CANDIDATE_RERANKING",
@@ -75,7 +73,7 @@ class RerankService:
                 "model": self.model_name,
                 "query": query,
                 "candidates_count": candidates_count,
-            }
+            },
         ) as meta:
             items = list(items)
             if len(items) <= 1:
@@ -109,11 +107,13 @@ class RerankService:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0,
-                    max_tokens=100,
+                    max_tokens=1024,
                 )
                 content = (completion.choices[0].message.content or "").strip()
             except Exception as exc:
-                logger.exception("rerank: LLM ranking failed; falling back to vector order")
+                logger.exception(
+                    "rerank: LLM ranking failed; falling back to vector order"
+                )
                 meta["error"] = str(exc)
                 return items[:top_k]
 
