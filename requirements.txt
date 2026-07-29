@@ -36,3 +36,8 @@ opencv-python-headless
 olefile
 rapidocr-onnxruntime
 easyocr
+pytest
+requests
+httpx
+pytest-cov
+pytest-html
