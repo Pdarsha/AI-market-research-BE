@@ -3,24 +3,27 @@ name: Backend CI
 on:
   push:
     branches:
-      - main
+    - main
+    - feat/ci-cd
     paths-ignore:
-      - 'docs/**'
-      - 'README.md'
+    - 'docs/**'
+    - 'README.md'
   pull_request:
     branches:
-      - main
-      - develop
+    - main
+    - feat/ci-cd
+    - develop
     paths-ignore:
-      - 'docs/**'
-      - 'README.md'
+    - 'docs/**'
+    - 'README.md'
   workflow_dispatch:
+
 
 jobs:
   test:
     name: Lint, Test, and Security Scan
     runs-on: ubuntu-latest
-    
+
     # Define environment variables for the test suite to use
     env:
       SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://postgres:postgres@localhost:5432/agentic_ai_test
@@ -39,59 +42,56 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: agentic_ai_test
         ports:
-          - 5432:5432
+        - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: Setup Python 3.14
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-          cache: 'pip'
+    - name: Setup Python 3.14
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.14'
+        cache: 'pip'
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # Install security and linting tools
-          pip install flake8 bandit pip-audit black isort
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Install security and linting tools
+        pip install flake8 bandit pip-audit black isort
 
-      - name: Run Black (Formatting Check)
-        run: black --check .
-        continue-on-error: true
+    - name: Run Black (Formatting Check)
+      run: black --check .
+      continue-on-error: true
 
-      - name: Run isort (Import Sorting Check)
-        run: isort --check-only .
-        continue-on-error: true
+    - name: Run isort (Import Sorting Check)
+      run: isort --check-only .
+      continue-on-error: true
 
-      - name: Run Flake8 (Linting)
-        run: flake8 server tests --count --select=E9,F63,F7,F82 --show-source --statistics
+    - name: Run Flake8 (Linting)
+      run: flake8 server tests --count --select=E9,F63,F7,F82 --show-source --statistics
 
-      - name: Run Bandit (Security Scan)
-        run: bandit -r server -ll
+    - name: Run Bandit (Security Scan)
+      run: bandit -r server -ll
 
-      - name: Run pip-audit (Dependency Vulnerability Scan)
-        run: pip-audit || echo "Audit found vulnerabilities. Please review."
+    - name: Run pip-audit (Dependency Vulnerability Scan)
+      run: pip-audit || echo "Audit found vulnerabilities. Please review."
 
-      - name: Run Pytest with Coverage
-        run: |
-          pytest --cov=server --cov-report=xml --cov-report=html tests/
+    - name: Run Pytest with Coverage
+      run: |
+        pytest --cov=server --cov-report=xml --cov-report=html tests/
 
-      - name: Build Validation (Dry Run)
-        run: |
-          # Verify application can be imported and doesn't crash on initialization
-          python -c "import server.main"
-          
-      - name: Upload Coverage Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-coverage-report
-          path: htmlcov/
-          retention-days: 7
+    - name: Build Validation (Dry Run)
+      run: |
+        # Verify application can be imported and doesn't crash on initialization
+        python -c "import server.main"
+
+    - name: Upload Coverage Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: backend-coverage-report
+        path: htmlcov/
+        retention-days: 7
