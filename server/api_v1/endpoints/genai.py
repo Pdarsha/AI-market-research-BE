@@ -952,15 +952,36 @@ def add_chat_message(
                 futures["companies_house"] = executor.submit(retrieve_companies_house)
 
             if "rag" in futures:
-                source_documents, retrieved_chunks = futures["rag"].result()
+                try:
+                    source_documents, retrieved_chunks = futures["rag"].result()
+                except Exception as e:
+                    logger.error(f"RAG retrieval failed: {e}")
+                    source_documents, retrieved_chunks = [], []
             if "sec" in futures:
-                sec_company_facts_response = futures["sec"].result()
+                try:
+                    sec_company_facts_response = futures["sec"].result()
+                except Exception as e:
+                    logger.error(f"SEC retrieval failed: {e}")
+                    sec_company_facts_response = [{"error": {"message": str(e)}}]
             if "roic" in futures:
-                roic_response = futures["roic"].result()
+                try:
+                    roic_response = futures["roic"].result()
+                except Exception as e:
+                    logger.error(f"ROIC retrieval failed: {e}")
+                    roic_response = {"error": str(e)}
             if "news" in futures:
-                financial_news_response = futures["news"].result()
+                try:
+                    financial_news_response = futures["news"].result()
+                except Exception as e:
+                    logger.error(f"News retrieval failed: {e}")
+                    financial_news_response = {"error": str(e)}
             if "companies_house" in futures:
-                companies_house_response = futures["companies_house"].result()
+                try:
+                    companies_house_response = futures["companies_house"].result()
+                except Exception as e:
+                    logger.error(f"Companies House retrieval failed: {e}")
+                    companies_house_response = {"error": str(e)}
+
 
         if retrieved_chunks:
             document_context = (

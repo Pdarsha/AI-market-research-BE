@@ -1,0 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Python environments
+venv/
+env/
+.venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Databases and media
+sql_app.db
+*.sqlite3
+logs/
+static/
+
+# Pytest and coverage
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Environment variables
+.env
+
+# Docker
+docker-compose.yml
+docker-compose.example.yml
+Dockerfile
