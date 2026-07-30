@@ -5,7 +5,7 @@ API uses the same underlying tool directly, so MCP clients and chat requests get
 identical normalization, cache semantics, and API-key handling.
 """
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 from server.services.financial_news_mcp import financial_news as _financial_news
 from server.services.sec_edgar_mcp import sec_company_facts as _sec_company_facts

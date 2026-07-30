@@ -69,20 +69,20 @@ graph TD
     Client[Client Browser] -->|HTTP POST| Router[FastAPI Router]
     Router -->|Validate JWT| Auth[Auth Middleware]
     Auth -->|Initialize Chat| GenAI[GenAI Chat Controller]
-    
+
     GenAI -->|Analyze Intent| Planner[Routing Planner LLM]
-    
+
     Planner -->|Needs Local Docs| RAG[RAG Service]
     Planner -->|Needs Financial Data| MCP[MCP Services]
     Planner -->|Needs Live Info| Web[Web Search]
-    
+
     RAG -->|Cosine Similarity| PG[PostgreSQL pgvector]
     MCP -->|Concurrent Fetch| ExtAPI[SEC / ROIC / News]
-    
+
     RAG -.-> Context[Aggregated Context]
     MCP -.-> Context
     Web -.-> Context
-    
+
     Context --> LLM[OpenAI API]
     LLM -->|Streaming SSE| Client
 ```
@@ -313,4 +313,3 @@ For production deployment:
 - **Database Connection Refused**: Verify PostgreSQL is running locally and credentials in `SQLALCHEMY_DATABASE_URI` are correct.
 - **`pgvector` Extension Error**: Run `CREATE EXTENSION vector;` manually in your PostgreSQL database instance if Alembic fails to create it.
 - **OpenAI 400 Bad Request (Temperature)**: The reasoning models (`o1`, `o3`) do not support temperature parameters. The backend code conditionally strips this for reasoning models, but verify your `LLM_MODEL` environment variable matches expected formats.
-

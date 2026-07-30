@@ -223,14 +223,17 @@ def _build_rapidocr(intra_threads=None):
                 return options
 
             with _engine_patch_lock:
-                original = rapid_utils.SessionOptions
-                rapid_utils.SessionOptions = _tuned_session_options
-                try:
+                if hasattr(rapid_utils, "SessionOptions"):
+                    original = rapid_utils.SessionOptions
+                    rapid_utils.SessionOptions = _tuned_session_options
+                    try:
+                        engine = RapidOCR()
+                    finally:
+                        rapid_utils.SessionOptions = original
+                else:
                     engine = RapidOCR()
-                finally:
-                    rapid_utils.SessionOptions = original
         except Exception:
-            logger.warning(
+            logger.debug(
                 "OCR: session tuning unavailable; using library defaults",
                 exc_info=True,
             )

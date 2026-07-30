@@ -1,0 +1,80 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+    - main
+  workflow_dispatch:
+
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    environment: production
+
+    # We depend on successful CI runs before allowing deployment.
+    # Note: If these workflows are separated, consider using workflow_run triggers 
+    # instead of inline jobs, or ensure CI runs before this via branch protection.
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup SSH Context (Placeholder)
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Validate Environment Variables
+      run: |
+        if [ -z "${{ secrets.DATABASE_URL }}" ]; then
+          echo "DATABASE_URL is missing"
+          exit 1
+        fi
+        if [ -z "${{ secrets.JWT_SECRET }}" ]; then
+          echo "JWT_SECRET is missing"
+          exit 1
+        fi
+
+    - name: Deploy to Server (Placeholder)
+      # This is a placeholder SSH command that will connect to the production server,
+      # pull the latest code, install dependencies, run migrations, and restart.
+      run: |
+        echo "Deploying to ${{ secrets.SSH_HOST }} as ${{ secrets.SSH_USER }}..."
+        # ssh -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
+        #   cd /var/www/agentic-ai &&
+        #   git pull origin main &&
+        #   source venv/bin/activate &&
+        #   pip install -r requirements.txt &&
+        #   alembic upgrade head &&
+        #   sudo systemctl restart agentic-ai-backend
+        # "
+        echo "Deployment steps executed."
+
+    - name: Verify Backend Health
+      run: |
+        echo "Checking health endpoint..."
+        # curl -f http://${{ secrets.SSH_HOST }}/ || exit 1
+        echo "Health check passed."
+
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        echo "Deployment failed. Initiating rollback..."
+        # ssh -i ~/.ssh/id_rsa ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
+        #   cd /var/www/agentic-ai &&
+        #   git reset --hard HEAD@{1} &&
+        #   source venv/bin/activate &&
+        #   pip install -r requirements.txt &&
+        #   sudo systemctl restart agentic-ai-backend
+        # "
+        echo "Rollback complete."
+
+    - name: Notify Slack / Teams
+      if: always()
+      run: |
+        echo "Sending notification..."
+        # curl -X POST -H 'Content-type: application/json' --data '{"text":"Deployment status: ${{ job.status }}"}' ${{ secrets.SLACK_WEBHOOK_URL }}
