@@ -34,7 +34,7 @@ from server.utils.chat_helpers import (
     build_routing_log,
 )
 from server.services.deep_research import DeepResearchOrchestrator
-from server.utils.prompt import think_longer_reasoning_prompt
+from server.utils.prompt import think_longer_reasoning_prompt, followup_instruction_block
 import time as _time
 
 client = OpenAI(
@@ -1289,7 +1289,7 @@ def add_chat_message(
                 "# Final Conclusion (Synthesize the entire report. Do not repeat earlier sections. Provide final judgment)\n"
                 "# Confidence Assessment (Rate confidence as High, Moderate, or Low and explain why)\n\n"
                 f"Context:\n{final_research_context}"
-            )
+            ) + followup_instruction_block()
             
             messages = [{"role": "user", "content": report_prompt}]
             try:

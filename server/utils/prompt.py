@@ -700,7 +700,7 @@ Rules:
 - Be warm and friendly.
 - Do NOT use any headings, bullet points, structured formats, or lists.
 - Do NOT explain anything or give examples.
-- Do NOT include any follow-up sections or follow-up questions.
+
 """
     elif intent == "Small Talk":
         return """You are a friendly and polite Market Research Analyst.
@@ -709,7 +709,7 @@ Rules:
 - Keep the response short (maximum of 3 sentences).
 - Do NOT use any headings, bullet points, or structured formatting.
 - Do NOT explain technical details or give examples.
-- Do NOT include any follow-up sections or follow-up questions.
+
 """
     elif intent == "Simple Question":
         return base_instructions + """
