@@ -211,37 +211,26 @@ class CitationService:
             rewritten = CitationService._cleanup_spacing(rewritten)
             return rewritten, []
 
-        # Track unique sources in order of first appearance in the answer. This is
-        # what makes the final numbering sequential: the first cited source becomes
-        # [1] no matter which context slot the model originally referenced.
-        seen_sources: dict[int, int] = {}  # source_idx -> citation_number
-        citation_order: list[int] = []
+        # Do not renumber citations because the frontend streams the raw tokens 
+        # and retains the original marker numbers. Renumbering breaks the mapping
+        # between the streamed [n] and the citation_n metadata object.
 
-        for marker_number in [m["marker_number"] for m in markers]:
-            if marker_number in marker_to_source:
-                source_idx = marker_to_source[marker_number]
-                if source_idx not in seen_sources:
-                    seen_sources[source_idx] = len(citation_order) + 1
-                    citation_order.append(source_idx)
-
-        # Build old-to-new marker mapping.
-        old_to_new: dict[int, int] = {}
-        for marker_number, source_idx in marker_to_source.items():
-            old_to_new[marker_number] = seen_sources[source_idx]
-
-        # Rewrite answer with new numbering; drop markers that pointed nowhere.
+        # Rewrite answer ONLY to drop hallucinated markers (those that point nowhere)
         def _replace_marker(match):
             old_number = int(match.group(1))
-            return f"[{old_to_new[old_number]}]" if old_number in old_to_new else ""
+            return f"[{old_number}]" if old_number in marker_to_source else ""
 
         rewritten = re.sub(marker_pattern, _replace_marker, answer)
         rewritten = CitationService._cleanup_spacing(rewritten)
 
-        # Build citation metadata for unique sources, in citation order.
+        # Build citation metadata using the original marker numbers as the ID
+        unique_markers = sorted(list(set(m["marker_number"] for m in markers)))
         citations = []
-        for idx, source_idx in enumerate(citation_order, start=1):
-            citation_data = CitationData(citation_id=idx, source=sources[source_idx])
-            citations.append(citation_data.to_dict())
+        for marker_number in unique_markers:
+            if marker_number in marker_to_source:
+                source_idx = marker_to_source[marker_number]
+                citation_data = CitationData(citation_id=marker_number, source=sources[source_idx])
+                citations.append(citation_data.to_dict())
 
         logger.info(
             "citations.generate: answer_len=%d markers_found=%d unique_sources=%d",
@@ -249,6 +238,10 @@ class CitationService:
             len(markers),
             len(citations),
         )
+        logger.debug("citations.retrieved_documents: %s", [s.get("title", s.get("document_name", "Untitled")) if isinstance(s, dict) else s for s in sources])
+        logger.debug("citations.selected_citations: %s", citations)
+        logger.debug("citations.filtered_citations_count: %d", len(markers) - len(citations))
+        logger.debug("citations.final_response_snippet: %s", rewritten[:200] + "..." if len(rewritten) > 200 else rewritten)
 
         from server.services.audit_logger import AuditLogger
         AuditLogger.log(
