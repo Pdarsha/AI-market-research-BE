@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+import json
+from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAI
 
 from server import crud, schemas
@@ -412,7 +413,14 @@ def add_chat_message(
     chat_id = session.id
 
     prior_messages = crud.chat_message.get_multi_by_chat(db, chat_id=chat_id)
-    history = [{"role": msg.role, "content": msg.content} for msg in prior_messages]
+    valid_history = []
+    for i, msg in enumerate(prior_messages):
+        if msg.role == "user":
+            if i + 1 < len(prior_messages) and prior_messages[i + 1].role == "assistant":
+                valid_history.append({"role": msg.role, "content": msg.content})
+        else:
+            valid_history.append({"role": msg.role, "content": msg.content})
+    history = valid_history
 
     is_workspace_analysis = (
         request.content.strip().startswith(
@@ -467,13 +475,14 @@ def add_chat_message(
             current_chat_id=chat_id,
             model=settings.LLM_MODEL,
         )
+        precomputed_general_intent = "Research / Deep Analysis"
     else:
         optimized_prompt, conversation_company, extracted_entities = rag.rewrite_query(
             client, request.content, history, model=settings.LLM_MODEL
         )
         company_to_resolve = conversation_company if conversation_company else optimized_prompt
         
-        with ThreadPoolExecutor(max_workers=3) as planner_exec:
+        with ThreadPoolExecutor(max_workers=4) as planner_exec:
             fut_resolve = planner_exec.submit(
                 rag.resolve_company, client, company_to_resolve, model=settings.LLM_MODEL
             )
@@ -483,10 +492,14 @@ def add_chat_message(
             fut_intent = planner_exec.submit(
                 rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
             )
+            fut_general = planner_exec.submit(
+                rag.classify_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
+            )
             
             resolved_company, resolved_ticker, is_sec_registrant = fut_resolve.result()
             precomputed_is_document_question = fut_doc.result() if fut_doc else False
             precomputed_intent = fut_intent.result()
+            precomputed_general_intent = fut_general.result()
 
         stored_content = request.content
         
@@ -603,7 +616,7 @@ def add_chat_message(
 
         # HARD ROUTING RULE for Uploaded Documents
         is_document_intent = is_document_question or explicit_document_request
-        if document_ids and is_document_intent and not requires_live_internet:
+        if document_ids and is_document_intent and not requires_live_internet and precomputed_general_intent not in ["Greeting", "Small Talk"]:
             intent = "UPLOADED_DOCUMENT"
             sec_tickers = []
             sec_ticker = None
@@ -651,7 +664,14 @@ def add_chat_message(
             mcp_selected = False
             selected_provider = "None"
         if selected_provider != "RAG":
-            if not resolved_company and not resolved_ticker:
+            lowered = optimized_prompt.lower()
+            if precomputed_general_intent in ["Greeting", "Small Talk"]:
+                requires_web = False
+                fallback_triggered = False
+                fallback_reason = f"Bypassed ({precomputed_general_intent})"
+                routing_reason = f"Casual conversation detected: {precomputed_general_intent}"
+                selected_provider = "None"
+            elif not resolved_company and not resolved_ticker:
                 reason_msg = "No company resolved."
                 sec_reason = reason_msg
                 alpha_reason = reason_msg
@@ -666,106 +686,105 @@ def add_chat_message(
                 selected_provider = "Web Search"
             else:
                 active_id = resolved_ticker or resolved_company
-                lowered = optimized_prompt.lower()
                 
-                # 1. SEC EDGAR Evaluation
-            sec_keywords = ["10-k", "10-q", "8-k", "filing", "annual report", "quarterly report", "sec submission", "company filing"]
-            has_sec = intent == "SEC_FILINGS" or any(kw in lowered for kw in sec_keywords)
-            if has_sec:
-                if is_sec_registrant:
-                    sec_applicable = True
-                    sec_reason = "Applicable (SEC Registrant = True)"
-                    sec_tickers = [resolved_ticker or resolved_company]
-                    sec_ticker = sec_tickers[0]
-                    sec_options = rag.sec_request_options(optimized_prompt)
-                    mcp_selected = True
-                    selected_provider = "SEC EDGAR"
+                    # 1. SEC EDGAR Evaluation
+                sec_keywords = ["10-k", "10-q", "8-k", "filing", "annual report", "quarterly report", "sec submission", "company filing"]
+                has_sec = intent == "SEC_FILINGS" or any(kw in lowered for kw in sec_keywords)
+                if has_sec:
+                    if is_sec_registrant:
+                        sec_applicable = True
+                        sec_reason = "Applicable (SEC Registrant = True)"
+                        sec_tickers = [resolved_ticker or resolved_company]
+                        sec_ticker = sec_tickers[0]
+                        sec_options = rag.sec_request_options(optimized_prompt)
+                        mcp_selected = True
+                        selected_provider = "SEC EDGAR"
+                    else:
+                        sec_reason = "SEC Registrant = False"
                 else:
-                    sec_reason = "SEC Registrant = False"
-            else:
-                sec_reason = "No SEC keywords or intent."
+                    sec_reason = "No SEC keywords or intent."
 
-            # 2. Alpha Vantage Evaluation
-            if not mcp_selected:
-                alpha_keywords = ["stock price", "market price", "revenue", "eps", "financial metrics", "market data", "dividend", "financial performance"]
-                has_alpha = intent == "FINANCIAL_MARKET_DATA" or any(kw in lowered for kw in alpha_keywords)
-                if has_alpha:
-                    alpha_applicable = True
-                    alpha_reason = "Applicable (Finance match)"
-                    financial_ticker = active_id
-                    mcp_selected = True
-                    selected_provider = "Alpha Vantage"
-                else:
-                    alpha_reason = "No Finance keywords or intent."
-
-            # Watchlist News Evaluation
-            if not mcp_selected:
-                has_watchlist = intent == "WATCHLIST_NEWS" or "watchlist" in lowered or "portfolio" in lowered
-                if has_watchlist:
-                    source_text = extracted_entities or conversation_company or optimized_prompt
-                    extracted_companies = rag.resolve_multiple_companies(client, source_text, model=settings.LLM_MODEL)
-                    if extracted_companies:
+                # 2. Alpha Vantage Evaluation
+                if not mcp_selected:
+                    alpha_keywords = ["stock price", "market price", "revenue", "eps", "financial metrics", "market data", "dividend", "financial performance"]
+                    has_alpha = intent == "FINANCIAL_MARKET_DATA" or any(kw in lowered for kw in alpha_keywords)
+                    if has_alpha:
                         alpha_applicable = True
-                        alpha_reason = "Applicable (Watchlist News match)"
-                        financial_ticker = ",".join(extracted_companies)
+                        alpha_reason = "Applicable (Finance match)"
+                        financial_ticker = active_id
                         mcp_selected = True
                         selected_provider = "Alpha Vantage"
-                        resolved_company = financial_ticker
-                        resolved_ticker = financial_ticker
-                        active_id = financial_ticker
+                    else:
+                        alpha_reason = "No Finance keywords or intent."
 
-            # 3. ROIC Evaluation
-            if not mcp_selected:
-                roic_keywords = ["company fundamental", "balance sheet", "income statement", "cash flow", "valuation", "ratio", "business fundamental"]
-                has_roic = intent in ["ROIC", "COMPANY_INFORMATION"] or any(kw in lowered for kw in roic_keywords)
-                if has_roic:
-                    roic_applicable = True
-                    roic_reason = "Applicable (ROIC match)"
-                    roic_query = active_id
-                    mcp_selected = True
-                    selected_provider = "ROIC"
-                else:
-                    roic_reason = "No ROIC keywords or intent."
+                # Watchlist News Evaluation
+                if not mcp_selected:
+                    has_watchlist = intent == "WATCHLIST_NEWS" or "watchlist" in lowered or "portfolio" in lowered
+                    if has_watchlist:
+                        source_text = extracted_entities or conversation_company or optimized_prompt
+                        extracted_companies = rag.resolve_multiple_companies(client, source_text, model=settings.LLM_MODEL)
+                        if extracted_companies:
+                            alpha_applicable = True
+                            alpha_reason = "Applicable (Watchlist News match)"
+                            financial_ticker = ",".join(extracted_companies)
+                            mcp_selected = True
+                            selected_provider = "Alpha Vantage"
+                            resolved_company = financial_ticker
+                            resolved_ticker = financial_ticker
+                            active_id = financial_ticker
 
-            # 4. Companies House Evaluation
-            if not mcp_selected:
-                ch_keywords = ["uk company", "uk registration", "companies house"]
-                has_ch = intent == "COMPANIES_HOUSE" or any(kw in lowered for kw in ch_keywords)
-                if has_ch:
-                    ch_applicable = True
-                    ch_reason = "Applicable (Companies House match)"
-                    companies_house_query = active_id
-                    mcp_selected = True
-                    selected_provider = "Companies House"
-                else:
-                    ch_reason = "No Companies House keywords or intent."
+                # 3. ROIC Evaluation
+                if not mcp_selected:
+                    roic_keywords = ["company fundamental", "balance sheet", "income statement", "cash flow", "valuation", "ratio", "business fundamental"]
+                    has_roic = intent in ["ROIC", "COMPANY_INFORMATION"] or any(kw in lowered for kw in roic_keywords)
+                    if has_roic:
+                        roic_applicable = True
+                        roic_reason = "Applicable (ROIC match)"
+                        roic_query = active_id
+                        mcp_selected = True
+                        selected_provider = "ROIC"
+                    else:
+                        roic_reason = "No ROIC keywords or intent."
 
-            # 5. Metadata Default Fallback
-            if not mcp_selected:
-                if is_sec_registrant:
-                    sec_applicable = True
-                    sec_reason = "Metadata Fallback (SEC Registrant = True)"
-                    sec_tickers = [resolved_ticker or resolved_company]
-                    sec_ticker = sec_tickers[0]
-                    sec_options = rag.sec_request_options(optimized_prompt)
-                    mcp_selected = True
-                    selected_provider = "SEC EDGAR"
-                elif resolved_ticker:
-                    roic_applicable = True
-                    roic_reason = "Metadata Fallback (Public Company)"
-                    roic_query = active_id
-                    mcp_selected = True
-                    selected_provider = "ROIC"
+                # 4. Companies House Evaluation
+                if not mcp_selected:
+                    ch_keywords = ["uk company", "uk registration", "companies house"]
+                    has_ch = intent == "COMPANIES_HOUSE" or any(kw in lowered for kw in ch_keywords)
+                    if has_ch:
+                        ch_applicable = True
+                        ch_reason = "Applicable (Companies House match)"
+                        companies_house_query = active_id
+                        mcp_selected = True
+                        selected_provider = "Companies House"
+                    else:
+                        ch_reason = "No Companies House keywords or intent."
+
+                # 5. Metadata Default Fallback
+                if not mcp_selected:
+                    if is_sec_registrant:
+                        sec_applicable = True
+                        sec_reason = "Metadata Fallback (SEC Registrant = True)"
+                        sec_tickers = [resolved_ticker or resolved_company]
+                        sec_ticker = sec_tickers[0]
+                        sec_options = rag.sec_request_options(optimized_prompt)
+                        mcp_selected = True
+                        selected_provider = "SEC EDGAR"
+                    elif resolved_ticker:
+                        roic_applicable = True
+                        roic_reason = "Metadata Fallback (Public Company)"
+                        roic_query = active_id
+                        mcp_selected = True
+                        selected_provider = "ROIC"
                     
-            # Fallback to Web Search
-            fallback_triggered = False
-            fallback_reason = "None"
-            if not mcp_selected:
-                requires_web = True
-                routing_reason = "No applicable MCP provider detected, fallback to web search."
-                fallback_triggered = True
-                fallback_reason = "No applicable MCP service detected."
-                selected_provider = "Web Search"
+                # Fallback to Web Search
+                fallback_triggered = False
+                fallback_reason = "None"
+                if not mcp_selected:
+                    requires_web = True
+                    routing_reason = "No applicable MCP provider detected, fallback to web search."
+                    fallback_triggered = True
+                    fallback_reason = "No applicable MCP service detected."
+                    selected_provider = "Web Search"
         # Guard: If RAG was hard-routed, make sure no MCP override happened
         if document_ids and is_document_intent and not requires_live_internet:
             requires_web = False
@@ -1116,9 +1135,7 @@ def add_chat_message(
         if is_workspace_analysis:
             intent = "Research / Deep Analysis"
         else:
-            intent = rag.classify_intent(
-                client, question=optimized_prompt, model=settings.LLM_MODEL
-            )
+            intent = precomputed_general_intent
 
         exec_result = "Success" if has_data else "Empty" if mcp_executed else "Skipped"
         rows_returned = "N/A"
@@ -1316,98 +1333,110 @@ def add_chat_message(
                 client, messages=messages, model=settings.LLM_MODEL
             )
 
-        execution_time = _time.time() - start_time
-        logger.info(
-            f"--- LLM GENERATION AUDIT ---\n"
-            f"Mode: {mode_used}\n"
-            f"Model: {selected_model}\n"
-            f"Provider: {provider}\n"
-            f"Execution Time: {execution_time:.2f}s\n"
-            f"Fallback Reason: {fallback_reason}\n"
-            f"----------------------------\n"
-        )
+        def event_stream():
+            nonlocal ai_response, follow_up_questions, citations, source_documents, source_attribution
+            
+            if not validation_error:
+                raw_response_str = ""
+                try:
+                    for token in raw_response:
+                        raw_response_str += token
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                except Exception as e:
+                    logger.error(f"Streaming error: {e}")
+                    
+                execution_time = _time.time() - start_time
+                logger.info(
+                    f"--- LLM GENERATION AUDIT ---\n"
+                    f"Mode: {mode_used}\n"
+                    f"Model: {selected_model}\n"
+                    f"Provider: {provider}\n"
+                    f"Execution Time: {execution_time:.2f}s\n"
+                    f"Fallback Reason: {fallback_reason}\n"
+                    f"----------------------------\n"
+                )
 
-        ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response)
+                ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response_str)
 
-        cited_sources: list = list(retrieved_chunks or [])
-        cited_sources.extend(financial_sources)
-        cited_sources.extend(sec_sources)
-        cited_sources.extend(roic_sources)
-        cited_sources.extend(companies_house_sources)
-        if used_web:
-            cited_sources.extend(web_sources or [])
+                cited_sources: list = list(retrieved_chunks or [])
+                cited_sources.extend(financial_sources)
+                cited_sources.extend(sec_sources)
+                cited_sources.extend(roic_sources)
+                cited_sources.extend(companies_house_sources)
+                if used_web:
+                    cited_sources.extend(web_sources or [])
 
-        if cited_sources:
-            ai_response, citations = citation_svc.generate_citations(
-                ai_response, cited_sources
-            )
-        else:
-            ai_response = strip_citation_markers(ai_response)
+                if cited_sources:
+                    ai_response, citations = citation_svc.generate_citations(
+                        ai_response, cited_sources
+                    )
+                else:
+                    ai_response = strip_citation_markers(ai_response)
 
-        source_documents = (
-            document_sources_only(cited_document_names(citations)) or None
-        )
-        source_attribution = source_attribution_from_citations(citations)
+                source_documents = (
+                    document_sources_only(cited_document_names(citations)) or None
+                )
+                source_attribution = source_attribution_from_citations(citations)
 
-    assistant_message = crud.chat_message.create(
-        db=db,
-        obj_in=schemas.ChatMessageCreate(
-            chat_id=chat_id,
-            content=ai_response,
-            role="assistant",
-            user_id=str(current_user.id),
-            workspace_id=session.workspace_id,
-            document_ids=document_ids or None,
-            source_documents=source_documents,
-            citations=citations,
-            mode_used=mode_used,
-        ),
-    )
-
-    AuditLogger.log(
-        action="AI_RESPONSE",
-        user_id=str(current_user.id),
-        workspace_id=session.workspace_id,
-        chat_id=chat_id,
-        endpoint=f"/v1/ai/chats/{chat_id}/messages",
-        http_method="POST",
-        status="200",
-        metadata={
-            "citations_count": len(citations) if citations else 0,
-            "follow_up_questions": follow_up_questions,
-            "mode_requested": getattr(request, "mode", None),
-            "mode_used": mode_used,
-        },
-    )
-
-    return JSONResponse(
-        status_code=200,
-        content={
-            "success": True,
-            "error": None,
-            "data": {
-                "chat_session_id": chat_id,
-                "user_message_id": user_message.id,
-                "assistant_message_id": assistant_message.id,
-                "response": ai_response,
-                "document_ids": document_ids,
-                "active_document_ids": document_ids,
-                "mode_used": mode_used,
-                "uploaded_document_ids": (
-                    document_ids if context_reason == "new_upload" else []
+            assistant_message = crud.chat_message.create(
+                db=db,
+                obj_in=schemas.ChatMessageCreate(
+                    chat_id=chat_id,
+                    content=ai_response,
+                    role="assistant",
+                    user_id=str(current_user.id),
+                    workspace_id=session.workspace_id,
+                    document_ids=document_ids or None,
+                    source_documents=source_documents,
+                    citations=citations,
+                    mode_used=mode_used,
                 ),
-                "used_documents": used_rag,
-                "used_web_search": used_web,
-                "source_documents": source_documents,
-                "citations": citations,
-                "source_attribution": source_attribution,
-                "web_sources": web_sources,
-                "financial_news": financial_news_response,
-                "sec_company_facts": sec_company_facts_response,
-                "roic_ai": roic_response,
-                "companies_house": companies_house_response,
-                "follow_up_questions": follow_up_questions,
-            },
-            "message": "Message added and AI response created successfully.",
-        },
-    )
+            )
+
+            AuditLogger.log(
+                action="AI_RESPONSE",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                chat_id=chat_id,
+                endpoint=f"/v1/ai/chats/{chat_id}/messages",
+                http_method="POST",
+                status="200",
+                metadata={
+                    "citations_count": len(citations) if citations else 0,
+                    "follow_up_questions": follow_up_questions,
+                    "mode_requested": getattr(request, "mode", None),
+                    "mode_used": mode_used,
+                },
+            )
+
+            final_data = {
+                "success": True,
+                "error": None,
+                "data": {
+                    "chat_session_id": chat_id,
+                    "user_message_id": user_message.id,
+                    "assistant_message_id": assistant_message.id,
+                    "response": ai_response,
+                    "document_ids": document_ids,
+                    "active_document_ids": document_ids,
+                    "mode_used": mode_used,
+                    "uploaded_document_ids": (
+                        document_ids if context_reason == "new_upload" else []
+                    ),
+                    "used_documents": used_rag,
+                    "used_web_search": used_web,
+                    "source_documents": source_documents,
+                    "citations": citations,
+                    "source_attribution": source_attribution,
+                    "web_sources": web_sources,
+                    "financial_news": financial_news_response,
+                    "sec_company_facts": sec_company_facts_response,
+                    "roic_ai": roic_response,
+                    "companies_house": companies_house_response,
+                    "follow_up_questions": follow_up_questions,
+                },
+                "message": "Message added and AI response created successfully.",
+            }
+            yield f"data: {json.dumps({'type': 'complete', 'data': final_data})}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
