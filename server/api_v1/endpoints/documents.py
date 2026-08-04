@@ -331,6 +331,7 @@ def export_conversation_pdf(
         raise HTTPException(status_code=400, detail="Nothing to export")
 
     title = payload.title or "CapitalEdge conversation"
+
     try:
         pdf_bytes = conversation_to_pdf(
             title, [m.model_dump() for m in payload.messages]
