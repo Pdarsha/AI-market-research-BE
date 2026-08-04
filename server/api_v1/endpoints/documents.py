@@ -331,6 +331,11 @@ def export_conversation_pdf(
         raise HTTPException(status_code=400, detail="Nothing to export")
 
     title = payload.title or "CapitalEdge conversation"
+    
+    with open("/tmp/debug_export_payload.json", "w") as f:
+        import json
+        json.dump(payload.model_dump(), f, indent=2)
+
     try:
         pdf_bytes = conversation_to_pdf(
             title, [m.model_dump() for m in payload.messages]
