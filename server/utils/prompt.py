@@ -208,6 +208,7 @@ number in square brackets: [1], [2], [3], ...
 - A sentence supported by two sources takes both markers, e.g. "... growth [2][4]."
 - Do not invent citation numbers. Never cite a number that is not in the CONTEXT.
 - If the CONTEXT does not contain the answer, say so plainly and add no markers.
+- DO NOT generate a 'References' or 'Sources' list at the end of your response. The system will handle citations automatically.
 """
     else:
         citation_rules = """
@@ -311,7 +312,7 @@ Date Range:
 - Avoid unnecessary sections, headings, or complex lists.
 - Use bold (**bold**) for key metrics, names, dates, or terms.
 - Add a small example only if it is highly helpful for clarity.
-- Cite the sources [n] immediately after the relevant statements.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Technical Question":
             response_format_rules = """
@@ -321,7 +322,7 @@ Date Range:
 - Include code blocks (```language ... ```) for syntax, or markdown tables where comparing dimensions.
 - Include ONLY sections that directly improve readability and add value (e.g., Summary, Explanation, Example, Code, Diagram, Best Practices). Do NOT force unnecessary or empty sections.
 - Ensure proper spacing (a blank line) between headers, paragraphs, lists, and tables.
-- Cite the sources [n] immediately after the relevant statements.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Coding Request":
             response_format_rules = """
@@ -329,7 +330,7 @@ Date Range:
 - Explain only what is necessary, keeping introductions and explanations minimal and concise.
 - Include comments inside the code where appropriate.
 - Use bold (**bold**) to highlight key configuration options or commands.
-- Cite any code sources [n] if they are derived from the CONTEXT.
+- Cite every statement or code snippet that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Document Analysis":
             response_format_rules = """
@@ -344,7 +345,7 @@ Date Range:
   - Recommendations
   - Risks
 - Do NOT force unnecessary sections or include empty headings.
-- Cite the sources [n] for every claim made from the CONTEXT.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Research / Deep Analysis":
             response_format_rules = """
@@ -356,14 +357,14 @@ Date Range:
   - Recommendations / Next Steps
 - Use Markdown tables with clear column headers to compare options, metrics, or periods.
 - Use bold (**bold**) for all key numbers, figures, and dates.
-- Cite the sources [n] for every claim.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "AI Agent Workflow":
             response_format_rules = """
 - Describe the agent plan, workflow, or execution status clearly and structured.
 - Keep the rich formatting, but only include sections that add value.
 - Use bold (**bold**) to highlight state changes, parameters, and status indicators.
-- Cite the sources [n] where applicable.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Summarization":
             response_format_rules = """
@@ -371,7 +372,7 @@ Date Range:
 - Focus on the core information, key themes, and main points.
 - Use bullet points with bold lead-ins for key points instead of walls of prose.
 - Do not include unnecessary headings, fluff, or irrelevant sections.
-- Cite the sources [n] where applicable.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Comparison":
             response_format_rules = """
@@ -379,7 +380,7 @@ Date Range:
 - Use Markdown tables to compare options across relevant dimensions (features, pros/cons, metrics).
 - Highlight key trade-offs and recommendations.
 - Use bold (**bold**) for key parameters, options, and critical differences.
-- Cite the sources [n] where applicable.
+- Cite every statement that is grounded in the CONTEXT using [n] markers.
 """
         else: # Other/default
             response_format_rules = """

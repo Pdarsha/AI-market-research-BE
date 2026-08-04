@@ -1287,6 +1287,7 @@ def add_chat_message(
             if all_web:
                 if web_sources is None: web_sources = []
                 web_sources.extend(all_web)
+                used_web = True
             
             if final_research_context and len(final_research_context) > 10000:
                 final_research_context = final_research_context[:10000] + "\n\n... [Truncated for context length limits]"
@@ -1305,6 +1306,11 @@ def add_chat_message(
                 "# Recommendations (Provide evidence-based recommendations. Explain why they follow from the research)\n"
                 "# Final Conclusion (Synthesize the entire report. Do not repeat earlier sections. Provide final judgment)\n"
                 "# Confidence Assessment (Rate confidence as High, Moderate, or Low and explain why)\n\n"
+                "CITATION RULES:\n"
+                "- Every source in the Context has a marker like [1], [2], etc.\n"
+                "- You MUST cite every factual statement or claim that is grounded in the Context by preserving these exact markers.\n"
+                "- Place the marker immediately after the factual statement, e.g. '... increased by 10% [2].'\n"
+                "- DO NOT generate a 'References' or 'Sources' list at the end of your report.\n\n"
                 f"Context:\n{final_research_context}"
             ) + followup_instruction_block()
             
@@ -1363,8 +1369,8 @@ def add_chat_message(
                 cited_sources.extend(sec_sources)
                 cited_sources.extend(roic_sources)
                 cited_sources.extend(companies_house_sources)
-                if used_web:
-                    cited_sources.extend(web_sources or [])
+                if web_sources:
+                    cited_sources.extend(web_sources)
 
                 if cited_sources:
                     ai_response, citations = citation_svc.generate_citations(
@@ -1409,6 +1415,23 @@ def add_chat_message(
                 },
             )
 
+
+            message_obj = {
+                "id": assistant_message.id,
+                "chat_id": assistant_message.chat_id,
+                "role": assistant_message.role,
+                "content": assistant_message.content,
+                "workspace_id": assistant_message.workspace_id,
+                "document_ids": assistant_message.document_ids,
+                "uploaded_document_ids": (document_ids if context_reason == "new_upload" else []),
+                "attachments": [],
+                "source_documents": source_documents,
+                "citations": citations,
+                "source_attribution": source_attribution,
+                "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
+                "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
+            }
+
             final_data = {
                 "success": True,
                 "error": None,
@@ -1434,6 +1457,7 @@ def add_chat_message(
                     "roic_ai": roic_response,
                     "companies_house": companies_house_response,
                     "follow_up_questions": follow_up_questions,
+                    "message": message_obj,
                 },
                 "message": "Message added and AI response created successfully.",
             }
