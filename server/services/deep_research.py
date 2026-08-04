@@ -21,10 +21,13 @@ Request: {main_query}
 
 Format your response strictly as a simple list of topics/questions, one per line, with no bullet points or numbering."""
         try:
+            kwargs = {}
+            if not any(p in settings.DEEP_RESEARCH_MODEL.lower() for p in ("o1", "o2", "o3")):
+                kwargs["temperature"] = 0.3
             completion = self.client.chat.completions.create(
                 model=settings.DEEP_RESEARCH_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                **kwargs
             )
             response = completion.choices[0].message.content or ""
             queries = [q.strip("- *").strip() for q in response.split("\n") if q.strip()]
@@ -209,10 +212,13 @@ Raw Collected Evidence:
 {combined}
 """
         try:
+            kwargs = {}
+            if not any(p in settings.DEEP_RESEARCH_MODEL.lower() for p in ("o1", "o2", "o3")):
+                kwargs["temperature"] = 0.3
             completion = self.client.chat.completions.create(
                 model=settings.DEEP_RESEARCH_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                **kwargs
             )
             return completion.choices[0].message.content or combined
         except Exception:
@@ -224,16 +230,21 @@ Raw Collected Evidence:
         
         all_chunks, all_news, all_sec, all_roic, all_ch, all_web = [], [], [], [], [], []
         
-        for sq in sub_queries:
-            ctx, chunks, news_src, sec_src, roic_src, ch_src, web_src = self.execute_retrieval_for_query(sq, chat_id, document_ids, history)
-            if ctx:
-                contexts.append(ctx)
-            if chunks: all_chunks.extend(chunks)
-            if news_src: all_news.extend(news_src)
-            if sec_src: all_sec.extend(sec_src)
-            if roic_src: all_roic.extend(roic_src)
-            if ch_src: all_ch.extend(ch_src)
-            if web_src: all_web.extend(web_src)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(sub_queries))) as executor:
+            future_to_sq = {executor.submit(self.execute_retrieval_for_query, sq, chat_id, document_ids, history): sq for sq in sub_queries}
+            for future in concurrent.futures.as_completed(future_to_sq):
+                try:
+                    ctx, chunks, news_src, sec_src, roic_src, ch_src, web_src = future.result()
+                    if ctx: contexts.append(ctx)
+                    if chunks: all_chunks.extend(chunks)
+                    if news_src: all_news.extend(news_src)
+                    if sec_src: all_sec.extend(sec_src)
+                    if roic_src: all_roic.extend(roic_src)
+                    if ch_src: all_ch.extend(ch_src)
+                    if web_src: all_web.extend(web_src)
+                except Exception as exc:
+                    logger.error(f"Error executing retrieval for subquery: {exc}")
                 
         final_context = self.validate_and_consolidate(contexts)
         return final_context, all_chunks, all_news, all_sec, all_roic, all_ch, all_web

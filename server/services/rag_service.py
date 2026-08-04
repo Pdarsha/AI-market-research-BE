@@ -324,7 +324,8 @@ class RAGService:
         else:
             system_prompt = ai_assistent(intent=intent)
 
-        system_prompt += followup_instruction_block()
+        if intent not in ["Greeting", "Small Talk", "Simple Question"]:
+            system_prompt += followup_instruction_block()
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
@@ -422,8 +423,6 @@ class RAGService:
         Streaming is preserved (``stream=True``) exactly as the existing chat flow;
         the chunks are aggregated into the final response string.
         """
-        ai_response = ""
-        
         token_kwargs = {}
         if "gpt-5" in model.lower():
             token_kwargs["max_completion_tokens"] = 1024
@@ -432,43 +431,45 @@ class RAGService:
             token_kwargs["max_tokens"] = 1024
             token_kwargs["temperature"] = 0
             
+        completion = None
         try:
-            completion = client.chat.completions.create(
-                model=model, messages=messages, stream=True, **token_kwargs
-            )
-        except openai.APIStatusError as e:
-            if e.status_code == 402 and "can only afford" in str(e):
-                match = re.search(r"can only afford (\d+)", str(e))
-                if match:
-                    affordable_tokens = int(match.group(1))
-                    # Retry with the exact affordable tokens
-                    if "gpt-5" in model.lower():
-                        token_kwargs["max_completion_tokens"] = affordable_tokens
+            try:
+                completion = client.chat.completions.create(
+                    model=model, messages=messages, stream=True, **token_kwargs
+                )
+            except openai.APIStatusError as e:
+                if e.status_code == 402 and "can only afford" in str(e):
+                    match = re.search(r"can only afford (\d+)", str(e))
+                    if match:
+                        affordable_tokens = int(match.group(1))
+                        # Retry with the exact affordable tokens
+                        if "gpt-5" in model.lower():
+                            token_kwargs["max_completion_tokens"] = affordable_tokens
+                        else:
+                            token_kwargs["max_tokens"] = affordable_tokens
+                        completion = client.chat.completions.create(
+                            model=model, messages=messages, stream=True, **token_kwargs
+                        )
                     else:
-                        token_kwargs["max_tokens"] = affordable_tokens
-                    completion = client.chat.completions.create(
-                        model=model, messages=messages, stream=True, **token_kwargs
-                    )
+                        raise e
                 else:
                     raise e
-            else:
-                raise e
-                
-        for chunk in completion:
-            if (
-                chunk.choices
-                and chunk.choices[0].delta
-                and chunk.choices[0].delta.content
-            ):
-                ai_response += chunk.choices[0].delta.content
-        return ai_response
+                    
+            for chunk in completion:
+                if (
+                    chunk.choices
+                    and chunk.choices[0].delta
+                    and chunk.choices[0].delta.content
+                ):
+                    yield chunk.choices[0].delta.content
+        finally:
+            if completion:
+                completion.close()
 
     @staticmethod
-    def generate_think_longer_response(client, *, messages: list[dict], model: str, reasoning_effort: str) -> str:
+    def generate_think_longer_response(client, *, messages: list[dict], model: str, reasoning_effort: str):
         """LLM response generation for Think Longer mode with reasoning effort."""
         try:
-            ai_response = ""
-            
             token_kwargs = {}
             if "gpt-5" in model.lower():
                 token_kwargs["max_completion_tokens"] = 4096
@@ -477,40 +478,44 @@ class RAGService:
                 token_kwargs["max_tokens"] = 4096
                 token_kwargs["temperature"] = 0
 
+            completion = None
             try:
-                completion = client.chat.completions.create(
-                    model=model, 
-                    messages=messages, 
-                    stream=True, 
-                    **token_kwargs
-                )
-            except openai.APIStatusError as e:
-                if e.status_code == 402 and "can only afford" in str(e):
-                    match = re.search(r"can only afford (\d+)", str(e))
-                    if match:
-                        affordable_tokens = int(match.group(1))
-                        if "gpt-5" in model.lower():
-                            token_kwargs["max_completion_tokens"] = affordable_tokens
+                try:
+                    completion = client.chat.completions.create(
+                        model=model, 
+                        messages=messages, 
+                        stream=True, 
+                        **token_kwargs
+                    )
+                except openai.APIStatusError as e:
+                    if e.status_code == 402 and "can only afford" in str(e):
+                        match = re.search(r"can only afford (\d+)", str(e))
+                        if match:
+                            affordable_tokens = int(match.group(1))
+                            if "gpt-5" in model.lower():
+                                token_kwargs["max_completion_tokens"] = affordable_tokens
+                            else:
+                                token_kwargs["max_tokens"] = affordable_tokens
+                            completion = client.chat.completions.create(
+                                model=model, 
+                                messages=messages, 
+                                stream=True, 
+                                **token_kwargs
+                            )
                         else:
-                            token_kwargs["max_tokens"] = affordable_tokens
-                        completion = client.chat.completions.create(
-                            model=model, 
-                            messages=messages, 
-                            stream=True, 
-                            **token_kwargs
-                        )
+                            raise e
                     else:
                         raise e
-                else:
-                    raise e
-            for chunk in completion:
-                if (
-                    chunk.choices
-                    and chunk.choices[0].delta
-                    and chunk.choices[0].delta.content
-                ):
-                    ai_response += chunk.choices[0].delta.content
-            return ai_response
+                for chunk in completion:
+                    if (
+                        chunk.choices
+                        and chunk.choices[0].delta
+                        and chunk.choices[0].delta.content
+                    ):
+                        yield chunk.choices[0].delta.content
+            finally:
+                if completion:
+                    completion.close()
         except Exception as e:
             logger.warning("generate_think_longer_response failed: %s", str(e))
             raise ThinkLongerUnavailable(str(e)) from e
@@ -1609,11 +1614,11 @@ class RAGService:
                         "insights, questions asked, and decisions made. Keep it concise (under 800 words):\n\n"
                         f"{chats_context_str}"
                     )
-                    chats_context_str = self.generate_response(
+                    chats_context_str = "".join(self.generate_response(
                         client,
                         messages=[{"role": "user", "content": summary_prompt}],
                         model=model,
-                    )
+                    ))
                 except Exception:
                     chats_context_str = (
                         chats_context_str[:MAX_CHATS_CHAR_LIMIT]
