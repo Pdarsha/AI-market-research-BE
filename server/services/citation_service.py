@@ -196,6 +196,13 @@ class CitationService:
             })
 
         if not markers:
+            logger.info(
+                "citations.generate: no [n] markers found in LLM response "
+                "(answer_len=%d, sources_available=%d). "
+                "Returning empty citations — caller should use generate_citations_from_chunks() instead.",
+                len(answer),
+                len(sources),
+            )
             return answer, []
 
         # Map original markers to source indices (1-indexed markers -> 0-indexed).
@@ -255,6 +262,72 @@ class CitationService:
         )
 
         return rewritten, citations
+
+    @staticmethod
+    def generate_citations_from_chunks(
+        sources: list,
+        *,
+        allow_empty_excerpt: bool = False,
+    ) -> list[dict]:
+        """Build citations directly from retrieved chunks without requiring LLM markers.
+
+        Used as a fallback when the LLM does not emit explicit [n] citation markers,
+        which is common for narrative analysis responses. Every chunk in ``sources``
+        that is a ``DocumentChunk`` (or a document-type dict) becomes a citation.
+
+        Non-document sources (web, SEC, etc.) are included only if they contain a
+        URL or meaningful excerpt to avoid noise.
+
+        Args:
+            sources: The same ordered list of sources that was passed to the LLM.
+            allow_empty_excerpt: If True, include chunks even when content is empty.
+
+        Returns:
+            A list of citation dicts with full metadata.
+        """
+        citations: list[dict] = []
+        seen_chunk_ids: set = set()
+
+        for idx, source in enumerate(sources, start=1):
+            try:
+                is_chunk = isinstance(source, DocumentChunk)
+                is_doc_dict = (
+                    isinstance(source, dict)
+                    and source.get("type") == "document"
+                )
+
+                if not is_chunk and not is_doc_dict:
+                    # Non-document (web/SEC/etc.) — include only if it has a URL or excerpt
+                    if isinstance(source, dict) and (source.get("url") or source.get("excerpt") or source.get("snippet")):
+                        cd = CitationData(citation_id=idx, source=source)
+                        citations.append(cd.to_dict())
+                    continue
+
+                # Deduplicate by chunk id
+                chunk_id = source.id if is_chunk else source.get("chunk_id") or source.get("id")
+                if chunk_id and chunk_id in seen_chunk_ids:
+                    continue
+                if chunk_id:
+                    seen_chunk_ids.add(chunk_id)
+
+                # Skip contentless chunks unless caller explicitly allows them
+                excerpt = (source.content if is_chunk else source.get("excerpt") or source.get("content")) or ""
+                if not excerpt.strip() and not allow_empty_excerpt:
+                    continue
+
+                cd = CitationData(citation_id=idx, source=source)
+                citations.append(cd.to_dict())
+            except Exception:
+                logger.exception(
+                    "citations.generate_from_chunks: failed for source[%d], skipping", idx
+                )
+
+        logger.info(
+            "citations.generate_from_chunks: sources=%d document_citations=%d",
+            len(sources),
+            len(citations),
+        )
+        return citations
 
     @staticmethod
     def _cleanup_spacing(text: str) -> str:

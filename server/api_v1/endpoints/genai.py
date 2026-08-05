@@ -859,12 +859,12 @@ def add_chat_message(
         if not any_context_present:
             validation_error = matched_agent["guidance"]
     else:
-        if is_document_question and not any_context_present:
+        if is_document_intent and not any_context_present:
             validation_error = "This query requires one or more uploaded documents. Please upload files or select existing workspace files to proceed."
 
     # Log routing decision
     selected_list = []
-    if is_document_question:
+    if is_document_intent:
         selected_list.append("RAG")
     if sec_tickers:
         selected_list.append("SEC EDGAR")
@@ -878,14 +878,14 @@ def add_chat_message(
         selected_list.append("Web Search")
 
     skipped_list = []
-    if document_ids and not is_document_question:
+    if document_ids and not is_document_intent:
         skipped_list.append("RAG (not relevant)")
 
     logger.info(
         build_routing_log(
             content=request.content,
             document_ids=document_ids,
-            is_document_question=is_document_question,
+            is_document_question=is_document_intent,
             selected_providers=selected_list,
             skipped_providers=skipped_list,
             rewritten_query=optimized_prompt if optimized_prompt != request.content else "",
@@ -959,7 +959,7 @@ def add_chat_message(
             )
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            if is_document_question:
+            if is_document_intent:
                 futures["rag"] = executor.submit(retrieve_documents)
             if sec_tickers:
                 futures["sec"] = executor.submit(retrieve_sec_company_facts)
@@ -1170,9 +1170,10 @@ def add_chat_message(
         logger.info(
             f"--- ROUTING PIPELINE AUDIT ---\n"
             f"Active Documents: {bool(document_ids)}\n"
-            f"Document Intent: {is_document_intent}\n"
-            f"RAG Classifier Result: {is_document_question}\n"
-            f"Planner Document Relevant: {selected_provider == 'RAG' or bool(document_ids)}\n"
+            f"Requires Web Search: {requires_web}\n"
+            f"RAG Classifier Result: {is_document_intent}\n"
+            f"Intent: {intent}\n"
+            f"Relevant: {selected_provider == 'RAG' or bool(document_ids)}\n"
             f"Selected Provider: {selected_provider}\n"
             f"Fallback Triggered: {fallback_triggered or (not mcp_selected)}\n"
             f"Fallback Reason: {fallback_reason}\n"
@@ -1364,6 +1365,7 @@ def add_chat_message(
 
                 ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response_str)
 
+                retrieved_chunks_count = len(retrieved_chunks) if retrieved_chunks else 0
                 cited_sources: list = list(retrieved_chunks or [])
                 cited_sources.extend(financial_sources)
                 cited_sources.extend(sec_sources)
@@ -1372,12 +1374,47 @@ def add_chat_message(
                 if web_sources:
                     cited_sources.extend(web_sources)
 
+                citation_generation_error = None
                 if cited_sources:
-                    ai_response, citations = citation_svc.generate_citations(
-                        ai_response, cited_sources
-                    )
+                    try:
+                        ai_response, citations = citation_svc.generate_citations(
+                            ai_response, cited_sources
+                        )
+                        if not citations and retrieved_chunks:
+                            logger.info(
+                                "CITATION_PIPELINE: no marker-based citations found but %d chunks "
+                                "were retrieved — generating chunk-based citations as fallback",
+                                retrieved_chunks_count,
+                            )
+                            citations = citation_svc.generate_citations_from_chunks(cited_sources)
+                    except Exception as _cite_exc:
+                        citation_generation_error = str(_cite_exc)
+                        logger.exception(
+                            "CITATION_PIPELINE: citation generation raised an exception "
+                            "(retrieved_chunks=%d, cited_sources=%d)",
+                            retrieved_chunks_count,
+                            len(cited_sources),
+                        )
+                        # Do not swallow — strip stray markers from the response at minimum
+                        ai_response = strip_citation_markers(ai_response)
                 else:
                     ai_response = strip_citation_markers(ai_response)
+
+                # CITATION_PIPELINE_AUDIT — one log line per response for traceability
+                from server.services.audit_logger import AuditLogger as _AL
+                _AL.log(
+                    action="CITATION_PIPELINE_AUDIT",
+                    status="success" if citation_generation_error is None else "error",
+                    metadata={
+                        "retrieved_chunks_count": retrieved_chunks_count,
+                        "cited_sources_count": len(cited_sources),
+                        "citations_generated_count": len(citations) if citations else 0,
+                        "citations_attached_to_response": bool(citations),
+                        "citations_saved_to_database": bool(citations),
+                        "citation_generation_error": citation_generation_error,
+                        "is_document_analysis": bool(retrieved_chunks),
+                    },
+                )
 
                 source_documents = (
                     document_sources_only(cited_document_names(citations)) or None
