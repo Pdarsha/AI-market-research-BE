@@ -418,6 +418,8 @@ def add_chat_message(
         if msg.role == "user":
             if i + 1 < len(prior_messages) and prior_messages[i + 1].role == "assistant":
                 valid_history.append({"role": msg.role, "content": msg.content})
+        elif msg.role == "assistant":
+            valid_history.append({"role": msg.role, "content": msg.content + '\n\n<<<FOLLOW_UP_QUESTIONS>>>\n["Could you elaborate on that?", "What other factors are relevant?", "Can you clarify the details?"]'})
         else:
             valid_history.append({"role": msg.role, "content": msg.content})
     history = valid_history
@@ -1134,8 +1136,13 @@ def add_chat_message(
 
         if is_workspace_analysis:
             intent = "Research / Deep Analysis"
-        else:
+        elif intent != "UPLOADED_DOCUMENT":
             intent = precomputed_general_intent
+
+        if document_ids and intent in ["Greeting", "Small Talk", "Simple Question"]:
+            intent = "Other"
+            
+        print(f"DEBUG_INTENT: final_intent={intent}, doc_ids={document_ids}", flush=True)
 
         exec_result = "Success" if has_data else "Empty" if mcp_executed else "Skipped"
         rows_returned = "N/A"
@@ -1465,6 +1472,7 @@ def add_chat_message(
                 "source_documents": source_documents,
                 "citations": citations,
                 "source_attribution": source_attribution,
+                "follow_up_questions": follow_up_questions,
                 "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
                 "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
             }
