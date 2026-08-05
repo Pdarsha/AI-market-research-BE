@@ -356,8 +356,11 @@ class RAGService:
                     questions = [
                         str(q).strip() for q in parsed if str(q).strip()
                     ]
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse follow-up questions JSON: {e}")
                 questions = []
+        else:
+            logger.warning("No JSON array found in follow-up block")
 
         return answer.strip(), questions[:4]
 

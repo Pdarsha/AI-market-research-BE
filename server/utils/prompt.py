@@ -249,7 +249,7 @@ Hallucination Prevention:
 
     if financial_news_context:
         response_format_rules = """
-- You MUST format your response EXACTLY according to the following structure. Do not include any introductory sentences or conversational filler before the "## Overall Sentiment" header. Every summarized point must contain at least one source citation marker [n] mapping back to its source article.
+- You MUST format your response using the following structure, followed by any requested follow-up blocks. Do not include any introductory sentences or conversational filler before the "## Overall Sentiment" header. Every summarized point must contain at least one source citation marker [n] mapping back to its source article.
 
 ## Overall Sentiment
 
