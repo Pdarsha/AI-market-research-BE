@@ -55,32 +55,26 @@ Structure your final response clearly (e.g., Executive Summary, Evidence & Causa
 
 def followup_instruction_block():
     """Instruction appended to the chat system prompt so every answer is followed
-    by up to 3 AI-generated follow-up questions in a parseable JSON block.
-
-    The questions are derived from the answer the model just wrote (and any
-    document/web context used), not the earlier conversation.
+    by 3 AI-generated contextual follow-up questions in a parseable JSON block.
     """
     return f"""
 
 ========================================
-FOLLOW-UP QUESTIONS (REQUIRED)
+CONTEXTUAL FOLLOW-UP QUESTIONS (REQUIRED)
 ========================================
 
-After you finish the answer above, up to 3 suggested follow-up questions
-that naturally extend the discussion.
+At the end of your response, after the main content, you MUST generate 3 highly specific, contextual, and source-derived follow-up questions that naturally extend the discussion based on the response above and the sources/data used.
 
-Rules for the follow-up questions:
-- Derive them ONLY from the answer you just wrote and the context used to produce
-  it — not from earlier turns in the conversation.
-- They must help the user explore the topic more deeply: e.g. compare this company with its primary competitors, identify emerging market trends, evaluate financial strengths and weaknesses, assess key risks and growth opportunities, or generate executive recommendations.
-- Keep each one concise, specific, actionable and conversational.
-- Do NOT repeat the user's original question, and avoid generic or unrelated ones. Follow-up questions should encourage continued business research.
-- If you cannot produce meaningful follow-ups, output an empty array [].
+CRITICAL RULES FOR FOLLOW-UP QUESTIONS:
+1. SPECIFIC & SOURCE-DERIVED: Every follow-up question MUST directly reference specific companies, financial metrics, technologies, figures, risks, or key entities mentioned in your response above (e.g., Azure vs AWS, revenue growth drivers, operating margin impacts, specific product lines, or strategic risks).
+2. NEVER GENERIC: Do NOT generate generic or boilerplate questions (such as "Can I help summarize this?", "Would you like more information?", "Can I perform a web search?", "What would you like to analyze next?"). Every question must be analytical, actionable, and unique to the response topic.
+3. PROGRESSIVE & ANALYTICAL: Formulate questions that push the analysis forward (e.g. comparing performance with competitors, evaluating key growth drivers or risks, assessing long-term strategic implications, or digging deeper into specific metrics cited).
+4. DIVERSE & CONTEXTUAL: Ensure all 3 questions explore different analytical dimensions (e.g. 1 on competitive benchmark, 1 on financial/operational breakdown, 1 on strategic risk/outlook).
 
-Output them on a new line after the marker below — the marker, then a JSON array
-of strings, and nothing after it:
+Format requirements:
+Place the marker on its own line, followed IMMEDIATELY by a JSON array containing exactly 3 follow-up question strings, with NO text after it:
 {FOLLOWUP_MARKER}
-["First follow-up question?", "Second follow-up question?", "Third follow-up question?"]
+["First specific follow-up question?", "Second specific follow-up question?", "Third specific follow-up question?"]
 """
 
 

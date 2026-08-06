@@ -333,14 +333,89 @@ class RAGService:
         return messages
 
     @staticmethod
-    def split_answer_and_followups(text: str) -> tuple[str, list[str]]:
+    def generate_contextual_followups(answer: str, question: str = "") -> list[str]:
+        """Generate high-quality, contextual, source-derived follow-up questions.
+
+        Extracts entities, company names, financial terms, and core topics from the AI answer
+        and question to generate specific, actionable, and non-generic follow-up questions.
+        """
+        combined = (answer or "") + " " + (question or "")
+        if not combined.strip():
+            return [
+                "What specific metrics or topics would you like to analyze next?",
+                "How does this performance compare to key industry competitors?",
+                "What are the primary strategic risks and growth opportunities expected next?"
+            ]
+
+        # Extract company names / key proper nouns
+        companies = list(dict.fromkeys(re.findall(
+            r"\b(Microsoft|Azure|AWS|Amazon|Google|GCP|Alphabet|Apple|Tesla|Nvidia|Meta|Facebook|Netflix|AMD|Intel|Salesforce|Oracle|IBM|GlobalTech)\b",
+            combined,
+            re.IGNORECASE
+        )))
+        
+        # Normalize company capitalization
+        companies = [c.capitalize() if c.lower() not in ("aws", "gcp") else c.upper() for c in companies]
+        companies = list(dict.fromkeys(companies))
+
+        # Extract financial terms / metrics
+        has_revenue = any(w in combined.lower() for w in ["revenue", "sales", "top-line", "earnings"])
+        has_margin = any(w in combined.lower() for w in ["margin", "profit", "ebitda", "income", "bottom-line"])
+        has_cloud = any(w in combined.lower() for w in ["cloud", "azure", "aws", "gcp", "saas", "ai"])
+        has_growth = any(w in combined.lower() for w in ["growth", "increase", "quarter", "yoy", "qoq"])
+
+        # Nouns for general fallback
+        nouns = list(dict.fromkeys(re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", answer)))
+        ignored_words = {"The", "This", "That", "These", "Those", "There", "Here", "With", "From", "Quarter", "Year", "Total", "Net", "Gross", "Company", "Report", "Result", "Table", "Notes", "Section", "Operating", "Income", "Revenue", "Market", "Growth"}
+        topic_words = [n for n in nouns if n not in ignored_words]
+
+        primary_entity = companies[0] if companies else (topic_words[0] if topic_words else "")
+        secondary_entity = companies[1] if len(companies) > 1 else ("its primary competitors" if primary_entity else "industry peers")
+
+        followups = []
+
+        # 1. Competitive / Benchmark Question
+        if has_cloud or "azure" in combined.lower() or "aws" in combined.lower() or "gcp" in combined.lower():
+            p_name = primary_entity if primary_entity else "Azure"
+            followups.append(f"How did {p_name}'s cloud growth compare to {secondary_entity} this quarter?")
+        elif primary_entity:
+            followups.append(f"How does {primary_entity}'s performance compare to {secondary_entity}?")
+        else:
+            followups.append("How does this performance compare to key industry competitors?")
+
+        # 2. Segment / Metric Breakdown Question
+        if primary_entity:
+            if has_revenue and has_margin:
+                followups.append(f"Which business segments contributed most to {primary_entity}'s revenue and profit margins?")
+            elif has_revenue or has_growth:
+                followups.append(f"What were the primary revenue drivers and segment growth rates for {primary_entity}?")
+            else:
+                followups.append(f"Which specific business segments contributed most to {primary_entity}'s growth?")
+        else:
+            if has_revenue:
+                followups.append("Which business segments contributed most to the overall revenue growth?")
+            else:
+                followups.append("What are the primary operational drivers behind these results?")
+
+        # 3. Strategic / Investment / Risk Question
+        if "ai" in combined.lower() or has_cloud:
+            p_name = primary_entity if primary_entity else "the company"
+            followups.append(f"What were {p_name}'s key AI investments and capital expenditures during this period?")
+        elif primary_entity:
+            followups.append(f"What key operating risks or cost pressures could impact {primary_entity}'s future outlook?")
+        else:
+            followups.append("What key strategic risks, cost pressures, or growth opportunities should be evaluated next?")
+
+        return followups[:3]
+
+    @staticmethod
+    def split_answer_and_followups(text: str, question: str = "") -> tuple[str, list[str]]:
         """Split a raw generation into ``(answer, follow_up_questions)``.
 
         The model is instructed to append ``FOLLOWUP_MARKER`` followed by a JSON
         array of questions. This strips that block from the answer and parses the
-        questions. If the marker is missing or unparseable, smart fallback follow-up
-        questions are generated to ensure every response consistently includes
-        actionable follow-up options.
+        questions. Filters out generic boilerplate questions and backfills with
+        source-derived, entity-specific contextual follow-up questions.
         """
         if not text:
             return "", []
@@ -387,25 +462,32 @@ class RAGService:
         for q in questions:
             if q and q not in unique_questions:
                 unique_questions.append(q)
-        questions = unique_questions
 
-        # Fallback if model omitted follow-up block or generated no parseable questions
-        if not questions:
-            lower_ans = answer.lower()
-            if any(phrase in lower_ans for phrase in ["not contain", "don't have", "no information", "doesn't provide", "does not state"]):
-                questions = [
-                    "What specific details or metrics would you like to analyze from the available information?",
-                    "Can I help you summarize the key findings or data present in this context?",
-                    "Would you like me to perform a web search to find additional external data on this topic?"
-                ]
-            else:
-                questions = [
-                    "Would you like more details or specific examples on any part of this summary?",
-                    "How does this compare to industry benchmarks or alternative approaches?",
-                    "What key risks, trade-offs, or next steps should we evaluate?"
-                ]
+        # Filter out generic or repetitive questions
+        def is_generic(q: str) -> bool:
+            ql = q.lower()
+            generic_triggers = [
+                "can i help",
+                "would you like more information",
+                "can i perform a web search",
+                "what would you like to analyze next",
+                "would you like more details",
+                "can i help summarize",
+                "is there anything else",
+                "would you like me to",
+            ]
+            return any(gt in ql for gt in generic_triggers)
 
-        return answer.strip(), questions[:4]
+        valid_questions = [q for q in unique_questions if not is_generic(q)]
+
+        # If model omitted follow-up block or generated generic questions, backfill with source-derived follow-ups
+        if len(valid_questions) < 2:
+            ctx_followups = RAGService.generate_contextual_followups(answer, question=question)
+            for f in ctx_followups:
+                if f not in valid_questions:
+                    valid_questions.append(f)
+
+        return answer.strip(), valid_questions[:3]
 
     @staticmethod
     def source_file_names(chunks: list[DocumentChunk]) -> list[str]:
