@@ -207,6 +207,7 @@ def public_chat_session(
             ),
             "citations": msg.citations,
             "source_attribution": source_attribution_from_citations(msg.citations),
+            "follow_up_questions": [],
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
         for msg in conversation
@@ -314,6 +315,7 @@ def get_chat_session(
                 ),
                 "citations": msg.citations,
                 "source_attribution": source_attribution_from_citations(msg.citations),
+                "follow_up_questions": [],
                 "created_at": msg.created_at.isoformat() if msg.created_at else None,
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }
