@@ -23,7 +23,6 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from server import crud
 from server.api_v1.deps import get_db
-from server.models.workspace import DocumentChunk
 from server.schemas.documents import ConversationExportRequest
 from server.services.pdf_export_service import conversation_to_pdf
 from server.services.roic_ai_mcp import roic_ai
@@ -38,6 +37,8 @@ from server.utils.helpers import (
     signed_file_url,
 )
 from server.utils.signed_url import verify_document_token
+from server.services.audit_logger import AuditLogger
+import fitz
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +340,13 @@ def export_conversation_pdf(
     except Exception as exc:  # pragma: no cover - layout engine failure
         raise HTTPException(status_code=500, detail="PDF generation failed") from exc
 
-    from server.services.audit_logger import AuditLogger
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_links = 0
+    uri_links = 0
+    for page in doc:
+        links = page.get_links()
+        total_links += len(links)
+        uri_links += len([l for l in links if l.get("kind") == fitz.LINK_URI])
 
     AuditLogger.log(
         action="DOCUMENT_EXPORT",
@@ -347,7 +354,14 @@ def export_conversation_pdf(
         endpoint="/v1/documents/export-pdf",
         http_method="POST",
         status="200",
-        metadata={"title": title, "messages_count": len(payload.messages)},
+        metadata={
+            "title": title,
+            "messages_count": len(payload.messages),
+            "pdf_size_bytes": len(pdf_bytes),
+            "has_hyperlinks": uri_links > 0,
+            "uri_links_count": uri_links,
+            "total_links_count": total_links,
+        },
     )
 
     return Response(
