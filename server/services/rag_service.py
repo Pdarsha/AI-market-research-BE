@@ -324,7 +324,7 @@ class RAGService:
         else:
             system_prompt = ai_assistent(intent=intent)
 
-        if intent not in ["Greeting", "Small Talk", "Simple Question"]:
+        if intent not in ["Greeting", "Small Talk"]:
             system_prompt += followup_instruction_block()
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -338,29 +338,72 @@ class RAGService:
 
         The model is instructed to append ``FOLLOWUP_MARKER`` followed by a JSON
         array of questions. This strips that block from the answer and parses the
-        questions. If the marker is missing or the block is unparseable, the full
-        text is returned as the answer with an empty follow-up list — never
-        placeholder text.
+        questions. If the marker is missing or unparseable, smart fallback follow-up
+        questions are generated to ensure every response consistently includes
+        actionable follow-up options.
         """
-        if not text or FOLLOWUP_MARKER not in text:
-            return (text or "").strip(), []
+        if not text:
+            return "", []
 
-        answer, _, tail = text.partition(FOLLOWUP_MARKER)
+        # 1. Search for primary marker or alternate marker variations
+        marker_match = re.search(
+            r"(?:<{2,4}\s*FOLLOW[_-]?UP[_-]?QUESTIONS?\s*>{2,4}|\[FOLLOW[_-]?UP[_-]?QUESTIONS?\]|###?\s*Follow[_-]?up\s*Questions?:?|\*\*Follow[_-]?up\s*Questions?:?\*\*)",
+            text,
+            re.IGNORECASE,
+        )
 
+        answer = text
+        tail = ""
         questions: list[str] = []
-        match = re.search(r"\[.*\]", tail, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-                if isinstance(parsed, list):
-                    questions = [
-                        str(q).strip() for q in parsed if str(q).strip()
-                    ]
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Failed to parse follow-up questions JSON: {e}")
-                questions = []
+
+        if marker_match:
+            answer = text[:marker_match.start()].strip()
+            tail = text[marker_match.end():].strip()
+            # Try to parse JSON array from tail
+            match = re.search(r"\[.*\]", tail, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                    if isinstance(parsed, list):
+                        questions = [
+                            str(q).strip() for q in parsed if str(q).strip()
+                        ]
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to parse follow-up questions JSON: {e}")
         else:
-            logger.warning("No JSON array found in follow-up block")
+            # Check if there is a trailing JSON array at the end of text
+            match = re.search(r"\[\s*\"[^\"]+\"\s*(?:,\s*\"[^\"]+\"\s*)*\]$", text.strip(), re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                    if isinstance(parsed, list):
+                        questions = [str(q).strip() for q in parsed if str(q).strip()]
+                        answer = text[:match.start()].strip()
+                except Exception:
+                    pass
+
+        # De-duplicate while preserving order
+        unique_questions: list[str] = []
+        for q in questions:
+            if q and q not in unique_questions:
+                unique_questions.append(q)
+        questions = unique_questions
+
+        # Fallback if model omitted follow-up block or generated no parseable questions
+        if not questions:
+            lower_ans = answer.lower()
+            if any(phrase in lower_ans for phrase in ["not contain", "don't have", "no information", "doesn't provide", "does not state"]):
+                questions = [
+                    "What specific details or metrics would you like to analyze from the available information?",
+                    "Can I help you summarize the key findings or data present in this context?",
+                    "Would you like me to perform a web search to find additional external data on this topic?"
+                ]
+            else:
+                questions = [
+                    "Would you like more details or specific examples on any part of this summary?",
+                    "How does this compare to industry benchmarks or alternative approaches?",
+                    "What key risks, trade-offs, or next steps should we evaluate?"
+                ]
 
         return answer.strip(), questions[:4]
 
