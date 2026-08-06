@@ -49,6 +49,7 @@ class DocumentTakeawayGridRow(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     grid = relationship("DocumentTakeawayGrid", back_populates="rows")
+    document = relationship("Document", foreign_keys=[document_id])
     cells = relationship("DocumentTakeawayGridCell", back_populates="row", cascade="all, delete-orphan")
 
     __table_args__ = (

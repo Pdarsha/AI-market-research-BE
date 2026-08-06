@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 
 from server.crud.base import CRUDBase
 from server.schemas.document_takeaways import (
@@ -23,6 +23,11 @@ class CRUDDocumentTakeaways(
     def get_grid(self, db: Session, grid_id: str) -> Optional[DocumentTakeawayGrid]:
         return (
             db.query(DocumentTakeawayGrid)
+            .options(
+                selectinload(DocumentTakeawayGrid.columns),
+                selectinload(DocumentTakeawayGrid.rows).selectinload(DocumentTakeawayGridRow.cells),
+                selectinload(DocumentTakeawayGrid.rows).joinedload(DocumentTakeawayGridRow.document),
+            )
             .filter(DocumentTakeawayGrid.id == grid_id)
             .first()
         )
@@ -32,6 +37,11 @@ class CRUDDocumentTakeaways(
     ) -> Optional[DocumentTakeawayGrid]:
         return (
             db.query(DocumentTakeawayGrid)
+            .options(
+                selectinload(DocumentTakeawayGrid.columns),
+                selectinload(DocumentTakeawayGrid.rows).selectinload(DocumentTakeawayGridRow.cells),
+                selectinload(DocumentTakeawayGrid.rows).joinedload(DocumentTakeawayGridRow.document),
+            )
             .filter(DocumentTakeawayGrid.workspace_id == workspace_id)
             .order_by(DocumentTakeawayGrid.created_at.desc())
             .first()
@@ -42,6 +52,11 @@ class CRUDDocumentTakeaways(
     ) -> list[DocumentTakeawayGrid]:
         return (
             db.query(DocumentTakeawayGrid)
+            .options(
+                selectinload(DocumentTakeawayGrid.columns),
+                selectinload(DocumentTakeawayGrid.rows).selectinload(DocumentTakeawayGridRow.cells),
+                selectinload(DocumentTakeawayGrid.rows).joinedload(DocumentTakeawayGridRow.document),
+            )
             .filter(DocumentTakeawayGrid.workspace_id == workspace_id)
             .order_by(DocumentTakeawayGrid.created_at.desc())
             .all()

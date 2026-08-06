@@ -189,6 +189,16 @@ class DocumentTakeawaysService:
             if doc_id not in valid_doc_ids:
                 raise ValueError(f"Document {doc_id} not found in workspace")
 
+        # Prevent duplicate grid creation from rapid consecutive clicks
+        recent_grid = crud_document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
+        if recent_grid and getattr(recent_grid, "created_by", None) == user_id:
+            created_time = recent_grid.created_at.replace(tzinfo=None) if recent_grid.created_at else None
+            if created_time and (datetime.utcnow() - created_time).total_seconds() < 5:
+                grid_doc_ids = [str(r.document_id) for r in recent_grid.rows]
+                if set(grid_doc_ids) == set(unique_doc_ids):
+                    logger.info(f"Reusing recent grid {recent_grid.id} to prevent duplicate creation")
+                    return recent_grid
+
         grid = crud_document_takeaways.create_grid(db, workspace_id, name, user_id)
         logger.info(f"Grid created: {grid.id} for workspace: {workspace_id}")
 
@@ -422,6 +432,72 @@ class DocumentTakeawaysService:
         crud_document_takeaways.update_grid_status(db, new_grid.id)
         db.refresh(new_grid)
         return new_grid
+
+    def serialize_grid(self, grid: DocumentTakeawayGrid, db: Session = None) -> dict:
+        rows_data = []
+        for row in grid.rows:
+            doc = getattr(row, "document", None)
+            if not doc and db:
+                doc = crud_document.get(db, row.document_id)
+            if not doc:
+                continue
+
+            cells_data = []
+            for cell in row.cells:
+                cells_data.append(
+                    {
+                        "id": cell.id,
+                        "grid_column_id": cell.grid_column_id,
+                        "value": cell.value,
+                        "status": cell.status,
+                        "error_message": cell.error_message,
+                    }
+                )
+
+            rows_data.append(
+                {
+                    "id": row.id,
+                    "document": {
+                        "id": doc.id,
+                        "name": doc.file_name,
+                        "file_type": doc.file_format or "unknown",
+                    },
+                    "cells": cells_data,
+                }
+            )
+
+        return {
+            "id": grid.id,
+            "workspace_id": grid.workspace_id,
+            "name": grid.name,
+            "status": grid.status,
+            "columns": [
+                {
+                    "id": col.id,
+                    "name": col.name,
+                    "type": col.column_type,
+                    "display_order": col.display_order,
+                }
+                for col in grid.columns
+            ],
+            "rows": rows_data,
+        }
+
+    _grid_cache: dict = {}
+
+    def get_cached_serialized_grid(self, grid: DocumentTakeawayGrid, db: Session = None) -> dict:
+        if grid and grid.status in ["completed", "completed_with_errors"]:
+            cache_key = (grid.id, str(grid.updated_at))
+            if cache_key in self._grid_cache:
+                return self._grid_cache[cache_key]
+
+            payload = self.serialize_grid(grid, db)
+            if len(self._grid_cache) >= 64:
+                self._grid_cache.pop(next(iter(self._grid_cache)))
+            self._grid_cache[cache_key] = payload
+            return payload
+
+        return self.serialize_grid(grid, db)
 
 
 document_takeaways_service = DocumentTakeawaysService()

@@ -4,7 +4,7 @@ import mimetypes
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 import json
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAI
@@ -14,6 +14,7 @@ from server.api_v1.deps import get_db
 from server.config import settings, WORKSPACE_DOCS_DIR
 from server.services.citation_service import get_citation_service
 from server.services.rag_service import get_rag_service, ThinkLongerUnavailable
+from server.services.document_takeaways_service import document_takeaways_service
 from datetime import datetime, time, timezone
 from server.services.audit_logger import AuditLogger
 from server.utils.auth import get_current_user
@@ -400,9 +401,13 @@ def update_chat_title(
 def add_chat_message(
     chat_id: str,
     request: schemas.ChatMessageRequest,
+    background_tasks: BackgroundTasks,
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    if request.document_ids is not None and len(request.document_ids) == 0:
+        raise HTTPException(status_code=400, detail="document_ids list cannot be empty")
+
     session = resolve_or_create_session(
         db,
         chat_id=chat_id,
@@ -447,6 +452,156 @@ def add_chat_message(
         document_ids, context_reason = resolve_active_document_ids(
             prior_messages, request.document_ids
         )
+
+    unique_doc_ids = list(dict.fromkeys(document_ids or []))
+    should_create_grid = False
+    if len(unique_doc_ids) > 1:
+        if request.create_grid is True or getattr(request, "action", None) == "analyze":
+            should_create_grid = True
+        elif getattr(request, "create_grid", None) is not False and getattr(request, "action", None) != "chat":
+            lower_content = request.content.strip().lower()
+            if lower_content.startswith((
+                "analyze the selected document",
+                "analyze the selected documents",
+                "analyze selected document",
+                "analyze selected documents",
+            )):
+                should_create_grid = True
+
+    if should_create_grid:
+        ws_id = session.workspace_id or request.workspace_id
+        if not ws_id and unique_doc_ids:
+            doc_rec = crud.document.get(db, unique_doc_ids[0])
+            if doc_rec:
+                ws_id = doc_rec.workspace_id
+
+        if not ws_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Workspace ID required for multi-document analysis",
+            )
+
+        valid_docs = crud.document.get_multi_by_workspace(db, workspace_id=ws_id)
+        valid_doc_ids = {str(d.id) for d in valid_docs}
+        for d_id in unique_doc_ids:
+            if d_id not in valid_doc_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Document {d_id} not found in workspace",
+                )
+
+        if background_tasks is None:
+            background_tasks = BackgroundTasks()
+
+        try:
+            grid = document_takeaways_service.create_grid(
+                db=db,
+                background_tasks=background_tasks,
+                workspace_id=ws_id,
+                name="Document Analysis Grid",
+                document_ids=unique_doc_ids,
+                user_id=str(current_user.id),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        grid_data = document_takeaways_service.serialize_grid(grid, db)
+
+        stored_content = request.content
+        user_message = crud.chat_message.create(
+            db=db,
+            obj_in=schemas.ChatMessageCreate(
+                chat_id=chat_id,
+                content=stored_content,
+                role="user",
+                user_id=str(current_user.id),
+                workspace_id=ws_id,
+                document_ids=unique_doc_ids,
+            ),
+        )
+
+        ai_response = f"Analysis Grid created for {len(unique_doc_ids)} documents."
+        assistant_message = crud.chat_message.create(
+            db=db,
+            obj_in=schemas.ChatMessageCreate(
+                chat_id=chat_id,
+                content=ai_response,
+                role="assistant",
+                user_id=str(current_user.id),
+                workspace_id=ws_id,
+                document_ids=unique_doc_ids,
+                mode_used=getattr(request, "mode", "auto"),
+            ),
+        )
+
+        message_obj = {
+            "id": assistant_message.id,
+            "chat_id": assistant_message.chat_id,
+            "role": assistant_message.role,
+            "content": assistant_message.content,
+            "workspace_id": assistant_message.workspace_id,
+            "document_ids": assistant_message.document_ids,
+            "uploaded_document_ids": (
+                unique_doc_ids if context_reason == "new_upload" else []
+            ),
+            "attachments": [],
+            "source_documents": [
+                d.file_name
+                for d in valid_docs
+                if str(d.id) in unique_doc_ids and d.file_name
+            ],
+            "citations": [],
+            "source_attribution": {},
+            "follow_up_questions": [],
+            "created_at": (
+                assistant_message.created_at.isoformat()
+                if assistant_message.created_at
+                else None
+            ),
+            "updated_at": (
+                assistant_message.updated_at.isoformat()
+                if assistant_message.updated_at
+                else None
+            ),
+        }
+
+        final_data = {
+            "success": True,
+            "error": None,
+            "data": {
+                "chat_session_id": chat_id,
+                "user_message_id": user_message.id,
+                "assistant_message_id": assistant_message.id,
+                "response": ai_response,
+                "document_ids": unique_doc_ids,
+                "active_document_ids": unique_doc_ids,
+                "mode_used": getattr(request, "mode", "auto"),
+                "is_grid": True,
+                "grid": grid_data,
+                "used_documents": True,
+                "used_web_search": False,
+                "source_documents": [
+                    d.file_name
+                    for d in valid_docs
+                    if str(d.id) in unique_doc_ids and d.file_name
+                ],
+                "citations": [],
+                "source_attribution": {},
+                "web_sources": None,
+                "financial_news": None,
+                "sec_company_facts": None,
+                "roic_ai": None,
+                "companies_house": None,
+                "follow_up_questions": [],
+                "message": message_obj,
+            },
+            "message": "Analysis Grid created successfully for selected documents.",
+        }
+
+        def grid_event_stream():
+            yield f"data: {json.dumps({'type': 'complete', 'data': final_data})}\n\n"
+
+        return StreamingResponse(grid_event_stream(), media_type="text/event-stream")
 
     logger.info(
         "chat.message: chat=%s context=%s active_docs=%s requested=%s",

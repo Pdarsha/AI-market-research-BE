@@ -54,6 +54,8 @@ class ChatMessageRequest(BaseModel):
     workspace_id: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[Literal["auto", "think_longer", "deep_research"]] = "auto"
+    create_grid: Optional[bool] = None
+    action: Optional[Literal["chat", "analyze"]] = "chat"
 
 
 class CitationMetadata(BaseModel):
