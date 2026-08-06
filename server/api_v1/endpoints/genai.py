@@ -1559,7 +1559,7 @@ def add_chat_message(
                     f"----------------------------\n"
                 )
 
-                ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response_str)
+                ai_response, follow_up_questions = rag.split_answer_and_followups(raw_response_str, question=request.content)
 
                 retrieved_chunks_count = len(retrieved_chunks) if retrieved_chunks else 0
                 cited_sources: list = list(retrieved_chunks or [])

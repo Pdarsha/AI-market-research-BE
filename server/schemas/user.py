@@ -53,6 +53,7 @@ class User(BaseModel):
 class UserCreateInput(BaseModel):
     email: EmailStr
     password: str
+    display_name: Optional[str] = None
 
 
 class VerifyOTP(BaseModel):
@@ -89,6 +90,8 @@ class UserProfile(BaseModel):
     email: Optional[EmailStr] = None
     avatar: Optional[str] = None
     role: Optional[str] = None
+    display_name: Optional[str] = None
+    username: Optional[str] = None
 
 
 class ChangePassword(BaseModel):

@@ -50,11 +50,12 @@ def build_login_response(
         data={"sub": user.email, "id": user.id}, expires_delta=refresh_expires
     )
 
+    disp_name = user.display_name or getattr(user, 'username', None) or user.email.split('@')[0]
     response = schemas.RespUser(
         id=user.id,
         email=user.email,
         avatar=user.avatar,
-        display_name=user.display_name,
+        display_name=disp_name,
         is_verified=user.is_verified,
         providers=user.providers,
         role=user.role,
@@ -127,7 +128,8 @@ async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(ge
         )
 
     google_id = idinfo.get("sub")
-    display_name = idinfo.get("name")
+    google_name = idinfo.get("name") or idinfo.get("given_name")
+    fallback_name = google_name or (email.split("@")[0] if email else "")
     picture = idinfo.get("picture")
 
     # Match an existing account by email (unique) — this also links Google to a
@@ -141,8 +143,8 @@ async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(ge
         updates = {}
         if google_id and not user.google_id:
             updates["google_id"] = google_id
-        if display_name and not user.display_name:
-            updates["display_name"] = display_name
+        if not user.display_name:
+            updates["display_name"] = fallback_name or getattr(user, 'username', None) or email.split("@")[0]
         if picture and not user.avatar:
             updates["avatar"] = picture
         if not user.is_verified:
@@ -158,7 +160,7 @@ async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(ge
             obj_in=schemas.UserBase(
                 email=email,
                 google_id=google_id,
-                display_name=display_name,
+                display_name=fallback_name,
                 avatar=picture or "",
                 is_verified=True,
                 providers="google",
@@ -174,11 +176,15 @@ async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(ge
 
 @user_router.post("/profile", response_model=schemas.UserProfile)
 async def get_profile(current_user=Depends(get_current_user)):
+    disp_name = current_user.display_name or getattr(current_user, 'username', None) or current_user.email.split('@')[0]
+    uname = getattr(current_user, 'username', None) or current_user.email.split('@')[0]
     response = schemas.UserProfile(
         id=current_user.id,
         email=current_user.email,
         avatar=current_user.avatar,
         role=current_user.role,
+        display_name=disp_name,
+        username=uname,
     )
     logger.info("get_profile: user_id=%s", getattr(current_user, "id", None))
     from server.services.audit_logger import AuditLogger
@@ -217,9 +223,14 @@ async def sign_up(data: schemas.UserCreateInput, db: Session = Depends(get_db)):
 
     else:
         hashed_password = get_password_hash(data.password)
+        disp_name = data.display_name
         user = crud.user.create(
             db,
-            obj_in=schemas.UserBase(email=data.email, hashed_password=hashed_password),
+            obj_in=schemas.UserBase(
+                email=data.email,
+                hashed_password=hashed_password,
+                display_name=disp_name,
+            ),
         )
         logger.info("signup created: user_id=%s email=%s", user.id, email)
 
