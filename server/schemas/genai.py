@@ -61,6 +61,7 @@ class ChatMessageRequest(BaseModel):
 class CitationMetadata(BaseModel):
     """Provider-neutral citation schema; legacy fields remain optional."""
     id: str
+    citation_id: Optional[str] = None
     type: Optional[str] = None
     provider: Optional[str] = None
     description: Optional[str] = None
@@ -80,6 +81,8 @@ class CitationMetadata(BaseModel):
     start_offset: Optional[int] = None
     end_offset: Optional[int] = None
     title: Optional[str] = None
+    source_title: Optional[str] = None
+    display_label: Optional[str] = None
     source_type: Optional[str] = None
     source_name: Optional[str] = None
     url: Optional[str] = None
@@ -87,6 +90,7 @@ class CitationMetadata(BaseModel):
     excerpt: Optional[str] = None
     section: Optional[str] = None
     published_date: Optional[str] = None
+    date: Optional[str] = None
     ticker: Optional[str] = None
 
     class Config:

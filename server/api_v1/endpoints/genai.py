@@ -407,9 +407,6 @@ def add_chat_message(
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    if request.document_ids is not None and len(request.document_ids) == 0:
-        raise HTTPException(status_code=400, detail="document_ids list cannot be empty")
-
     session = resolve_or_create_session(
         db,
         chat_id=chat_id,
@@ -426,7 +423,7 @@ def add_chat_message(
             if i + 1 < len(prior_messages) and prior_messages[i + 1].role == "assistant":
                 valid_history.append({"role": msg.role, "content": msg.content})
         elif msg.role == "assistant":
-            valid_history.append({"role": msg.role, "content": msg.content + '\n\n<<<FOLLOW_UP_QUESTIONS>>>\n["Could you elaborate on that?", "What other factors are relevant?", "Can you clarify the details?"]'})
+            valid_history.append({"role": msg.role, "content": msg.content})
         else:
             valid_history.append({"role": msg.role, "content": msg.content})
     history = valid_history
@@ -1169,6 +1166,25 @@ def add_chat_message(
             source_documents = document_sources_only(source_documents)
         used_rag = document_context is not None
 
+        # DEF-011: RAG Document Context Sufficiency & Automatic Web Search Fallback Check
+        if (is_document_intent or bool(document_ids)) and not requires_web:
+            is_sufficient = rag.check_document_context_sufficiency(
+                client,
+                question=optimized_prompt,
+                context=document_context,
+                model=settings.LLM_MODEL,
+            )
+            if not is_sufficient:
+                requires_web = True
+                fallback_triggered = True
+                fallback_reason = "Uploaded document context is missing or insufficient for user query."
+                logger.info(
+                    "AUTOMATIC WEB FALLBACK TRIGGERED (DEF-011):\n"
+                    f"Query: {optimized_prompt}\n"
+                    f"Document Context Present: {used_rag}\n"
+                    f"Reason: Document context insufficient or missing answer facts\n"
+                )
+
         if financial_news_response:
             financial_context, financial_sources = rag.build_financial_news_context(
                 financial_news_response, start_number=len(retrieved_chunks or []) + 1
@@ -1240,27 +1256,43 @@ def add_chat_message(
             has_data = True
         if companies_house_response and rag.has_useful_data(companies_house_response):
             has_data = True
-            
-        fallback_triggered = False
-        if mcp_executed and not has_data:
-            if sec_company_facts_response is not None:
-                # Per requirements, SEC EDGAR must not fallback to web search.
-                # It must use the generated sec_context to explicitly state no filing was found.
-                pass
+
+        mcp_contexts = [
+            c for c in [financial_context, sec_context, roic_context, companies_house_context]
+            if c and not c.startswith("SEC EDGAR data is unavailable") and "ROIC.ai Error" not in c
+        ]
+        combined_mcp_context = "\n\n".join(mcp_contexts) if mcp_contexts else ""
+
+        mcp_sufficient = True
+        if mcp_executed:
+            if not combined_mcp_context or not has_data:
+                mcp_sufficient = False
             else:
-                fallback_triggered = True
-                requires_web = True
-                fallback_reason = "Provider returned no usable business data."
-                selected_prov = "Alpha Vantage" if financial_news_response else "ROIC" if roic_response else "Companies House" if companies_house_response else "Unknown"
-                logger.info(
-                    f"Planner Selected:\n{selected_prov}\n\n"
-                    "Provider Response:\nEmpty\n\n"
-                    "Fallback Triggered:\nTrue\n\n"
-                    "Fallback Provider:\nWeb Search\n\n"
-                    f"Search Query:\n{optimized_prompt}\n\n"
-                    "Fallback Reason:\nProvider returned no usable business data."
+                mcp_sufficient = rag.check_finance_mcp_sufficiency(
+                    client,
+                    question=optimized_prompt,
+                    context=combined_mcp_context,
+                    model=settings.LLM_MODEL,
                 )
-                # Clear empty/error contexts and sources so they don't corrupt citation indices
+
+        fallback_triggered = False
+        if mcp_executed and not mcp_sufficient:
+            fallback_triggered = True
+            requires_web = True
+            fallback_reason = "Finance MCP data is missing requested metrics or insufficient for user query."
+            selected_prov = (
+                "Alpha Vantage" if financial_news_response else
+                "SEC EDGAR" if sec_company_facts_response else
+                "ROIC" if roic_response else
+                "Companies House" if companies_house_response else "Finance MCP"
+            )
+            logger.info(
+                f"AUTOMATIC WEB FALLBACK TRIGGERED (DEF-012):\n"
+                f"Planner Selected: {selected_prov}\n"
+                f"Query: {optimized_prompt}\n"
+                f"Reason: {fallback_reason}\n"
+            )
+            if not has_data:
                 financial_context = None
                 financial_sources = []
                 roic_context = None

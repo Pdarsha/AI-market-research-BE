@@ -51,12 +51,14 @@ class CitationData:
 
     def __init__(self, citation_id: int, *, source: DocumentChunk | dict):
         self.id = f"citation_{citation_id}"
+        self.citation_id = self.id
         raw = self._document_source(source) if not isinstance(source, dict) else dict(source)
-        self.source_type = raw.get("source_type") or raw.get("type") or "external"
+        self.source_type = raw.get("source_type") or raw.get("type") or ("document" if raw.get("document_id") else "external")
         self.type = raw.get("type") or ("document" if self.source_type == "document" else "external")
         self.url = raw.get("url") or raw.get("link") or raw.get("document_url") or raw.get("document_path")
         self.provider = raw.get("provider") or raw.get("source_type") or raw.get("publisher") or _host_of(self.url) or "unknown"
         self.title = raw.get("title") or raw.get("document_name") or self.url or "Untitled source"
+        self.source_title = self.title
         self.reference_index = citation_id
         self.description = raw.get("description") or raw.get("excerpt") or raw.get("snippet") or raw.get("highlight_text")
         self.document_id = raw.get("document_id")
@@ -65,17 +67,21 @@ class CitationData:
             if self.type == "document"
             else raw.get("chunk_id")
         )
-        self.document_url = raw.get("document_url") or raw.get("document_path")
+        self.document_url = raw.get("document_url") or raw.get("document_path") or (self.url if self.type == "document" else None)
         self.page = raw.get("page") if raw.get("page") is not None else raw.get("page_number")
+        self.page_number = self.page
         self.excerpt = raw.get("excerpt") or raw.get("snippet") or raw.get("highlight_text")
         self.section = raw.get("section") or raw.get("section_title")
-        self.published_date = raw.get("published_date") or raw.get("date")
+        self.published_date = raw.get("published_date") or raw.get("date") or raw.get("publishedAt") or raw.get("filing_date") or raw.get("created_at")
+        self.date = self.published_date
         self.ticker = raw.get("ticker")
         self.start_offset = raw.get("start_offset")
         self.end_offset = raw.get("end_offset")
+        self.display_label = self._compute_display_label()
         self.metadata = {
             **(raw.get("metadata") or {}),
             "openable": bool(self.url),
+            "display_label": self.display_label,
             **{
                 key: value
                 for key, value in raw.items()
@@ -85,6 +91,18 @@ class CitationData:
         }
         self.navigation_type, self.navigation_target, self.navigation_reason = self._navigation(raw)
         self.navigable = self.navigation_target is not None
+
+    def _compute_display_label(self) -> str:
+        """Produce a clean human-readable display label for citation chips."""
+        title = self.title or "Source"
+        if self.type == "document" or self.source_type == "document":
+            if self.page is not None:
+                return f"{title} (p. {self.page})"
+            return title
+        else:
+            if self.published_date:
+                return f"{title} ({self.published_date})"
+            return title
 
     def _navigation(self, raw: dict) -> tuple[str | None, str | None, str | None]:
         """Produce one validated navigation contract for all source providers."""
@@ -122,10 +140,13 @@ class CitationData:
         """Return the universal citation schema plus legacy frontend aliases."""
         return {
             "id": self.id,
+            "citation_id": self.citation_id,
             "reference_index": self.reference_index,
             "provider": self.provider,
             "type": self.type,
             "title": self.title,
+            "source_title": self.source_title,
+            "display_label": self.display_label,
             "description": self.description,
             "navigable": self.navigable,
             "navigation_type": self.navigation_type,
@@ -133,21 +154,22 @@ class CitationData:
             "navigation_reason": self.navigation_reason,
             "url": self.url,
             "metadata": self.metadata,
-            # Existing citation contract (deprecated aliases retained).
+            # Universal citation contract fields & aliases
             "source_type": self.source_type,
             "source_name": self.provider or _host_of(self.url),
             "document_id": self.document_id,
             "document_url": self.document_url,
             "page": self.page,
+            "page_number": self.page_number,
             "chunk_id": self.chunk_id,
             "excerpt": self.excerpt,
             "section": self.section,
             "published_date": self.published_date,
+            "date": self.date,
             "ticker": self.ticker,
             "start_offset": self.start_offset,
             "end_offset": self.end_offset,
             "document_name": self.title if self.type == "document" else None,
-            "page_number": self.page,
             "highlight_text": self.excerpt,
             "section_title": self.section,
         }
