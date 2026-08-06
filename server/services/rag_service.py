@@ -664,6 +664,120 @@ class RAGService:
             return False
 
     @staticmethod
+    def check_document_context_sufficiency(
+        client,
+        question: str,
+        context: str | None,
+        model: str,
+    ) -> bool:
+        """Check whether document context has sufficient information to answer question.
+
+        Returns False ONLY when document context is empty/missing, or when query explicitly
+        requires live external internet data / external competitor facts not in document.
+        Always prioritizes uploaded document responses whenever document chunks exist.
+        """
+        if not context or len(context.strip()) < 30:
+            return False
+
+        lowered_q = question.lower()
+        lowered_ctx = context.lower()
+
+        # Negative indicator check in context
+        insufficient_phrases = ["does not contain", "no information available", "not mentioned in the context"]
+        if any(p in lowered_ctx for p in insufficient_phrases):
+            return False
+
+        # Fast heuristic checks for live / real-time / external queries
+        live_keywords = [
+            "latest stock price", "current stock price", "market price today",
+            "recent acquisition", "current ceo", "latest news", "breaking news",
+            "today's news", "latest quarterly earnings"
+        ]
+        if any(kw in lowered_q for kw in live_keywords):
+            return False
+
+        # If document context is present and contains matching query terms, prioritize document (return True)
+        query_words = [w for w in re.findall(r"\w+", lowered_q) if len(w) > 3 and w not in {"what", "when", "where", "which", "with", "from", "that", "this", "have", "more", "does", "were", "total", "about"}]
+        if query_words and any(w in lowered_ctx for w in query_words):
+            return True
+
+        # Fallback LLM check for ambiguous cases
+        try:
+            prompt = (
+                "You are an AI context evaluator. Evaluate if the CONTEXT below contains relevant information to answer the QUESTION.\n"
+                "Respond YES if the CONTEXT has relevant details to answer the QUESTION.\n"
+                "Respond NO if the CONTEXT is completely unrelated or missing the facts.\n\n"
+                f"QUESTION:\n{question}\n\n"
+                f"CONTEXT:\n{context[:2500]}\n\n"
+                "ANSWER (YES or NO):"
+            )
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                **({"max_completion_tokens": 10} if "gpt-5" in model.lower() else {"max_tokens": 10}),
+                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+            )
+            ans = (completion.choices[0].message.content or "").strip().upper()
+            sufficient = ans.startswith("Y")
+            logger.info("rag.context_sufficiency: verdict=%s (raw=%r) for query: %s", sufficient, ans, question[:60])
+            return sufficient
+        except Exception as e:
+            logger.warning("rag.context_sufficiency check failed: %s; defaulting to True", e)
+            return True
+
+    @staticmethod
+    def check_finance_mcp_sufficiency(
+        client,
+        question: str,
+        context: str | None,
+        model: str,
+    ) -> bool:
+        """Check whether Finance MCP context has sufficient data to answer a financial query.
+
+        Returns False if MCP context is empty, partial, missing requested metrics, or fails
+        to cover multi-company comparisons, triggering automatic Web Search Fallback.
+        """
+        if not context or len(context.strip()) < 40:
+            return False
+
+        lowered_q = question.lower()
+
+        # Negative indicators in MCP context (e.g. error messages, empty results)
+        if any(err_kw in context.lower() for err_kw in ["unavailable", "no validated facts", "error", "no data found"]):
+            return False
+
+        # If query compares 2+ entities (e.g. Azure vs GCP, Microsoft vs Google, AWS vs Azure)
+        comparison_keywords = [" vs ", " vs. ", "compare", "growth rates of", "market share"]
+        if any(kw in lowered_q for kw in comparison_keywords):
+            if ("azure" in lowered_q or "microsoft" in lowered_q) and ("gcp" in lowered_q or "google" in lowered_q):
+                if "google" not in context.lower() and "gcp" not in context.lower():
+                    return False
+
+        # Fast LLM sufficiency evaluation
+        try:
+            prompt = (
+                "You are an AI financial data evaluator. Evaluate if the FINANCIAL CONTEXT below contains sufficient metrics and information to answer the QUESTION.\n"
+                "Respond YES if the CONTEXT has the requested financial metrics/figures to answer the question.\n"
+                "Respond NO if the CONTEXT is missing key metrics, lacks data for one of the requested companies/segments, or is insufficient.\n\n"
+                f"QUESTION:\n{question}\n\n"
+                f"FINANCIAL CONTEXT:\n{context[:3000]}\n\n"
+                "ANSWER (YES or NO):"
+            )
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                **({"max_completion_tokens": 10} if "gpt-5" in model.lower() else {"max_tokens": 10}),
+                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+            )
+            ans = (completion.choices[0].message.content or "").strip().upper()
+            sufficient = ans.startswith("Y")
+            logger.info("rag.finance_mcp_sufficiency: verdict=%s (raw=%r) for query: %s", sufficient, ans, question[:60])
+            return sufficient
+        except Exception as e:
+            logger.warning("rag.finance_mcp_sufficiency check failed: %s; defaulting to True", e)
+            return True
+
+    @staticmethod
     def classify_financial_news_ticker(
         client, question: str, model: str
     ) -> str | None:

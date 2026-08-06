@@ -121,26 +121,40 @@ def get_citation(
         metadata={"citation_id": citation_id},
     )
 
+    doc_url = signed_file_url(request, doc.id, str(current_user.id))
+    disp_label = f"{doc.file_name} (p. {page})" if page else doc.file_name
+
     return JSONResponse(
         status_code=200,
         content={
             "success": True,
             "error": None,
             "data": {
+                "id": citation_id,
                 "citation_id": citation_id,
+                "title": doc.file_name,
+                "source_title": doc.file_name,
+                "display_label": disp_label,
+                "source_type": "document",
+                "type": "document",
+                "published_date": meta["uploaded_at"],
+                "date": meta["uploaded_at"],
+                "url": doc_url,
+                "document_url": doc_url,
+                "page": page,
+                "page_number": page,
+                "chunk_id": chunk.id,
+                "document_id": doc.id,
                 "document": {
                     "id": doc.id,
                     "name": doc.file_name,
                     "type": doc.file_format,
                     "size": meta["file_size"],
                     "uploaded_at": meta["uploaded_at"],
-                    "url": signed_file_url(request, doc.id, str(current_user.id)),
+                    "url": doc_url,
                 },
-                "page": page,
                 "highlight_text": chunk.content,
                 "chunk_text": chunk.content,
-                "chunk_id": chunk.id,
-                "document_id": doc.id,
                 "workspace_id": doc.workspace_id,
                 "metadata": {
                     "author": meta["author"],
@@ -150,6 +164,7 @@ def get_citation(
                     "page_count": meta["page_count"],
                     "chunk_number": chunk.chunk_number,
                     "total_chunks": chunk.total_chunks,
+                    "display_label": disp_label,
                 },
             },
             "message": "Citation fetched successfully.",
