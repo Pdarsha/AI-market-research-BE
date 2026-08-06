@@ -572,7 +572,33 @@ def _extract_docx(content: bytes) -> str:
     paragraph (e.g. inside tables/headers) are OCR'd in a final pass so none are
     dropped. OCR is best-effort: one failed image never aborts the document.
     """
-    doc = DocxDocument(io.BytesIO(content))
+    try:
+        doc = DocxDocument(io.BytesIO(content))
+    except Exception as exc:
+        logger.warning(
+            "DOCX extraction via python-docx failed (%s); attempting fallback extractors",
+            exc,
+        )
+        try:
+            text = _extract_doc(content)
+            if text and text.strip():
+                logger.info("DOCX fallback: extracted %d chars via legacy .doc parser", len(text))
+                return text
+        except Exception:
+            pass
+
+        try:
+            if b"\x00" not in content[:1024]:
+                text = content.decode("utf-8", errors="strict")
+                if text and len(text.strip()) > 10:
+                    logger.info("DOCX fallback: extracted %d chars via UTF-8 plain text", len(text))
+                    return text
+        except Exception:
+            pass
+
+        raise ValueError(
+            "Could not read the .docx file. The file appears to be corrupted or is not a valid Word document."
+        ) from exc
 
     rid_to_blob: dict[str, bytes] = {}
     for rel_id, rel in doc.part.rels.items():
@@ -742,6 +768,15 @@ def _extract_doc(content: bytes) -> str:
         logger.info("DOC: olefile returned empty text; trying fallbacks")
     except Exception:
         logger.warning("DOC: olefile extraction failed; trying fallbacks", exc_info=True)
+
+    try:
+        doc = DocxDocument(io.BytesIO(content))
+        text = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+        if text and text.strip():
+            logger.info("DOC: extracted %d chars via python-docx fallback", len(text))
+            return text
+    except Exception:
+        pass
 
     try:
         text = _extract_doc_via_soffice(content)

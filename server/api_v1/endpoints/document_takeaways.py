@@ -1,5 +1,6 @@
 import logging
-
+import time
+from server.services.audit_logger import audit_context
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
@@ -27,52 +28,7 @@ global_takeaways_router = APIRouter(
 
 
 def serialize_grid(grid, db: Session):
-    rows_data = []
-    for row in grid.rows:
-        doc = crud_document.get(db, row.document_id)
-        if not doc:
-            continue
-
-        cells_data = []
-        for cell in row.cells:
-            cells_data.append(
-                {
-                    "id": cell.id,
-                    "grid_column_id": cell.grid_column_id,
-                    "value": cell.value,
-                    "status": cell.status,
-                    "error_message": cell.error_message,
-                }
-            )
-
-        rows_data.append(
-            {
-                "id": row.id,
-                "document": {
-                    "id": doc.id,
-                    "name": doc.file_name,
-                    "file_type": doc.file_format or "unknown",
-                },
-                "cells": cells_data,
-            }
-        )
-
-    return {
-        "id": grid.id,
-        "workspace_id": grid.workspace_id,
-        "name": grid.name,
-        "status": grid.status,
-        "columns": [
-            {
-                "id": col.id,
-                "name": col.name,
-                "type": col.column_type,
-                "display_order": col.display_order,
-            }
-            for col in grid.columns
-        ],
-        "rows": rows_data,
-    }
+    return document_takeaways_service.get_cached_serialized_grid(grid, db)
 
 
 @document_takeaways_router.post("/grids")
@@ -107,11 +63,37 @@ def get_grid(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    grid = crud_document_takeaways.get_grid(db, grid_id)
-    if not grid or grid.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Grid not found")
+    with audit_context(
+        action="FETCH_GRID_BY_ID",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/{workspace_id}/document-takeaways/grids/{grid_id}",
+        http_method="GET",
+        metadata={"grid_id": grid_id},
+    ) as meta:
+        t0 = time.perf_counter()
+        grid = crud_document_takeaways.get_grid(db, grid_id)
+        db_fetch_ms = round((time.perf_counter() - t0) * 1000, 2)
+        if not grid or grid.workspace_id != workspace_id:
+            raise HTTPException(status_code=404, detail="Grid not found")
 
-    return serialize_grid(grid, db)
+        t1 = time.perf_counter()
+        serialized = serialize_grid(grid, db)
+        serialization_ms = round((time.perf_counter() - t1) * 1000, 2)
+
+        meta.update(
+            {
+                "grid_id": grid.id,
+                "grid_status": grid.status,
+                "db_fetch_time_ms": db_fetch_ms,
+                "serialization_time_ms": serialization_ms,
+                "total_backend_time_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "rows_count": len(serialized.get("rows", [])),
+                "columns_count": len(serialized.get("columns", [])),
+            }
+        )
+
+        return serialized
 
 
 @document_takeaways_router.get("/grid")
@@ -120,10 +102,37 @@ def get_current_grid(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    grid = crud_document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
-    if not grid:
-        return None
-    return serialize_grid(grid, db)
+    with audit_context(
+        action="FETCH_CURRENT_GRID",
+        user_id=str(current_user.id),
+        workspace_id=workspace_id,
+        endpoint=f"/v1/workspaces/{workspace_id}/document-takeaways/grid",
+        http_method="GET",
+    ) as meta:
+        t0 = time.perf_counter()
+        grid = crud_document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
+        db_fetch_ms = round((time.perf_counter() - t0) * 1000, 2)
+        if not grid:
+            meta["grid_found"] = False
+            return None
+
+        t1 = time.perf_counter()
+        serialized = serialize_grid(grid, db)
+        serialization_ms = round((time.perf_counter() - t1) * 1000, 2)
+
+        meta.update(
+            {
+                "grid_id": grid.id,
+                "grid_status": grid.status,
+                "db_fetch_time_ms": db_fetch_ms,
+                "serialization_time_ms": serialization_ms,
+                "total_backend_time_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "rows_count": len(serialized.get("rows", [])),
+                "columns_count": len(serialized.get("columns", [])),
+            }
+        )
+
+        return serialized
 
 
 @document_takeaways_router.post("/grids/{grid_id}/columns")
