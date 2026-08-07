@@ -63,15 +63,14 @@ def followup_instruction_block():
 CONTEXTUAL FOLLOW-UP QUESTIONS (REQUIRED)
 ========================================
 
-At the end of your response, after the main content, you MUST generate 3 highly specific, contextual, and source-derived follow-up questions that naturally extend the discussion based on the response above and the sources/data used.
+At the end of your response, after the main content, you MUST generate 3 highly specific, contextual, and topic-derived follow-up questions that naturally extend the user's query and the answer above.
 
 CRITICAL RULES FOR FOLLOW-UP QUESTIONS:
-1. SPECIFIC & SOURCE-DERIVED: Every follow-up question MUST directly reference specific companies, financial metrics, technologies, figures, risks, or key entities mentioned in your response above (e.g., Azure vs AWS, revenue growth drivers, operating margin impacts, specific product lines, or strategic risks).
-2. NEVER GENERIC: Do NOT generate generic or boilerplate questions (such as "Can I help summarize this?", "Would you like more information?", "Can I perform a web search?", "What would you like to analyze next?"). Every question must be analytical, actionable, and unique to the response topic.
-3. PROGRESSIVE & ANALYTICAL: Formulate questions that push the analysis forward (e.g. comparing performance with competitors, evaluating key growth drivers or risks, assessing long-term strategic implications, or digging deeper into specific metrics cited).
-4. DIVERSE & CONTEXTUAL: Ensure all 3 questions explore different analytical dimensions (e.g. 1 on competitive benchmark, 1 on financial/operational breakdown, 1 on strategic risk/outlook).
-
-Format requirements:
+1. TOPIC-BOUND & CONTEXT-DERIVED: Every follow-up question MUST be strictly related to the CURRENT user question, CURRENT AI response, and CURRENT document/retrieval context above.
+2. NO OFF-TOPIC LEAKS: If the current discussion is about programming (e.g. C++, Python), science, education, or general document analysis, do NOT mention financial metrics, cloud competitors (Azure/AWS), revenue, CapEx, or stock performance. Stay strictly within the current topic.
+3. NO GENERIC BOILERPLATE: Do NOT generate generic questions (such as "Can I help summarize this?", "Would you like more information?", "Can I perform a web search?", "What would you like to analyze next?").
+4. ACTIONABLE & PROGRESSIVE: Formulate questions that help the user explore the current topic deeper (e.g., asking for code examples, detailed explanations of concepts mentioned in the text, practical applications, comparison of concepts within the text, or practice exercises).
+5. FORMAT REQUIREMENT:
 Place the marker on its own line, followed IMMEDIATELY by a JSON array containing exactly 3 follow-up question strings, with NO text after it:
 {FOLLOWUP_MARKER}
 ["First specific follow-up question?", "Second specific follow-up question?", "Third specific follow-up question?"]
