@@ -7,3 +7,4 @@ from .crud_genai import genai
 from .crud_user import user
 from .crud_workspace import workspace
 from .crud_document_chuck import document_chunk
+from .crud_document_takeaways import document_takeaways

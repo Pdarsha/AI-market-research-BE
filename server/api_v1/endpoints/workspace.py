@@ -17,6 +17,8 @@ from server.utils.source_attribution import (
 from server.models.genai import ChatMessage
 import uuid as _uuid
 from server.services.audit_logger import AuditLogger
+from server.services.document_takeaways_service import document_takeaways_service
+
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,13 @@ def public_workspace(
         key=lambda c: c.updated_at or c.created_at,
         reverse=True,
     )
+
+    raw_grids = crud.document_takeaways.get_grids_by_workspace(db, workspace_id=workspace_id)
+    serialized_grids = [
+        document_takeaways_service.get_cached_serialized_grid(g, db)
+        for g in raw_grids
+    ]
+
     data = {
         "id": workspace.id,
         "name": workspace.name,
@@ -141,6 +150,7 @@ def public_workspace(
             }
             for c in chats
         ],
+        "grids": serialized_grids,
     }
 
     AuditLogger.log(

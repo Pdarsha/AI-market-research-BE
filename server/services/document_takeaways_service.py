@@ -5,11 +5,9 @@ import openai
 
 from sqlalchemy.orm import Session
 from fastapi import BackgroundTasks
+from server import crud, schemas
 
 from server.config import settings
-from server.crud.crud_document_takeaways import crud_document_takeaways
-from server.crud.crud_workspace import workspace as crud_workspace
-from server.crud.crud_document import document as crud_document
 from server.models.document_takeaways import DocumentTakeawayGrid
 from server.prompts.document_takeaways import (
     PROMPT_VERSION,
@@ -31,13 +29,13 @@ async def process_grid_cell_task(
 
     db = SessionLocal()
     try:
-        cell = crud_document_takeaways.get_cell(db, cell_id)
+        cell = crud.document_takeaways.get_cell(db, cell_id)
         if not cell or cell.status != "pending":
             return
 
-        crud_document_takeaways.update_cell(db, cell, {"status": "processing"})
+        crud.document_takeaways.update_cell(db, cell, {"status": "processing"})
         logger.info(f"Cell processing started: {cell_id} for document: {document_id}")
-        crud_document_takeaways.update_grid_status(db, cell.row.grid_id)
+        crud.document_takeaways.update_grid_status(db, cell.row.grid_id)
 
         rag_service = get_rag_service()
 
@@ -64,7 +62,7 @@ async def process_grid_cell_task(
 
             document_name = "Unknown Document"
             document_type = "unknown"
-            doc_record = crud_document.get(db, document_id)
+            doc_record = crud.document.get(db, document_id)
             if doc_record:
                 document_name = doc_record.file_name or "Unknown Document"
                 document_type = doc_record.file_format or "unknown"
@@ -125,7 +123,7 @@ async def process_grid_cell_task(
                 raise e  # Trigger the except Exception below
 
         if not response_text or not response_text.strip():
-            crud_document_takeaways.update_cell(
+            crud.document_takeaways.update_cell(
                 db,
                 cell,
                 {
@@ -134,7 +132,7 @@ async def process_grid_cell_task(
                 },
             )
         else:
-            crud_document_takeaways.update_cell(
+            crud.document_takeaways.update_cell(
                 db,
                 cell,
                 {
@@ -152,7 +150,7 @@ async def process_grid_cell_task(
     except Exception as e:
         logger.exception(f"Error processing cell {cell_id}")
         if "cell" in locals() and cell:
-            crud_document_takeaways.update_cell(
+            crud.document_takeaways.update_cell(
                 db,
                 cell,
                 {
@@ -163,7 +161,7 @@ async def process_grid_cell_task(
             logger.info(f"Cell failed: {cell_id}")
     finally:
         if "cell" in locals() and cell:
-            crud_document_takeaways.update_grid_status(db, cell.row.grid_id)
+            crud.document_takeaways.update_grid_status(db, cell.row.grid_id)
         db.close()
 
 
@@ -177,11 +175,11 @@ class DocumentTakeawaysService:
         document_ids: List[str],
         user_id: str,
     ) -> DocumentTakeawayGrid:
-        workspace = crud_workspace._get_owned_workspace(db, workspace_id, user_id)
+        workspace = crud.workspace._get_owned_workspace(db, workspace_id, user_id)
         if not workspace:
             raise ValueError("Workspace not found")
 
-        valid_docs = crud_document.get_multi_by_workspace(db, workspace_id=workspace_id)
+        valid_docs = crud.document.get_multi_by_workspace(db, workspace_id=workspace_id)
         valid_doc_ids = {str(d.id) for d in valid_docs}
 
         unique_doc_ids = list(dict.fromkeys(document_ids))
@@ -190,7 +188,7 @@ class DocumentTakeawaysService:
                 raise ValueError(f"Document {doc_id} not found in workspace")
 
         # Prevent duplicate grid creation from rapid consecutive clicks
-        recent_grid = crud_document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
+        recent_grid = crud.document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
         if recent_grid and getattr(recent_grid, "created_by", None) == user_id:
             created_time = recent_grid.created_at.replace(tzinfo=None) if recent_grid.created_at else None
             if created_time and (datetime.utcnow() - created_time).total_seconds() < 5:
@@ -199,13 +197,13 @@ class DocumentTakeawaysService:
                     logger.info(f"Reusing recent grid {recent_grid.id} to prevent duplicate creation")
                     return recent_grid
 
-        grid = crud_document_takeaways.create_grid(db, workspace_id, name, user_id)
+        grid = crud.document_takeaways.create_grid(db, workspace_id, name, user_id)
         logger.info(f"Grid created: {grid.id} for workspace: {workspace_id}")
 
-        col_doc = crud_document_takeaways.add_column(
+        col_doc = crud.document_takeaways.add_column(
             db, grid.id, "Document", "document", 1
         )
-        col_expert = crud_document_takeaways.add_column(
+        col_expert = crud.document_takeaways.add_column(
             db,
             grid.id,
             "Expert Description",
@@ -213,7 +211,7 @@ class DocumentTakeawaysService:
             2,
             "Summarize the relevant expert, author, organization, professional background, and domain expertise described in this document. If information is unavailable, return: 'Not enough information is available in the document.'",
         )
-        col_takeaways = crud_document_takeaways.add_column(
+        col_takeaways = crud.document_takeaways.add_column(
             db,
             grid.id,
             "Key Takeaways",
@@ -223,9 +221,9 @@ class DocumentTakeawaysService:
         )
 
         for i, doc_id in enumerate(unique_doc_ids):
-            row = crud_document_takeaways.add_row(db, grid.id, doc_id, i + 1)
+            row = crud.document_takeaways.add_row(db, grid.id, doc_id, i + 1)
 
-            cell_expert = crud_document_takeaways.create_cell(db, row.id, col_expert.id)
+            cell_expert = crud.document_takeaways.create_cell(db, row.id, col_expert.id)
             background_tasks.add_task(
                 process_grid_cell_task,
                 cell_expert.id,
@@ -235,7 +233,7 @@ class DocumentTakeawaysService:
                 user_id,
             )
 
-            cell_takeaways = crud_document_takeaways.create_cell(
+            cell_takeaways = crud.document_takeaways.create_cell(
                 db, row.id, col_takeaways.id
             )
             background_tasks.add_task(
@@ -247,7 +245,7 @@ class DocumentTakeawaysService:
                 user_id,
             )
 
-        crud_document_takeaways.update_grid_status(db, grid.id)
+        crud.document_takeaways.update_grid_status(db, grid.id)
         return grid
 
     def add_custom_column(
@@ -259,19 +257,19 @@ class DocumentTakeawaysService:
         prompt: str,
         user_id: str,
     ):
-        grid = crud_document_takeaways.get_grid(db, grid_id)
+        grid = crud.document_takeaways.get_grid(db, grid_id)
         if not grid:
             raise ValueError("Grid not found")
 
-        workspace = crud_workspace._get_owned_workspace(db, grid.workspace_id, user_id)
+        workspace = crud.workspace._get_owned_workspace(db, grid.workspace_id, user_id)
         if not workspace:
             raise ValueError("Workspace not found")
 
         from sqlalchemy.exc import IntegrityError
 
         try:
-            display_order = crud_document_takeaways.get_next_column_order(db, grid.id)
-            column = crud_document_takeaways.add_column(
+            display_order = crud.document_takeaways.get_next_column_order(db, grid.id)
+            column = crud.document_takeaways.add_column(
                 db, grid.id, name, "ai_generated", display_order, prompt
             )
         except IntegrityError:
@@ -279,7 +277,7 @@ class DocumentTakeawaysService:
             raise ValueError("Column name already exists in this grid")
 
         for row in grid.rows:
-            cell = crud_document_takeaways.create_cell(db, row.id, column.id)
+            cell = crud.document_takeaways.create_cell(db, row.id, column.id)
             background_tasks.add_task(
                 process_grid_cell_task,
                 cell.id,
@@ -289,7 +287,7 @@ class DocumentTakeawaysService:
                 user_id,
             )
 
-        crud_document_takeaways.update_grid_status(db, grid.id)
+        crud.document_takeaways.update_grid_status(db, grid.id)
         db.refresh(grid)
         return grid
 
@@ -301,15 +299,15 @@ class DocumentTakeawaysService:
         document_ids: List[str],
         user_id: str,
     ):
-        grid = crud_document_takeaways.get_grid(db, grid_id)
+        grid = crud.document_takeaways.get_grid(db, grid_id)
         if not grid:
             raise ValueError("Grid not found")
 
-        workspace = crud_workspace._get_owned_workspace(db, grid.workspace_id, user_id)
+        workspace = crud.workspace._get_owned_workspace(db, grid.workspace_id, user_id)
         if not workspace:
             raise ValueError("Workspace not found")
 
-        valid_docs = crud_document.get_multi_by_workspace(
+        valid_docs = crud.document.get_multi_by_workspace(
             db, workspace_id=grid.workspace_id
         )
         valid_doc_ids = {str(d.id) for d in valid_docs}
@@ -331,11 +329,11 @@ class DocumentTakeawaysService:
         ai_columns = [col for col in grid.columns if col.column_type == "ai_generated"]
 
         for i, doc_id in enumerate(new_doc_ids):
-            row = crud_document_takeaways.add_row(
+            row = crud.document_takeaways.add_row(
                 db, grid.id, doc_id, max_order + i + 1
             )
             for col in ai_columns:
-                cell = crud_document_takeaways.create_cell(db, row.id, col.id)
+                cell = crud.document_takeaways.create_cell(db, row.id, col.id)
                 background_tasks.add_task(
                     process_grid_cell_task,
                     cell.id,
@@ -345,29 +343,29 @@ class DocumentTakeawaysService:
                     user_id,
                 )
 
-        crud_document_takeaways.update_grid_status(db, grid.id)
+        crud.document_takeaways.update_grid_status(db, grid.id)
         db.refresh(grid)
         return grid
 
     def retry_cell(
         self, db: Session, background_tasks: BackgroundTasks, cell_id: str, user_id: str
     ):
-        cell = crud_document_takeaways.get_cell(db, cell_id)
+        cell = crud.document_takeaways.get_cell(db, cell_id)
         if not cell:
             raise ValueError("Cell not found")
 
         grid = cell.row.grid
-        workspace = crud_workspace._get_owned_workspace(db, grid.workspace_id, user_id)
+        workspace = crud.workspace._get_owned_workspace(db, grid.workspace_id, user_id)
         if not workspace:
             raise ValueError("Workspace not found")
 
         if cell.status in ["pending", "processing"]:
             return cell
 
-        crud_document_takeaways.update_cell(
+        crud.document_takeaways.update_cell(
             db, cell, {"status": "pending", "value": None, "error_message": None}
         )
-        crud_document_takeaways.update_grid_status(db, grid.id)
+        crud.document_takeaways.update_grid_status(db, grid.id)
 
         background_tasks.add_task(
             process_grid_cell_task,
@@ -382,23 +380,23 @@ class DocumentTakeawaysService:
     def duplicate_grid(
         self, db: Session, grid_id: str, user_id: str
     ) -> DocumentTakeawayGrid:
-        source_grid = crud_document_takeaways.get_grid(db, grid_id)
+        source_grid = crud.document_takeaways.get_grid(db, grid_id)
         if not source_grid:
             raise ValueError("Grid not found")
 
-        workspace = crud_workspace._get_owned_workspace(
+        workspace = crud.workspace._get_owned_workspace(
             db, source_grid.workspace_id, user_id
         )
         if not workspace:
             raise ValueError("Workspace not found")
 
-        new_grid = crud_document_takeaways.create_grid(
+        new_grid = crud.document_takeaways.create_grid(
             db, source_grid.workspace_id, f"{source_grid.name} (Copy)", user_id
         )
 
         col_map = {}
         for col in source_grid.columns:
-            new_col = crud_document_takeaways.add_column(
+            new_col = crud.document_takeaways.add_column(
                 db,
                 new_grid.id,
                 col.name,
@@ -409,15 +407,15 @@ class DocumentTakeawaysService:
             col_map[col.id] = new_col.id
 
         for row in source_grid.rows:
-            new_row = crud_document_takeaways.add_row(
+            new_row = crud.document_takeaways.add_row(
                 db, new_grid.id, row.document_id, row.display_order
             )
             for cell in row.cells:
                 if cell.grid_column_id in col_map:
-                    new_cell = crud_document_takeaways.create_cell(
+                    new_cell = crud.document_takeaways.create_cell(
                         db, new_row.id, col_map[cell.grid_column_id]
                     )
-                    crud_document_takeaways.update_cell(
+                    crud.document_takeaways.update_cell(
                         db,
                         new_cell,
                         {
@@ -429,7 +427,7 @@ class DocumentTakeawaysService:
                         },
                     )
 
-        crud_document_takeaways.update_grid_status(db, new_grid.id)
+        crud.document_takeaways.update_grid_status(db, new_grid.id)
         db.refresh(new_grid)
         return new_grid
 
@@ -438,7 +436,7 @@ class DocumentTakeawaysService:
         for row in grid.rows:
             doc = getattr(row, "document", None)
             if not doc and db:
-                doc = crud_document.get(db, row.document_id)
+                doc = crud.document.get(db, row.document_id)
             if not doc:
                 continue
 

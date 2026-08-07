@@ -3,19 +3,11 @@ import time
 from server.services.audit_logger import audit_context
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-
+from server import crud, schemas
 from server.api_v1.deps import get_db
-from server.crud.crud_document_takeaways import crud_document_takeaways
-from server.crud.crud_document import document as crud_document
-from server.schemas.document_takeaways import (
-    CreateDocumentTakeawayGridRequest,
-    AddCustomColumnRequest,
-    AddDocumentsToGridRequest,
-    RenameGridRequest,
-    DocumentTakeawayGridListItem,
-)
+
 from server.services.document_takeaways_service import document_takeaways_service
-from server.utils.auth import get_current_user
+from server.utils.auth import get_current_user, get_optional_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +26,7 @@ def serialize_grid(grid, db: Session):
 @document_takeaways_router.post("/grids")
 def create_grid(
     workspace_id: str,
-    payload: CreateDocumentTakeawayGridRequest,
+    payload: schemas.CreateDocumentTakeawayGridRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -61,18 +53,19 @@ def get_grid(
     workspace_id: str,
     grid_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
+    user_id_str = str(current_user.id) if current_user else "public"
     with audit_context(
         action="FETCH_GRID_BY_ID",
-        user_id=str(current_user.id),
+        user_id=user_id_str,
         workspace_id=workspace_id,
         endpoint=f"/v1/workspaces/{workspace_id}/document-takeaways/grids/{grid_id}",
         http_method="GET",
         metadata={"grid_id": grid_id},
     ) as meta:
         t0 = time.perf_counter()
-        grid = crud_document_takeaways.get_grid(db, grid_id)
+        grid = crud.document_takeaways.get_grid(db, grid_id)
         db_fetch_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not grid or grid.workspace_id != workspace_id:
             raise HTTPException(status_code=404, detail="Grid not found")
@@ -100,17 +93,18 @@ def get_grid(
 def get_current_grid(
     workspace_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
+    user_id_str = str(current_user.id) if current_user else "public"
     with audit_context(
         action="FETCH_CURRENT_GRID",
-        user_id=str(current_user.id),
+        user_id=user_id_str,
         workspace_id=workspace_id,
         endpoint=f"/v1/workspaces/{workspace_id}/document-takeaways/grid",
         http_method="GET",
     ) as meta:
         t0 = time.perf_counter()
-        grid = crud_document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
+        grid = crud.document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
         db_fetch_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not grid:
             meta["grid_found"] = False
@@ -139,7 +133,7 @@ def get_current_grid(
 def add_custom_column(
     workspace_id: str,
     grid_id: str,
-    payload: AddCustomColumnRequest,
+    payload: schemas.AddCustomColumnRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -192,7 +186,7 @@ def retry_cell(
 def add_documents_to_grid(
     workspace_id: str,
     grid_id: str,
-    payload: AddDocumentsToGridRequest,
+    payload: schemas.AddDocumentsToGridRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -212,15 +206,15 @@ def add_documents_to_grid(
         logger.exception("Error adding documents to grid")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@document_takeaways_router.get("/grids", response_model=list[DocumentTakeawayGridListItem])
+@document_takeaways_router.get("/grids", response_model=list[schemas.DocumentTakeawayGridListItem])
 def list_grids(
     workspace_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
-    grids = crud_document_takeaways.get_grids_by_workspace(db, workspace_id)
+    grids = crud.document_takeaways.get_grids_by_workspace(db, workspace_id)
     return [
-        DocumentTakeawayGridListItem(
+        schemas.DocumentTakeawayGridListItem(
             id=g.id,
             name=g.name,
             status=g.status,
@@ -235,14 +229,14 @@ def list_grids(
 def rename_grid(
     workspace_id: str,
     grid_id: str,
-    payload: RenameGridRequest,
+    payload: schemas.RenameGridRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    grid = crud_document_takeaways.get_grid(db, grid_id)
+    grid = crud.document_takeaways.get_grid(db, grid_id)
     if not grid or grid.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Grid not found")
-    crud_document_takeaways.update(db, db_obj=grid, obj_in={"name": payload.name})
+    crud.document_takeaways.update(db, db_obj=grid, obj_in={"name": payload.name})
     return {"message": "Grid renamed successfully", "name": grid.name}
 
 @document_takeaways_router.delete("/grids/{grid_id}")
@@ -252,10 +246,10 @@ def delete_grid(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    grid = crud_document_takeaways.get_grid(db, grid_id)
+    grid = crud.document_takeaways.get_grid(db, grid_id)
     if not grid or grid.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Grid not found")
-    crud_document_takeaways.remove(db, id=grid.id)
+    crud.document_takeaways.remove(db, id=grid.id)
     return {"message": "Grid deleted successfully"}
 
 @document_takeaways_router.post("/grids/{grid_id}/duplicate")

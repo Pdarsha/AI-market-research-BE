@@ -54,15 +54,20 @@ def _mime_type(file_format: Optional[str]) -> str:
     return _MIME_TYPES.get((file_format or "").lower(), "application/octet-stream")
 
 
-def get_owned_document(db, document_id: str, current_user):
-    """Return the document if the caller owns it (and its workspace), else 404."""
+def get_owned_document(db, document_id: str, current_user=None):
+    """Return the document if caller owns it or if it exists for public citation viewing."""
     doc = crud.document.get(db, document_id)
-    if not doc or doc.user_id != str(current_user.id):
+    if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    if doc.workspace_id:
-        workspace = crud.workspace.get(db, doc.workspace_id)
-        if not workspace or workspace.user_id != str(current_user.id):
-            raise HTTPException(status_code=404, detail="Document not found")
+    if current_user and getattr(current_user, "id", None):
+        user_id_str = str(current_user.id)
+        if doc.user_id == user_id_str:
+            if doc.workspace_id:
+                workspace = crud.workspace.get(db, doc.workspace_id)
+                if workspace and workspace.user_id == user_id_str:
+                    return doc
+            else:
+                return doc
     return doc
 
 

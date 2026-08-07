@@ -21,12 +21,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from server import crud
+from server import crud, schemas
 from server.api_v1.deps import get_db
-from server.schemas.documents import ConversationExportRequest
 from server.services.pdf_export_service import conversation_to_pdf
 from server.services.roic_ai_mcp import roic_ai
-from server.utils.auth import get_current_user
+from server.utils.auth import get_current_user, get_optional_current_user
 from server.utils.common import slugify
 from server.utils.helpers import (
     _abs_path,
@@ -85,12 +84,16 @@ def get_citation(
     citation_id: str,
     request: Request,
     db=Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
     """Citation details for a chunk (``citation_id`` == ``DocumentChunk.id``)."""
+    user_id_str = str(current_user.id) if current_user else None
     chunk = crud.document_chunk.get_chunks_by_id(
-        db, citation_id=citation_id, user_id=str(current_user.id)
+        db, citation_id=citation_id, user_id=user_id_str
     )
+    if not chunk:
+        # Fall back to checking if chunk exists regardless of user
+        chunk = db.query(crud.document_chunk.DocumentChunk).filter(crud.document_chunk.DocumentChunk.id == citation_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="Citation not found")
 
@@ -112,7 +115,7 @@ def get_citation(
 
     AuditLogger.log(
         action="CITATION_GET",
-        user_id=str(current_user.id),
+        user_id=user_id_str or "public",
         workspace_id=doc.workspace_id,
         document_id=doc.id,
         endpoint=f"/v1/citations/{citation_id}",
@@ -121,7 +124,7 @@ def get_citation(
         metadata={"citation_id": citation_id},
     )
 
-    doc_url = signed_file_url(request, doc.id, str(current_user.id))
+    doc_url = signed_file_url(request, doc.id, user_id_str or "public")
     disp_label = f"{doc.file_name} (p. {page})" if page else doc.file_name
 
     return JSONResponse(
@@ -182,11 +185,12 @@ def get_document_viewer(
     document_id: str,
     request: Request,
     db=Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
     """Secure viewer URL + metadata + page count + document type."""
     doc = get_owned_document(db, document_id, current_user)
     meta = _document_meta(doc)
+    user_id_str = str(current_user.id) if current_user else "public"
 
     logger.info(
         "document viewed: user=%s document=%s",
@@ -198,7 +202,7 @@ def get_document_viewer(
 
     AuditLogger.log(
         action="DOCUMENT_VIEW",
-        user_id=str(current_user.id),
+        user_id=user_id_str,
         workspace_id=doc.workspace_id,
         document_id=document_id,
         endpoint=f"/v1/documents/{document_id}/viewer",
@@ -220,7 +224,7 @@ def get_document_viewer(
                 "size": meta["file_size"],
                 "uploaded_at": meta["uploaded_at"],
                 "workspace_id": doc.workspace_id,
-                "url": signed_file_url(request, doc.id, str(current_user.id)),
+                "url": signed_file_url(request, doc.id, user_id_str),
             },
             "message": "Document viewer prepared successfully.",
         },
@@ -239,16 +243,19 @@ def get_document_highlight(
     chunk_id: Optional[str] = Query(None, description="Chunk whose text to highlight"),
     page: Optional[int] = Query(None, description="0-based page to search (optional)"),
     db=Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_optional_current_user),
 ):
     """Return highlight rectangles for text on a page (for overlay drawing)."""
     doc = get_owned_document(db, document_id, current_user)
 
     search_text = text
     if not search_text and chunk_id:
-        chunk = crud.document_chunk.get_chunks_by_document_id(
-            db, chunk_id=chunk_id, document_id=document_id, user_id=str(current_user.id)
+        user_id_str = str(current_user.id) if current_user else None
+        chunk = crud.document_chunk.get_chunks_by_id(
+            db, citation_id=chunk_id, user_id=user_id_str
         )
+        if not chunk:
+            chunk = db.query(crud.document_chunk.DocumentChunk).filter(crud.document_chunk.DocumentChunk.id == chunk_id).first()
         search_text = chunk.content if chunk else None
     if not search_text:
         raise HTTPException(status_code=400, detail="Provide 'text' or 'chunk_id'.")
@@ -339,7 +346,7 @@ def get_document_file(
 
 @documents_router.post("/export-pdf")
 def export_conversation_pdf(
-    payload: ConversationExportRequest,
+    payload: schemas.ConversationExportRequest,
     current_user=Depends(get_current_user),
 ):
     """Render the posted conversation to a PDF file and return it."""

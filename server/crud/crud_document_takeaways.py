@@ -192,4 +192,4 @@ class CRUDDocumentTakeaways(
         return grid
 
 
-crud_document_takeaways = CRUDDocumentTakeaways(DocumentTakeawayGrid)
+document_takeaways = CRUDDocumentTakeaways(DocumentTakeawayGrid)
