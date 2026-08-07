@@ -100,6 +100,21 @@ class Settings(BaseSettings):
     WEB_SEARCH_COUNTRY: str = os.getenv("WEB_SEARCH_COUNTRY", "in")
     WEB_SEARCH_LANGUAGE: str = os.getenv("WEB_SEARCH_LANGUAGE", "en")
 
+    # -- PDF Export Branding -----------------------------------------------
+    PDF_COMPANY_NAME: str = os.getenv("PDF_COMPANY_NAME", "CapitalEdge AI")
+    PDF_LOGO_PATH: str = os.getenv(
+        "PDF_LOGO_PATH",
+        str(Path(__file__).resolve().parent.parent / "media" / "logo" / "logo.png"),
+    )
+    PDF_WATERMARK_TEXT: str = os.getenv("PDF_WATERMARK_TEXT", "CapitalEdge AI")
+    PDF_HEADER_HEIGHT: float = float(os.getenv("PDF_HEADER_HEIGHT", "60"))
+    PDF_FOOTER_HEIGHT: float = float(os.getenv("PDF_FOOTER_HEIGHT", "35"))
+    PDF_WATERMARK_OPACITY: float = float(os.getenv("PDF_WATERMARK_OPACITY", "0.08"))
+    PDF_LOGO_HEIGHT: float = float(os.getenv("PDF_LOGO_HEIGHT", "22"))
+    PDF_LOGO_MARGIN: float = float(os.getenv("PDF_LOGO_MARGIN", "40"))
+    PDF_LOGO_DPI: int = int(os.getenv("PDF_LOGO_DPI", "300"))
+    PDF_MARGIN: float = float(os.getenv("PDF_MARGIN", "40"))
+
     BACKEND_CORS_ORIGINS: List = []
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")

@@ -1,18 +1,78 @@
-"""Server-side conversation PDF export.
+"""Server-side conversation PDF export — professional CapitalEdge AI branded reports.
 
-Renders a chat transcript to PDF with PyMuPDF's Story engine (already a
-project dependency — no headless browser or extra PDF library needed).
-The layout mirrors a professional report template: a title header,
-rendered markdown including tables and citations, and a footer with page numbers.
+Renders a chat transcript to a multi-page PDF via PyMuPDF's Story engine.
+Every page receives:
+  • High-resolution company logo (top-left) + centered company name in a consistent header.
+  • Semi-transparent 45° watermark behind content.
+  • Timestamp + page-numbering footer.
+
+All branding values are read from ``server.config.Settings`` so they can be
+overridden via environment variables without touching source code.
 """
 
 import html
-import io
+import logging
+import os
 import re
-import markdown
 from datetime import datetime, timezone
 
 import fitz  # PyMuPDF
+import markdown
+from PIL import Image
+
+from server.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logo loading & caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_logo_pixmap(logo_path: str, dpi: int = 300) -> fitz.Pixmap | None:
+    """Return a maximum-quality fitz.Pixmap for the company logo.
+
+    Supports both SVG and PNG/JPG logo assets:
+    - If SVG: renders at high-resolution matrix scale (300+ DPI).
+    - If PNG: loads full RGBA pixel dimensions via PIL -> fitz.Pixmap.
+    - If logo fails to load: logs a warning and returns None (PDF export continues).
+    """
+    if not logo_path or not isinstance(logo_path, str):
+        return None
+
+    paths_to_try = [logo_path]
+    if logo_path.lower().endswith(".svg"):
+        paths_to_try.append(logo_path[:-4] + ".png")
+        paths_to_try.append(logo_path[:-4] + ".jpg")
+    elif logo_path.lower().endswith(".png") or logo_path.lower().endswith(".jpg"):
+        paths_to_try.append(logo_path[:-4] + ".svg")
+
+    for path in paths_to_try:
+        if not os.path.exists(path):
+            continue
+        try:
+            if path.lower().endswith(".svg"):
+                doc = fitz.open(path)
+                pix = doc[0].get_pixmap(
+                    matrix=fitz.Matrix(25, 25), alpha=True, colorspace=fitz.csRGB
+                )
+                doc.close()
+                return pix
+            else:
+                img = Image.open(path).convert("RGBA")
+                data = img.tobytes("raw", "RGBA")
+                return fitz.Pixmap(fitz.csRGB, img.width, img.height, data, True)
+        except Exception as exc:
+            logger.warning("Failed to load PDF logo from %s: %s", path, exc)
+
+    logger.warning("PDF logo file not found or failed to load: %s", logo_path)
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _esc(value) -> str:
@@ -20,37 +80,24 @@ def _esc(value) -> str:
 
 
 def _normalize_url(raw_url: str) -> str | None:
-    """Normalize URLs for PDF annotation. Return valid HTTP/HTTPS URL or None."""
+    """Return a valid http(s) URL string or None."""
     if not raw_url or not isinstance(raw_url, str):
         return None
     url = raw_url.strip()
     if not url:
         return None
-
     if url.startswith("http://") or url.startswith("https://"):
         return url
-
     if url.startswith("www.") or any(
         ext in url.lower()
-        for ext in [
-            ".com",
-            ".org",
-            ".net",
-            ".gov",
-            ".edu",
-            ".io",
-            ".ai",
-            ".co",
-            ".uk",
-        ]
+        for ext in [".com", ".org", ".net", ".gov", ".edu", ".io", ".ai", ".co", ".uk"]
     ):
         return "https://" + url.lstrip("/")
-
     return None
 
 
 def _extract_citation_url(cit: dict) -> str | None:
-    """Extract and normalize external source URL from citation object across all schema representations."""
+    """Extract and normalise a source URL from any citation schema variant."""
     meta_dict = cit.get("metadata") if isinstance(cit.get("metadata"), dict) else {}
     raw_url = (
         cit.get("url")
@@ -66,13 +113,9 @@ def _extract_citation_url(cit: dict) -> str | None:
         or meta_dict.get("source_url")
         or meta_dict.get("web_url")
     )
-
-    # Check if cit.get('source') is a URL string
     if not raw_url and isinstance(cit.get("source"), str):
         if cit["source"].startswith(("http://", "https://", "www.")):
             raw_url = cit["source"]
-
-    # Check navigation_target / document_url
     if not raw_url:
         target = (
             cit.get("navigation_target")
@@ -84,12 +127,8 @@ def _extract_citation_url(cit: dict) -> str | None:
                 raw_url = target
             elif target.startswith("/"):
                 raw_url = f"https://app.capitaledge.ai{target}"
-
-    # Fallback for uploaded document IDs
     if not raw_url and cit.get("document_id"):
         raw_url = f"https://app.capitaledge.ai/v1/documents/{cit['document_id']}/viewer"
-
-    # Fallback to search query for title-only citations to guarantee clickable link
     if not raw_url:
         title = (
             cit.get("title")
@@ -106,14 +145,10 @@ def _extract_citation_url(cit: dict) -> str | None:
             from urllib.parse import quote
 
             raw_url = f"https://www.google.com/search?q={quote(title.strip())}"
-
-    # Regex extraction fallback if URL string is embedded in dict representation
     if not raw_url:
-        cit_str = str(cit)
-        url_match = re.search(r"https?://[^\s<'\"]+", cit_str)
+        url_match = re.search(r"https?://[^\s<'\"]+", str(cit))
         if url_match:
             raw_url = url_match.group(0)
-
     return _normalize_url(raw_url)
 
 
@@ -133,7 +168,6 @@ pre { background-color: #edf2f7; padding: 10pt; border-radius: 4pt; overflow-x: 
 pre code { padding: 0; background-color: transparent; }
 blockquote { border-left: 3px solid #a0aec0; margin-left: 0; padding-left: 10pt; color: #718096; font-style: italic; }
 .meta { color: #718096; font-size: 8.5pt; margin-bottom: 20pt; }
-.logo { font-size: 16pt; font-weight: bold; color: #2b6cb0; margin-bottom: 10pt; }
 .user-query { font-size: 13pt; font-weight: bold; color: #2b6cb0; margin-top: 20pt; margin-bottom: 10pt; }
 .references-section { margin-top: 30pt; border-top: 1px solid #e2e8f0; padding-top: 15pt; }
 .ref-title { font-size: 14pt; font-weight: bold; margin-bottom: 10pt; }
@@ -143,7 +177,7 @@ a { color: #3182ce; text-decoration: none; }
 
 
 def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
-    """Render the transcript to a professional PDF report and return the bytes.
+    """Render the transcript to a professional branded PDF and return the bytes.
 
     Each assistant message owns its own citation map so that [1] in message-1
     always links to message-1's source, and [1] in message-2 links to
@@ -153,19 +187,34 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
 
     with audit_context(
         action="PDF_EXPORT",
-        metadata={
-            "title": title,
-            "messages_count": len(messages),
-            "pdf_size_bytes": 0,
-        },
+        metadata={"title": title, "messages_count": len(messages), "pdf_size_bytes": 0},
     ) as meta:
+
         exported = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+        # ── Branding Configuration (driven by settings / env vars) ─────────
+        company_name: str = getattr(settings, "PDF_COMPANY_NAME", "CapitalEdge AI")
+        logo_path: str = getattr(settings, "PDF_LOGO_PATH", "")
+        watermark_text: str = getattr(settings, "PDF_WATERMARK_TEXT", "CapitalEdge AI")
+        header_height: float = float(getattr(settings, "PDF_HEADER_HEIGHT", 60.0))  # pt
+        footer_height: float = float(getattr(settings, "PDF_FOOTER_HEIGHT", 35.0))  # pt
+        watermark_opacity: float = float(
+            getattr(settings, "PDF_WATERMARK_OPACITY", 0.08)
+        )
+        logo_height_pt: float = float(getattr(settings, "PDF_LOGO_HEIGHT", 22.0))  # pt
+        logo_margin: float = float(
+            getattr(settings, "PDF_LOGO_MARGIN", 40.0)
+        )  # pt left margin
+        logo_dpi: int = int(getattr(settings, "PDF_LOGO_DPI", 300))
+        pdf_margin: float = float(getattr(settings, "PDF_MARGIN", 40.0))  # pt margin
+
+        # Load logo once per PDF export session (None on failure -> graceful fallback)
+        logo_pixmap: fitz.Pixmap | None = _load_logo_pixmap(logo_path, dpi=logo_dpi)
+
+        # ── Build per-message HTML + citation maps ───────────────────────────
         body_parts: list[str] = []
+        annotation_plan: list[tuple[str, str]] = []  # (marker_text, url)
 
-        annotation_plan: list[tuple[str, str]] = []
-
-        # Per-message sources section parts (appended right after the message body)
         for m in messages:
             if m.get("error") or m.get("pending"):
                 continue
@@ -177,12 +226,8 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                 body_parts.append(f'<div class="user-query">{_esc(content)}</div>')
                 continue
 
-            # ── Build THIS message's citation map ─────────────────────────────
-            # key: marker number string ("1", "2", …)
-            # value: resolved absolute URL (str) or None
+            # Build this message's citation index
             msg_citations: list[dict] = m.get("citations") or []
-
-            # Build index: reference_index (or positional) -> citation dict
             msg_cit_map: dict[str, dict] = {}
             for pos, cit in enumerate(msg_citations, start=1):
                 idx_raw = (
@@ -204,15 +249,12 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                 if url:
                     msg_url_map[idx] = url
 
-            # ── Replace [N] markers in content with <a href="…"> ─────────────
+            # Replace [N] markers with <a href="…">
             def _replace(match, _url_map=msg_url_map):
                 n = match.group(1)
                 url = _url_map.get(n)
                 if url:
-                    return (
-                        f'<a href="{_esc(url)}" target="_blank" '
-                        f'rel="noopener noreferrer">[{n}]</a>'
-                    )
+                    return f'<a href="{_esc(url)}" target="_blank" rel="noopener noreferrer">[{n}]</a>'
                 return f"[{n}]"
 
             linked_content = re.sub(r"\[(\d+)\]", _replace, content)
@@ -221,7 +263,7 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
             )
             body_parts.append(f"<div>{html_content}</div>")
 
-            # ── Per-message Sources section ───────────────────────────────────
+            # Per-message Sources section
             if msg_cit_map:
                 ref_items: list[str] = []
                 for idx in sorted(
@@ -241,20 +283,16 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                         or f"Source {idx}"
                     )
                     url = msg_url_map.get(idx)
-                    if url:
-                        ref_html = (
-                            f'<a href="{_esc(url)}" target="_blank" '
-                            f'rel="noopener noreferrer">{_esc(label)}</a>'
-                        )
-                    else:
-                        ref_html = _esc(label)
-
+                    ref_html = (
+                        f'<a href="{_esc(url)}" target="_blank" rel="noopener noreferrer">{_esc(label)}</a>'
+                        if url
+                        else _esc(label)
+                    )
                     ref_items.append(
                         f'<div class="ref-item" id="ref-{_esc(idx)}">'
                         f"<b>[{_esc(idx)}]</b> {ref_html}"
                         f"</div>"
                     )
-
                 body_parts.append(
                     '<div class="references-section">'
                     '<div class="ref-title">Sources</div>'
@@ -262,21 +300,15 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                     + "</div>"
                 )
 
-            # ── Record annotation plan (in render order) ──────────────────────
-            # Each (marker, url) pair will be used in the bounding-box injection
-            # pass. We record them in the order markers appear in the content so
-            # page.search_for hits can be matched correctly later.
+            # Accumulate annotation plan in render order
             for idx in sorted(msg_url_map, key=lambda x: int(x) if x.isdigit() else x):
                 annotation_plan.append((f"[{idx}]", msg_url_map[idx]))
 
-        # ── Assemble & render the PDF ─────────────────────────────────────────
+        # ── Assemble HTML document ────────────────────────────────────────────
         doc_html = f"""
         <html>
-        <head>
-            <style>{_CSS}</style>
-        </head>
+        <head><style>{_CSS}</style></head>
         <body>
-            <div class="logo">CapitalEdge AI</div>
             <h1>{_esc(title)}</h1>
             <div class="meta">Generated: {exported}</div>
             {''.join(body_parts)}
@@ -284,24 +316,106 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
         </html>
         """
 
+        # ── Render Story ──────────────────────────────────────────────────────
         story = fitz.Story(html=doc_html, user_css=_CSS)
-        mediabox = fitz.paper_rect("a4")
-        content_box = mediabox + (40, 44, -40, -44)
+        mediabox = fitz.paper_rect("a4")  # 595.32 × 841.89 pt
+
+        # Reserve vertical space for header and footer
+        top_offset = max(header_height + 12.0, 72.0)
+        bottom_offset = footer_height + 10.0
+        content_box = mediabox + (pdf_margin, top_offset, -pdf_margin, -bottom_offset)
 
         def rectfn(rect_num, filled):
             return mediabox, content_box, None
 
         doc = story.write_with_links(rectfn=rectfn)
+        total_pages = len(doc)
 
-        # ── Pass 1: page numbers + normalise existing links ───────────────────
-        for page_num in range(len(doc)):
+        # Shared layout dimensions and fonts
+        helv_font = fitz.Font("helv")
+        pw = mediabox.width
+        ph = mediabox.height
+        header_yc = header_height / 2.0  # vertical centre of header band
+        divider_y = header_height - 2.0  # line just below header band
+        footer_div_y = ph - footer_height  # top of footer band
+        footer_text_y = ph - footer_height + 14.0  # text baseline inside footer
+        footer_color = (0.44, 0.50, 0.59)  # #718096 slate
+
+        # ── Pass 1: Header, Watermark & Footer injection on every page ───────
+        for page_num in range(total_pages):
             page = doc[page_num]
-            page.insert_text(
-                fitz.Point(mediabox.width - 60, mediabox.height - 25),
-                f"Page {page_num + 1}",
-                fontsize=9,
-                color=(0.5, 0.5, 0.5),
+
+            # 1a. Watermark — behind content, 45° rotated, low opacity
+            if watermark_text:
+                wm_size = 70
+                wm_w = helv_font.text_length(watermark_text, fontsize=wm_size)
+                wm_pt = fitz.Point(pw / 2 - wm_w / 2, ph / 2 + 20)
+                page.insert_text(
+                    wm_pt,
+                    watermark_text,
+                    fontsize=wm_size,
+                    fontname="helv",
+                    color=(0.70, 0.75, 0.82),
+                    morph=(fitz.Point(pw / 2, ph / 2), fitz.Matrix(-45)),
+                    fill_opacity=watermark_opacity,
+                )
+
+            # 1b. Header — Top-left Logo + Centered Company Name
+            if logo_pixmap:
+                aspect = logo_pixmap.width / max(logo_pixmap.height, 1)
+                logo_w = logo_height_pt * aspect
+                logo_rect = fitz.Rect(
+                    logo_margin,
+                    header_yc - logo_height_pt / 2,
+                    logo_margin + logo_w,
+                    header_yc + logo_height_pt / 2,
+                )
+                page.insert_image(logo_rect, pixmap=logo_pixmap)
+
+            if company_name:
+                cn_size = 15.0
+                cn_w = helv_font.text_length(company_name, fontsize=cn_size)
+                page.insert_text(
+                    fitz.Point((pw - cn_w) / 2, header_yc + 5),
+                    company_name,
+                    fontsize=cn_size,
+                    fontname="helv",
+                    color=(0.17, 0.42, 0.69),  # #2b6cb0 — CapitalEdge brand blue
+                )
+
+            # Thin header divider line
+            page.draw_line(
+                fitz.Point(pdf_margin, divider_y),
+                fitz.Point(pw - pdf_margin, divider_y),
+                color=(0.88, 0.91, 0.94),
+                width=0.75,
             )
+
+            # 1c. Footer — thin divider + timestamp (left) + page numbers (right)
+            page.draw_line(
+                fitz.Point(pdf_margin, footer_div_y),
+                fitz.Point(pw - pdf_margin, footer_div_y),
+                color=(0.88, 0.91, 0.94),
+                width=0.75,
+            )
+            page.insert_text(
+                fitz.Point(pdf_margin, footer_text_y),
+                f"Generated: {exported}",
+                fontsize=8.5,
+                fontname="helv",
+                color=footer_color,
+            )
+            page_str = f"Page {page_num + 1} of {total_pages}"
+            p_w = helv_font.text_length(page_str, fontsize=8.5)
+            page.insert_text(
+                fitz.Point(pw - pdf_margin - p_w, footer_text_y),
+                page_str,
+                fontsize=8.5,
+                fontname="helv",
+                color=footer_color,
+            )
+
+            # Normalise existing URI links emitted by the Story engine
             for link in page.get_links():
                 kind = link.get("kind")
                 if kind == fitz.LINK_URI:
@@ -319,28 +433,15 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                     else:
                         page.delete_link(link)
 
-        # ── Pass 2: explicit bounding-box annotation injection ────────────────
-        # For each (marker, url) pair in annotation_plan we search every page
-        # for that marker text.  We track which rects have already been
-        # annotated so that the FIRST match (= first message that uses this
-        # marker number) wins and subsequent messages with the same marker
-        # number get their own distinct hits.
-        #
-        # Because annotation_plan is ordered by message render order and
-        # page.search_for returns rects top-to-bottom, the Nth occurrence of
-        # "[1]" on the full document corresponds to message N's [1].
-        # We use already_annotated (rounded rect coords) to consume each rect
-        # exactly once in the correct annotation_plan order.
-
+        # ── Pass 2: Bounding-box annotation injection for citation markers ────
         already_annotated: set[tuple[int, int, int, int]] = set()
 
         for marker_text, url in annotation_plan:
             placed = False
-            for page_num in range(len(doc)):
+            for page_num in range(total_pages):
                 if placed:
                     break
                 page = doc[page_num]
-
                 for rect in page.search_for(marker_text):
                     key = (
                         round(rect.x0),
@@ -348,12 +449,9 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                         round(rect.x1),
                         round(rect.y1),
                     )
-
-                    # Skip rects already claimed by a previous (marker, url) pair
                     if key in already_annotated:
                         continue
-
-                    # Remove any existing link that overlaps this rect (avoids xref errors)
+                    # Remove any overlapping link before inserting a clean one
                     for el in list(page.get_links()):
                         el_rect = el.get("from")
                         if (
@@ -365,28 +463,22 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                                 page.delete_link(el)
                             except Exception:
                                 pass
-
-                    # Insert a fresh LINK_URI annotation on the exact bounding box
                     page.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": url})
-
                     already_annotated.add(key)
                     placed = True
-                    break  # move to next (marker_text, url) in annotation_plan
+                    break
 
         # ── Audit metadata ────────────────────────────────────────────────────
-        total_links_count = 0
-        uri_links_count = 0
+        total_links = uri_links = 0
         for page in doc:
             page_links = page.get_links()
-            total_links_count += len(page_links)
-            uri_links_count += len(
-                [l for l in page_links if l.get("kind") == fitz.LINK_URI]
-            )
+            total_links += len(page_links)
+            uri_links += sum(1 for l in page_links if l.get("kind") == fitz.LINK_URI)
 
         final_bytes = doc.write()
         meta["pdf_size_bytes"] = len(final_bytes)
-        meta["has_hyperlinks"] = uri_links_count > 0
-        meta["uri_links_count"] = uri_links_count
-        meta["total_links_count"] = total_links_count
+        meta["has_hyperlinks"] = uri_links > 0
+        meta["uri_links_count"] = uri_links
+        meta["total_links_count"] = total_links
 
         return final_bytes
