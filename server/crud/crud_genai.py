@@ -1,19 +1,13 @@
-from typing import Optional, TypeVar
-
+from typing import Optional
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
 from server.models.genai import ChatSession, GenAI
 from server.schemas.genai import GenAICreate, GenAIUpdate
 
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
-
 
 class CRUDGENAI(CRUDBase[GenAI, GenAICreate, GenAIUpdate]):
-    filter_options = ["amount, number of generations"]
-
     def create(self, db: Session, *, obj_in: GenAICreate) -> GenAI:
         obj_in_data = jsonable_encoder(obj_in)
         if "document_ids" in obj_in_data:

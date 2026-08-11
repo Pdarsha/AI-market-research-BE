@@ -43,7 +43,7 @@ def create_grid(
         return serialize_grid(grid, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Error creating grid")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -150,7 +150,7 @@ def add_custom_column(
         return serialize_grid(grid, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Error adding column")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -177,7 +177,7 @@ def retry_cell(
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Error retrying cell")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -202,9 +202,10 @@ def add_documents_to_grid(
         return serialize_grid(grid, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Error adding documents to grid")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @document_takeaways_router.get("/grids", response_model=list[schemas.DocumentTakeawayGridListItem])
 def list_grids(
@@ -225,6 +226,7 @@ def list_grids(
         ) for g in grids
     ]
 
+
 @document_takeaways_router.put("/grids/{grid_id}/rename")
 def rename_grid(
     workspace_id: str,
@@ -239,6 +241,7 @@ def rename_grid(
     crud.document_takeaways.update(db, db_obj=grid, obj_in={"name": payload.name})
     return {"message": "Grid renamed successfully", "name": grid.name}
 
+
 @document_takeaways_router.delete("/grids/{grid_id}")
 def delete_grid(
     workspace_id: str,
@@ -251,6 +254,7 @@ def delete_grid(
         raise HTTPException(status_code=404, detail="Grid not found")
     crud.document_takeaways.remove(db, id=grid.id)
     return {"message": "Grid deleted successfully"}
+
 
 @document_takeaways_router.post("/grids/{grid_id}/duplicate")
 def duplicate_grid(
@@ -268,6 +272,6 @@ def duplicate_grid(
         return serialize_grid(new_grid, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Error duplicating grid")
         raise HTTPException(status_code=500, detail="Internal server error")

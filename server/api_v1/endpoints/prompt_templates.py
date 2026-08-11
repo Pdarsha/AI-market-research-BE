@@ -6,6 +6,7 @@ from server.services.prompt_template_registry import (
     PromptTemplateRegistry,
     get_prompt_template_registry,
 )
+from server.services.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ def list_prompt_templates(
     templates = registry.list_templates()
     data = [t.get_metadata() for t in templates]
 
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="PROMPT_TEMPLATES_LIST",
         endpoint="/v1/cards/prompt-templates",

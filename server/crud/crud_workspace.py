@@ -64,7 +64,7 @@ class CRUDWorkspace(CRUDBase[Workspace, WorkspaceCreate, WorkspaceUpdate]):
 
     def get_sessions_by_workspace_id(
         self, db: Session, *, workspace_id: str, user_id: str
-    ) -> list[Workspace]:
+    ) -> list[ChatSession]:
         return (
             db.query(ChatSession)
             .filter(

@@ -1,13 +1,9 @@
-from typing import List, Optional, TypeVar
-
-from pydantic import BaseModel
+from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
 from server.models.user import EmailOtp
 from server.schemas.email_otp import EmailOtpCreate, EmailOtpUpdate
-
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
 
 
 class CRUDEmailOTP(CRUDBase[EmailOtp, EmailOtpCreate, EmailOtpUpdate]):

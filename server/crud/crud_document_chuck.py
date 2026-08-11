@@ -1,20 +1,14 @@
-from typing import Optional, TypeVar
-
-from pydantic import BaseModel
+from typing import Optional
 from sqlalchemy.orm import Session, Query
 
 from server.crud.base import CRUDBase
 from server.models.workspace import DocumentChunk
 from server.schemas.workspace import DocumentChunkCreate, DocumentChunkUpdate
 
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
-
 
 class CRUDDocumentChunk(
     CRUDBase[DocumentChunk, DocumentChunkCreate, DocumentChunkUpdate]
 ):
-    filter_options = ["amount, number of generations"]
-
     def create(self, db: Session, *, obj_in: DocumentChunkCreate) -> DocumentChunk:
         return super().create(db, obj_in=obj_in)
 

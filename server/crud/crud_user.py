@@ -1,18 +1,12 @@
-from typing import List, Optional, TypeVar
-
-from pydantic import BaseModel
+from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
 from server.models.user import User
 from server.schemas.user import UserCreate, UserUpdate
 
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
-
 
 class CRUDUSER(CRUDBase[User, UserCreate, UserUpdate]):
-    filter_options = ["amount, number of generations"]
-
     def get_all(self, db: Session) -> List[User]:
         return db.query(User).all()
 

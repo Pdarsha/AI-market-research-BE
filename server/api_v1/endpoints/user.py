@@ -17,6 +17,7 @@ from server.utils.auth import (
     verify_refresh_token,
 )
 from server.utils.common import validate_email_send_otp
+from server.services.audit_logger import AuditLogger
 
 from ..deps import get_db
 
@@ -66,7 +67,6 @@ def build_login_response(
         ),
     )
 
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="USER_LOGIN",
         user_id=str(user.id),
@@ -187,7 +187,6 @@ async def get_profile(current_user=Depends(get_current_user)):
         username=uname,
     )
     logger.info("get_profile: user_id=%s", getattr(current_user, "id", None))
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="USER_PROFILE",
         user_id=str(current_user.id),
@@ -236,7 +235,6 @@ async def sign_up(data: schemas.UserCreateInput, db: Session = Depends(get_db)):
 
     otp_sent = await validate_email_send_otp(db, email, user.id)
     if otp_sent:
-        from server.services.audit_logger import AuditLogger
         AuditLogger.log(
             action="USER_SIGNUP",
             user_id=str(user.id),
@@ -301,7 +299,6 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
                 expires_delta=refresh_expires,
             )
             logger.info("verify_otp success: email=%s user_id=%s", email, user_obj.id)
-            from server.services.audit_logger import AuditLogger
             AuditLogger.log(
                 action="USER_VERIFY_OTP",
                 user_id=str(user_obj.id),
@@ -357,7 +354,6 @@ async def resend_otp(data: schemas.EmailSchema, db: Session = Depends(get_db)):
     otp_sent = await validate_email_send_otp(db, email, user_obj.id)
     if otp_sent:
         logger.info("resend_otp sent: email=%s user_id=%s", email, user_obj.id)
-        from server.services.audit_logger import AuditLogger
         AuditLogger.log(
             action="USER_RESEND_OTP",
             user_id=str(user_obj.id),
@@ -425,7 +421,6 @@ async def change_password(
         expires_delta=access_token_expires,
     )
 
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="USER_CHANGE_PASSWORD",
         user_id=str(user_obj.id),
@@ -462,7 +457,6 @@ async def forgot_password_send_otp(
         logger.info(
             "forgot_password_send_otp sent: email=%s user_id=%s", email, user_obj.id
         )
-        from server.services.audit_logger import AuditLogger
         AuditLogger.log(
             action="USER_FORGOT_PASSWORD_SEND_OTP",
             user_id=str(user_obj.id),
@@ -523,7 +517,6 @@ async def reset_forgot_password(
             logger.info(
                 "reset_forgot_password success: email=%s user_id=%s", email, user_obj.id
             )
-            from server.services.audit_logger import AuditLogger
             AuditLogger.log(
                 action="USER_RESET_FORGOT_PASSWORD",
                 user_id=str(user_obj.id),
@@ -588,7 +581,6 @@ async def update_profile(
         role=user_obj.role,
     )
     logger.info("update_profile success: user_id=%s", user_obj.id)
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="USER_UPDATE_PROFILE",
         user_id=str(user_obj.id),
@@ -640,7 +632,6 @@ async def refresh_access_token(
         data={"sub": user.email, "id": user.id}, expires_delta=access_token_expires
     )
 
-    from server.services.audit_logger import AuditLogger
     AuditLogger.log(
         action="USER_REFRESH_TOKEN",
         user_id=str(user.id),

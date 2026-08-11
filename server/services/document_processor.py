@@ -25,6 +25,7 @@ from server.models.workspace import Document, DocumentChunk
 from server.services.chunking_service import ChunkingService, get_chunking_service
 from server.services.embedding_service import EmbeddingService, get_embedding_service
 from server.services.ocr_service import OCRService, get_ocr_service
+from server.services.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,6 @@ class DocumentProcessor:
 
         # 3. Extract text.
         import time
-        from server.services.audit_logger import AuditLogger
 
         start_ocr = time.time()
         try:

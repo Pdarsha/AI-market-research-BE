@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy.orm import Session, selectinload, joinedload
+from sqlalchemy.orm import Session, selectinload
 
 from server.crud.base import CRUDBase
 from server.schemas.document_takeaways import (

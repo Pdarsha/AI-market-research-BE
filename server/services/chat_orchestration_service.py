@@ -43,6 +43,10 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 rag = get_rag_service()
 citation_svc = get_citation_service()
 
+# Shared thread pool executor for parallel task execution
+_planner_executor = ThreadPoolExecutor(max_workers=4)
+_retrieval_executor = ThreadPoolExecutor(max_workers=6)
+
 
 class ChatOrchestrationService:
     """Modularized & optimized service layer for AI Chat message orchestration."""
@@ -299,21 +303,21 @@ class ChatOrchestrationService:
             )
             company_to_resolve = conversation_company if conversation_company else optimized_prompt
             
-            with ThreadPoolExecutor(max_workers=4) as planner_exec:
-                fut_resolve = planner_exec.submit(
-                    rag.resolve_company, client, company_to_resolve, model=settings.LLM_MODEL
-                )
-                fut_doc = planner_exec.submit(
-                    rag.classify_requires_document, client, question=optimized_prompt, model=settings.LLM_MODEL
-                ) if document_ids else None
-                fut_intent = planner_exec.submit(
-                    rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
-                )
+            planner_exec = _planner_executor
+            fut_resolve = planner_exec.submit(
+                rag.resolve_company, client, company_to_resolve, model=settings.LLM_MODEL
+            )
+            fut_doc = planner_exec.submit(
+                rag.classify_requires_document, client, question=optimized_prompt, model=settings.LLM_MODEL
+            ) if document_ids else None
+            fut_intent = planner_exec.submit(
+                rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
+            )
 
-                resolved_company, resolved_ticker, is_sec_registrant = fut_resolve.result()
-                precomputed_is_document_question = fut_doc.result() if fut_doc else False
-                res_intent = fut_intent.result()
-                precomputed_intent, precomputed_general_intent = res_intent[0], res_intent[1]
+            resolved_company, resolved_ticker, is_sec_registrant = fut_resolve.result()
+            precomputed_is_document_question = fut_doc.result() if fut_doc else False
+            res_intent = fut_intent.result()
+            precomputed_intent, precomputed_general_intent = res_intent[0], res_intent[1]
 
         user_message = crud.chat_message.create(
             db=db,
@@ -490,9 +494,9 @@ class ChatOrchestrationService:
             futures = {}
             user_id_str = str(current_user.id)
 
-            with ThreadPoolExecutor(max_workers=6) as executor:
-                if is_document_intent:
-                    futures["rag"] = executor.submit(
+            executor = _retrieval_executor
+            if is_document_intent:
+                futures["rag"] = executor.submit(
                         rag.retrieve_documents_context, db, is_workspace_analysis, ws_name, user_id_str, document_ids, session.workspace_id, optimized_prompt, chat_id
                     )
                 if sec_tickers:

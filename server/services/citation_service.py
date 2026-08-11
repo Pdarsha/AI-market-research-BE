@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 from server.models.workspace import DocumentChunk
 from server.utils.markdown import tidy_markdown_spacing
+from server.services.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +273,6 @@ class CitationService:
         logger.debug("citations.filtered_citations_count: %d", len(markers) - len(citations))
         logger.debug("citations.final_response_snippet: %s", rewritten[:200] + "..." if len(rewritten) > 200 else rewritten)
 
-        from server.services.audit_logger import AuditLogger
         AuditLogger.log(
             action="CITATION_GENERATION",
             status="success",

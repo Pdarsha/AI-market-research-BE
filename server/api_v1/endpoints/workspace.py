@@ -197,14 +197,6 @@ def get_workspace(
     for f in workspace_files:
         chat_count = crud.document.get_chat_count_for_document(db, doc_id=f.id)
         chat_ids = crud.document.get_chat_ids_for_document(db, doc_id=f.id)
-        logger.info(
-            "TEMPORARY DEBUG - get_workspace - doc_id: %s, workspace_id: %s, associated_chat_ids_from_db: %s, returned_chat_count: %d, returned_chat_ids: %s",
-            f.id,
-            workspace_id,
-            chat_ids,
-            chat_count,
-            chat_ids,
-        )
         files_serialized.append(
             serialize_document(
                 f,
@@ -479,14 +471,6 @@ def list_workspace_docs(
     for f in files:
         chat_count = crud.document.get_chat_count_for_document(db, doc_id=f.id)
         chat_ids = crud.document.get_chat_ids_for_document(db, doc_id=f.id)
-        logger.info(
-            "TEMPORARY DEBUG - list_workspace_docs - doc_id: %s, workspace_id: %s, associated_chat_ids_from_db: %s, returned_chat_count: %d, returned_chat_ids: %s",
-            f.id,
-            workspace_id,
-            chat_ids,
-            chat_count,
-            chat_ids,
-        )
         serialized_files.append(
             serialize_document(
                 f,
@@ -529,14 +513,6 @@ async def get_workspace_document(
 
     chat_count = crud.document.get_chat_count_for_document(db, doc_id=document.id)
     chat_ids = crud.document.get_chat_ids_for_document(db, doc_id=document.id)
-    logger.info(
-        "TEMPORARY DEBUG - get_workspace_document - doc_id: %s, workspace_id: %s, associated_chat_ids_from_db: %s, returned_chat_count: %d, returned_chat_ids: %s",
-        document.id,
-        workspace_id,
-        chat_ids,
-        chat_count,
-        chat_ids,
-    )
 
     return JSONResponse(
         status_code=200,

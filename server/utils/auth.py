@@ -16,7 +16,7 @@ security = HTTPBearer()
 
 # to get a string like this run:
 # openssl rand -hex 32
-SECRET_KEY = "09d25w7erf656f6yg45ctv4y4yc6vh2c4xdf635d3y33099f6f0f4caa6cf63b88e8d3e7"
+SECRET_KEY = settings.AUTH_TOKEN
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 20160
 REFRESH_TOKEN_EXPIRE_MINUTES = 10080

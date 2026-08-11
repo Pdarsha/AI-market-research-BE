@@ -1,6 +1,5 @@
-from typing import Optional, TypeVar
+from typing import Optional
 
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -8,12 +7,8 @@ from server.crud.base import CRUDBase
 from server.models.workspace import Document, DocumentChatLink
 from server.schemas.workspace import CreateDocument, updateDocument
 
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
-
 
 class CRUDDocument(CRUDBase[Document, CreateDocument, updateDocument]):
-    filter_options = ["amount, number of generations"]
-
     def create(self, db: Session, *, obj_in: CreateDocument) -> Document:
         return super().create(db, obj_in=obj_in)
 
@@ -61,7 +56,6 @@ class CRUDDocument(CRUDBase[Document, CreateDocument, updateDocument]):
             .all()
         )
         return [r[0] for r in rows if r[0]]
-
 
     def delete_document_cleanup_chats(
         self, db: Session, *, doc_id: str, file_name: str, chats: list

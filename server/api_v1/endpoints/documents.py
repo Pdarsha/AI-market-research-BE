@@ -14,7 +14,6 @@ Page numbers and highlight rectangles are derived at read time from the PDF
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Optional
 
@@ -50,14 +49,12 @@ citations_router = APIRouter(prefix="/citations", tags=["Citations"])
 
 
 @citations_router.get("/roic/transcript/{ticker}")
-def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
+async def get_roic_transcript(ticker: str, current_user=Depends(get_current_user)):
     """API navigation target for a Roic.ai earnings-transcript citation."""
-    result = asyncio.run(roic_ai(query=ticker, limit=1, transcript=True))
+    result = await roic_ai(query=ticker, limit=1, transcript=True)
     transcript = result.get("latest_transcript")
     if result.get("error") or not transcript:
         raise HTTPException(status_code=404, detail="Roic.ai transcript not available")
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CITATION_GET_ROIC_TRANSCRIPT",
@@ -110,8 +107,6 @@ def get_citation(
         doc.id,
         page,
     )
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="CITATION_GET",
@@ -198,8 +193,6 @@ def get_document_viewer(
         document_id,
     )
 
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="DOCUMENT_VIEW",
         user_id=user_id_str,
@@ -269,8 +262,6 @@ def get_document_highlight(
         len(rects),
     )
 
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="DOCUMENT_HIGHLIGHT",
         user_id=str(current_user.id),
@@ -316,8 +307,6 @@ def get_document_file(
     abs_path = _abs_path(doc.storage_path)
     if not abs_path or not abs_path.exists():
         raise HTTPException(status_code=404, detail="File not found on server")
-
-    from server.services.audit_logger import AuditLogger
 
     AuditLogger.log(
         action="DOCUMENT_GET_FILE",
@@ -368,7 +357,7 @@ def export_conversation_pdf(
     for page in doc:
         links = page.get_links()
         total_links += len(links)
-        uri_links += len([l for l in links if l.get("kind") == fitz.LINK_URI])
+        uri_links += len([link for link in links if link.get("kind") == fitz.LINK_URI])
 
     AuditLogger.log(
         action="DOCUMENT_EXPORT",

@@ -1,15 +1,11 @@
-from typing import Optional, TypeVar
+from typing import Optional
 import logging
 import uuid
-
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
 from server.models.workspace import DocumentChatLink
 from server.schemas.workspace import DocumentChatLinkCreate, DocumentChatLinkUpdate
-
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +13,6 @@ logger = logging.getLogger(__name__)
 class CRUDDocumentChatLink(
     CRUDBase[DocumentChatLink, DocumentChatLinkCreate, DocumentChatLinkUpdate]
 ):
-    filter_options = ["amount, number of generations"]
-
     def create(self, db: Session, *, obj_in: DocumentChatLinkCreate) -> DocumentChatLink:
         return super().create(db, obj_in=obj_in)
 

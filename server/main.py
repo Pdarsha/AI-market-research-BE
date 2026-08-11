@@ -7,6 +7,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 from server.config import STATIC_DIR, create_storage_directories, settings
 from server.db.init_db import init_db
+from server.services.audit_logger import AuditLogger
 
 from .api import api_router
 
@@ -59,8 +60,6 @@ app.add_middleware(
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="API_ERROR",
         endpoint=request.url.path,
@@ -84,8 +83,6 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.exception(
         "Unhandled error on %s %s: %s", request.method, request.url.path, exc
     )
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="API_ERROR",
         endpoint=request.url.path,
@@ -106,8 +103,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    from server.services.audit_logger import AuditLogger
-
     AuditLogger.log(
         action="VALIDATION_ERROR",
         endpoint=request.url.path,
