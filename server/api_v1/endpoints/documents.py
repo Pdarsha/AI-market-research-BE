@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from server import crud, schemas
+from server.models.workspace import DocumentChunk
 from server.api_v1.deps import get_db
 from server.services.pdf_export_service import conversation_to_pdf
 from server.services.roic_ai_mcp import roic_ai
@@ -90,7 +91,7 @@ def get_citation(
     )
     if not chunk:
         # Fall back to checking if chunk exists regardless of user
-        chunk = db.query(crud.document_chunk.DocumentChunk).filter(crud.document_chunk.DocumentChunk.id == citation_id).first()
+        chunk = db.query(DocumentChunk).filter(DocumentChunk.id == citation_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="Citation not found")
 
@@ -129,43 +130,22 @@ def get_citation(
             "error": None,
             "data": {
                 "id": citation_id,
-                "citation_id": citation_id,
-                "title": doc.file_name,
-                "source_title": doc.file_name,
-                "display_label": disp_label,
-                "source_type": "document",
-                "type": "document",
-                "published_date": meta["uploaded_at"],
-                "date": meta["uploaded_at"],
-                "url": doc_url,
-                "document_url": doc_url,
-                "page": page,
-                "page_number": page,
-                "chunk_id": chunk.id,
                 "document_id": doc.id,
-                "document": {
-                    "id": doc.id,
-                    "name": doc.file_name,
-                    "type": doc.file_format,
-                    "size": meta["file_size"],
-                    "uploaded_at": meta["uploaded_at"],
-                    "url": doc_url,
-                },
-                "highlight_text": chunk.content,
-                "chunk_text": chunk.content,
-                "workspace_id": doc.workspace_id,
-                "metadata": {
-                    "author": meta["author"],
-                    "uploaded_at": meta["uploaded_at"],
-                    "file_size": meta["file_size"],
-                    "mime_type": meta["mime_type"],
-                    "page_count": meta["page_count"],
-                    "chunk_number": chunk.chunk_number,
-                    "total_chunks": chunk.total_chunks,
-                    "display_label": disp_label,
-                },
+                "document_name": doc.file_name,
+                "display_label": disp_label,
+                "file_format": doc.file_format,
+                "mime_type": meta["mime_type"],
+                "content_preview": chunk.content,
+                "snippet": chunk.content,
+                "page_number": page,
+                "page_count": meta["page_count"],
+                "file_size": meta["file_size"],
+                "uploaded_at": meta["uploaded_at"],
+                "document_url": doc_url,
+                "viewer_url": doc_url,
+                "navigable": True,
             },
-            "message": "Citation fetched successfully.",
+            "message": "Citation details fetched successfully.",
         },
     )
 
@@ -180,7 +160,7 @@ def get_document_viewer(
     document_id: str,
     request: Request,
     db=Depends(get_db),
-    current_user=Depends(get_optional_current_user),
+    current_user=Depends(get_current_user),
 ):
     """Secure viewer URL + metadata + page count + document type."""
     doc = get_owned_document(db, document_id, current_user)
@@ -232,9 +212,9 @@ def get_document_viewer(
 @documents_router.get("/{document_id}/highlight")
 def get_document_highlight(
     document_id: str,
-    text: Optional[str] = Query(None, description="Text to locate/highlight"),
-    chunk_id: Optional[str] = Query(None, description="Chunk whose text to highlight"),
-    page: Optional[int] = Query(None, description="0-based page to search (optional)"),
+    page: Optional[int] = Query(None, description="1-based page number constraint"),
+    chunk_id: Optional[str] = Query(None, description="Chunk UUID to pull text from"),
+    text: Optional[str] = Query(None, description="Exact text to locate in PDF"),
     db=Depends(get_db),
     current_user=Depends(get_optional_current_user),
 ):
@@ -248,7 +228,7 @@ def get_document_highlight(
             db, citation_id=chunk_id, user_id=user_id_str
         )
         if not chunk:
-            chunk = db.query(crud.document_chunk.DocumentChunk).filter(crud.document_chunk.DocumentChunk.id == chunk_id).first()
+            chunk = db.query(DocumentChunk).filter(DocumentChunk.id == chunk_id).first()
         search_text = chunk.content if chunk else None
     if not search_text:
         raise HTTPException(status_code=400, detail="Provide 'text' or 'chunk_id'.")
