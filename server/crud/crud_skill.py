@@ -20,28 +20,20 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         user_id: str,
         skip: int = 0,
         limit: int = 100,
-        status: str = None
+        status: str = None,
     ) -> List[Skill]:
         db_query = db.query(Skill).filter(Skill.user_id == user_id)
 
         if status:
             db_query = db_query.filter(Skill.status == status)
 
-        return (
-            db_query
-            .order_by(desc(Skill.updated_at))
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        return db_query.order_by(desc(Skill.updated_at)).offset(skip).limit(limit).all()
 
     def get_by_user_and_name(
         self, db: Session, *, user_id: str, name: str
     ) -> Optional[Skill]:
         return (
-            db.query(Skill)
-            .filter(Skill.user_id == user_id, Skill.name == name)
-            .first()
+            db.query(Skill).filter(Skill.user_id == user_id, Skill.name == name).first()
         )
 
     def get_by_user_and_id(
@@ -61,10 +53,10 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         user_id: str,
         base_name: str,
         exclude_skill_id: Optional[str] = None,
-        max_attempts: int = 100
+        max_attempts: int = 100,
     ) -> str:
         """Generate a unique skill name for a given user.
-        
+
         If base_name is not already used by user_id, returns base_name.
         Otherwise appends incrementing integer (2, 3, 4...) until a unique name is found.
         Example:
@@ -76,8 +68,7 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
 
         # Check if base_name is available
         query = db.query(Skill).filter(
-            Skill.user_id == user_id,
-            Skill.name == base_name
+            Skill.user_id == user_id, Skill.name == base_name
         )
         if exclude_skill_id:
             query = query.filter(Skill.id != exclude_skill_id)
@@ -101,8 +92,7 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
                 candidate = f"{root_name[:100 - len(suffix)]}{suffix}"
 
             q = db.query(Skill).filter(
-                Skill.user_id == user_id,
-                Skill.name == candidate
+                Skill.user_id == user_id, Skill.name == candidate
             )
             if exclude_skill_id:
                 q = q.filter(Skill.id != exclude_skill_id)
@@ -114,24 +104,19 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         raise ValueError(f"Skill with name '{base_name}' already exists")
 
     def create_skill(
-        self,
-        db: Session,
-        *,
-        user_id: str,
-        obj_in: SkillCreate,
-        status: str = "draft"
+        self, db: Session, *, user_id: str, obj_in: SkillCreate, status: str = "draft"
     ) -> Skill:
         """Create a new skill with ownership and status, ensuring name uniqueness and handling race conditions.
-        
+
         Args:
             db: Database session
             user_id: Owner's user ID
             obj_in: Validated skill data (SkillCreate schema)
             status: Initial status (draft)
-            
+
         Returns:
             Created Skill record
-            
+
         Raises:
             ValueError: If unique skill name cannot be created or saved
         """
@@ -149,7 +134,9 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
             skill_data["status"] = status
             skill_data["version"] = "1.0.0"
 
-            db_data = {k: v for k, v in skill_data.items() if k in Skill.__table__.columns}
+            db_data = {
+                k: v for k, v in skill_data.items() if k in Skill.__table__.columns
+            }
             skill = Skill(**db_data)
             try:
                 db.add(skill)
@@ -159,7 +146,9 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
             except IntegrityError:
                 db.rollback()
                 if attempt == max_attempts - 1:
-                    raise ValueError(f"Skill with name '{candidate_name}' already exists")
+                    raise ValueError(
+                        f"Skill with name '{candidate_name}' already exists"
+                    )
 
     def publish_skill(
         self,
@@ -169,27 +158,29 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         user_id: str,
     ) -> Optional[Skill]:
         """Publish a skill (change status to published).
-        
+
         Args:
             db: Database session
             skill_id: ID of the skill to publish
             user_id: Owner's user ID (for ownership verification)
-            
+
         Returns:
             Updated Skill record or None if not found/not owned
-            
+
         Raises:
             ValueError: If skill is not in a valid state for publishing
         """
         skill = self.get_by_user_and_id(db, user_id=user_id, skill_id=skill_id)
-        
+
         if not skill:
             return None
-        
+
         # Validate state transition - only draft can be published
         if skill.status != SkillStatus.DRAFT.value:
-            raise ValueError(f"Cannot publish skill with status '{skill.status}'. Must be draft.")
-        
+            raise ValueError(
+                f"Cannot publish skill with status '{skill.status}'. Must be draft."
+            )
+
         skill.status = SkillStatus.PUBLISHED.value
         skill.published_at = datetime.utcnow()
         # Increment version for publish (major version bump)
@@ -200,10 +191,41 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
                 skill.version = f"{major}.0.0"
         except (ValueError, IndexError):
             skill.version = "2.0.0"
-        
+
         db.commit()
         db.refresh(skill)
         return skill
+
+    def fetch_skills_by_ids(
+        self, db: Session, *, skill_ids: List[str], user_id: str
+    ) -> List[Skill]:
+        """Fetch multiple skills by their IDs."""
+        return (
+            db.query(Skill)
+            .filter(
+                Skill.id.in_(skill_ids),
+                Skill.user_id == str(user_id),
+                Skill.status == SkillStatus.PUBLISHED.value,
+            )
+            .all()
+        )
+
+    def get_candidate_skills(self, db: Session, *, user_id: str) -> List[Skill]:
+        """Get candidate skills for a user, ordered by most recently updated.
+
+        Args:
+            db: Database session
+            user_id: Owner's user ID
+            max_skills: Maximum number of skills to return
+        """
+        return (
+            db.query(Skill)
+            .filter(
+                Skill.user_id == user_id,
+                Skill.status == SkillStatus.PUBLISHED.value,
+            )
+            .all()
+        )
 
 
 skill = CRUDSkill(Skill)

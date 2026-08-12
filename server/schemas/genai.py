@@ -51,11 +51,13 @@ class ChatMessageBase(BaseModel):
 class ChatMessageRequest(BaseModel):
     content: str
     document_ids: Optional[list[str]] = None
+    skill_ids: Optional[list[str]] = None
     workspace_id: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[Literal["auto", "think_longer", "deep_research"]] = "auto"
     create_grid: Optional[bool] = None
     action: Optional[Literal["chat", "analyze"]] = "chat"
+    stream: Optional[bool] = True
 
 
 class CitationMetadata(BaseModel):

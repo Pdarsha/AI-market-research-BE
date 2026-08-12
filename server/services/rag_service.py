@@ -266,6 +266,7 @@ class RAGService:
         client: Any = None,
         model: str | None = None,
         intent: str | None = None,
+        skills_context: str | None = None,
     ) -> list[dict]:
         """Prompt generation.
 
@@ -296,6 +297,7 @@ class RAGService:
         sec_context = _truncate(sec_context, 2000)
         roic_context = _truncate(roic_context, 2000)
         companies_house_context = _truncate(companies_house_context, 2000)
+        skills_context = _truncate(skills_context, 5000)
         
         # Aggressively trim history: keep only last 2 messages (1 interaction turn) and truncate their content
         if history:
@@ -323,6 +325,9 @@ class RAGService:
             )
         else:
             system_prompt = ai_assistent(intent=intent)
+
+        if skills_context:
+            system_prompt += f"\n\n{skills_context}"
 
         if intent not in ["Greeting", "Small Talk"]:
             system_prompt += followup_instruction_block()
