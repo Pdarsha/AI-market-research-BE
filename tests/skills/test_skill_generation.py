@@ -128,9 +128,9 @@ class TestSkillGenerationPrompt:
         """All fields exceeding max length should fail validation."""
         draft = {
             "name": "x" * 101,
-            "description": "x" * 501,
-            "trigger_description": "x" * 501,
-            "instructions": "x" * 2001,
+            "description": "x" * 2001,
+            "trigger_description": "x" * 1001,
+            "instructions": "x" * 10001,
         }
         is_valid, errors = skill_validation_service.validate_skill_draft(draft)
         assert is_valid is False

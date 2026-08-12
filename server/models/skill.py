@@ -2,8 +2,9 @@ import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, String, Text
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
+from server.utils.markdown import render_rich_text
 
 from server.db.base_class import Base
 
@@ -35,7 +36,20 @@ class Skill(Base):
 
     user = relationship("User")
 
+    @property
+    def description_html(self) -> str:
+        return render_rich_text(self.description) if self.description else ""
+
+    @property
+    def trigger_description_html(self) -> str:
+        return render_rich_text(self.trigger_description) if self.trigger_description else ""
+
+    @property
+    def instructions_html(self) -> str:
+        return render_rich_text(self.instructions) if self.instructions else ""
+
     __table_args__ = (
         Index("ix_skills_user_id", "user_id"),
         Index("ix_skills_status", "status"),
+        UniqueConstraint("user_id", "name", name="uix_skills_user_id_name"),
     )

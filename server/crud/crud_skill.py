@@ -1,7 +1,9 @@
+import re
 from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import desc
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server.crud.base import CRUDBase
@@ -18,11 +20,16 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         user_id: str,
         skip: int = 0,
         limit: int = 100,
+        status: str = None
     ) -> List[Skill]:
+        db_query = db.query(Skill).filter(Skill.user_id == user_id)
+
+        if status:
+            db_query = db_query.filter(Skill.status == status)
+
         return (
-            db.query(self.model)
-            .filter(self.model.user_id == user_id)
-            .order_by(desc(self.model.updated_at))
+            db_query
+            .order_by(desc(Skill.updated_at))
             .offset(skip)
             .limit(limit)
             .all()
@@ -32,8 +39,8 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         self, db: Session, *, user_id: str, name: str
     ) -> Optional[Skill]:
         return (
-            db.query(self.model)
-            .filter(self.model.user_id == user_id, self.model.name == name)
+            db.query(Skill)
+            .filter(Skill.user_id == user_id, Skill.name == name)
             .first()
         )
 
@@ -42,10 +49,69 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
     ) -> Optional[Skill]:
         """Get a skill by ID, verifying ownership."""
         return (
-            db.query(self.model)
-            .filter(self.model.id == skill_id, self.model.user_id == user_id)
+            db.query(Skill)
+            .filter(Skill.id == skill_id, Skill.user_id == user_id)
             .first()
         )
+
+    def get_unique_skill_name(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        base_name: str,
+        exclude_skill_id: Optional[str] = None,
+        max_attempts: int = 100
+    ) -> str:
+        """Generate a unique skill name for a given user.
+        
+        If base_name is not already used by user_id, returns base_name.
+        Otherwise appends incrementing integer (2, 3, 4...) until a unique name is found.
+        Example:
+        'Render Morning Brief' -> 'Render Morning Brief 2' -> 'Render Morning Brief 3'
+        """
+        base_name = (base_name or "").strip()
+        if not base_name:
+            base_name = "Untitled Skill"
+
+        # Check if base_name is available
+        query = db.query(Skill).filter(
+            Skill.user_id == user_id,
+            Skill.name == base_name
+        )
+        if exclude_skill_id:
+            query = query.filter(Skill.id != exclude_skill_id)
+        if not query.first():
+            return base_name
+
+        # Extract root name and starting counter if base_name ends with a number
+        match = re.match(r"^(.*?)(?:\s+(\d+))?$", base_name)
+        if match and match.group(2):
+            root_name = match.group(1).strip()
+            counter = int(match.group(2)) + 1
+        else:
+            root_name = base_name
+            counter = 2
+
+        attempts = 0
+        while attempts < max_attempts:
+            candidate = f"{root_name} {counter}"
+            if len(candidate) > 100:
+                suffix = f" {counter}"
+                candidate = f"{root_name[:100 - len(suffix)]}{suffix}"
+
+            q = db.query(Skill).filter(
+                Skill.user_id == user_id,
+                Skill.name == candidate
+            )
+            if exclude_skill_id:
+                q = q.filter(Skill.id != exclude_skill_id)
+            if not q.first():
+                return candidate
+            counter += 1
+            attempts += 1
+
+        raise ValueError(f"Skill with name '{base_name}' already exists")
 
     def create_skill(
         self,
@@ -55,7 +121,7 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
         obj_in: SkillCreate,
         status: str = "draft"
     ) -> Skill:
-        """Create a new skill with ownership and status.
+        """Create a new skill with ownership and status, ensuring name uniqueness and handling race conditions.
         
         Args:
             db: Database session
@@ -67,24 +133,33 @@ class CRUDSkill(CRUDBase[Skill, SkillCreate, SkillUpdate]):
             Created Skill record
             
         Raises:
-            ValueError: If skill with same name already exists for user
+            ValueError: If unique skill name cannot be created or saved
         """
-        # Check for duplicate name
-        existing = self.get_by_user_and_name(db, user_id=user_id, name=obj_in.name)
-        if existing:
-            raise ValueError(f"Skill with name '{obj_in.name}' already exists")
+        candidate_name = obj_in.name
+        max_attempts = 5
 
-        # Create skill object with user_id and status
-        skill_data = obj_in.model_dump()
-        skill_data["user_id"] = user_id
-        skill_data["status"] = status
-        skill_data["version"] = "1.0.0"
-        
-        skill = self.model(**skill_data)
-        db.add(skill)
-        db.commit()
-        db.refresh(skill)
-        return skill
+        for attempt in range(max_attempts):
+            unique_name = self.get_unique_skill_name(
+                db, user_id=user_id, base_name=candidate_name
+            )
+
+            skill_data = obj_in.model_dump()
+            skill_data["name"] = unique_name
+            skill_data["user_id"] = user_id
+            skill_data["status"] = status
+            skill_data["version"] = "1.0.0"
+
+            db_data = {k: v for k, v in skill_data.items() if k in Skill.__table__.columns}
+            skill = Skill(**db_data)
+            try:
+                db.add(skill)
+                db.commit()
+                db.refresh(skill)
+                return skill
+            except IntegrityError:
+                db.rollback()
+                if attempt == max_attempts - 1:
+                    raise ValueError(f"Skill with name '{candidate_name}' already exists")
 
     def publish_skill(
         self,

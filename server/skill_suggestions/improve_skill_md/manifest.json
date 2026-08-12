@@ -1,0 +1,10 @@
+{
+  "id": "improve-skill-md",
+  "title": "Improve SKILL.md",
+  "prompt": "Improve this SKILL.md by adding better trigger phrases and operational instructions.",
+  "chip_text": "Improve this SKILL.md by adding better trigger phras...",
+  "description": "Improve this SKILL.md by adding better trigger phrases and operational instructions.",
+  "category": "quality",
+  "enabled": true,
+  "display_order": 2
+}

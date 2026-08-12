@@ -34,6 +34,11 @@ from server.services.prompt_template_registry import (
     PromptTemplateRegistry,
     get_prompt_template_registry,
 )
+from server.services.skill_suggestion_registry import (
+    SkillSuggestion,
+    SkillSuggestionRegistry,
+    get_skill_suggestion_registry,
+)
 from server.services.audit_logger import AuditLogger
 
 __all__ = [
@@ -59,6 +64,9 @@ __all__ = [
     "PromptTemplate",
     "PromptTemplateRegistry",
     "get_prompt_template_registry",
+    "SkillSuggestion",
+    "SkillSuggestionRegistry",
+    "get_skill_suggestion_registry",
     "AuditLogger",
 ]
 

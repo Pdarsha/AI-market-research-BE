@@ -1,0 +1,10 @@
+{
+  "id": "validation-and-packaging",
+  "title": "Validation and packaging",
+  "prompt": "Set up validation and packaging for my existing skill so it's ready to publish.",
+  "chip_text": "Set up validation and packaging for my existing skill so it's ready to publish",
+  "description": "Set up validation and packaging for my existing skill so it's ready to publish.",
+  "category": "packaging",
+  "enabled": true,
+  "display_order": 3
+}

@@ -7,6 +7,7 @@ Supports editing and regenerating existing drafts based on user feedback.
 import json
 import logging
 from typing import Any, Dict, Optional
+from server.utils.markdown import render_rich_text
 
 from openai import OpenAI
 
@@ -39,11 +40,18 @@ class SkillGenerationService:
     def __init__(self, model: Optional[str] = None):
         self.model = model or settings.LLM_MODEL
     
-    def generate_draft(self, user_request: str) -> Dict[str, Any]:
+    def generate_draft(
+        self,
+        user_request: str,
+        user_id: Optional[str] = None,
+        db: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         """Generate a Skill draft from a natural language request.
         
         Args:
             user_request: User's natural language description of the desired skill
+            user_id: Optional user ID for ensuring unique skill name
+            db: Optional database session for ensuring unique skill name
             
         Returns:
             Dictionary with keys: name, description, trigger_description, instructions
@@ -68,13 +76,27 @@ class SkillGenerationService:
             {"role": "user", "content": skill_generation_prompt(user_request.strip())},
         ]
         
-        return self._call_llm_and_validate(messages, "generate")
+        draft = self._call_llm_and_validate(messages, "generate")
+
+        if user_id and db and draft.get("name"):
+            from server import crud
+            draft["name"] = crud.skill.get_unique_skill_name(
+                db, user_id=user_id, base_name=draft["name"]
+            )
+
+        draft["description_html"] = render_rich_text(draft.get("description", ""))
+        draft["trigger_description_html"] = render_rich_text(draft.get("trigger_description", ""))
+        draft["instructions_html"] = render_rich_text(draft.get("instructions", ""))
+
+        return draft
     
     def edit_draft(
         self,
         current_draft: Dict[str, Any],
         user_feedback: str,
-        regenerate_all: bool = False
+        regenerate_all: bool = False,
+        user_id: Optional[str] = None,
+        db: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Edit or regenerate a Skill draft based on user feedback.
         
@@ -82,6 +104,8 @@ class SkillGenerationService:
             current_draft: The existing skill draft with all four fields
             user_feedback: Natural language description of desired changes
             regenerate_all: If True, regenerate complete skill; if False, apply partial changes
+            user_id: Optional user ID for ensuring unique skill name
+            db: Optional database session for ensuring unique skill name
             
         Returns:
             Updated dictionary with all four fields
@@ -121,7 +145,16 @@ class SkillGenerationService:
             {"role": "user", "content": skill_edit_prompt(current_draft, user_feedback.strip(), regenerate_all)},
         ]
         
-        return self._call_llm_and_validate(messages, "edit")
+        draft = self._call_llm_and_validate(messages, "edit")
+
+        if user_id and db and draft.get("name"):
+            from server import crud
+            exclude_id = current_draft.get("id")
+            draft["name"] = crud.skill.get_unique_skill_name(
+                db, user_id=user_id, base_name=draft["name"], exclude_skill_id=exclude_id
+            )
+
+        return draft
     
     def _call_llm_and_validate(self, messages: list, operation: str) -> Dict[str, Any]:
         """Call LLM and validate response. Shared logic for generate and edit."""

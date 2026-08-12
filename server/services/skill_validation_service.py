@@ -114,7 +114,8 @@ class SkillValidationService:
         draft: Dict[str, Any],
         user_id: Optional[str] = None,
         check_uniqueness: bool = True,
-        include_ai_quality: bool = False
+        include_ai_quality: bool = False,
+        exclude_skill_id: Optional[str] = None
     ) -> ValidationResult:
         """Validate a skill draft with deterministic checks.
         
@@ -123,6 +124,7 @@ class SkillValidationService:
             user_id: Optional user ID for uniqueness check
             check_uniqueness: Whether to check name uniqueness for user
             include_ai_quality: Whether to include AI-based quality check (separate)
+            exclude_skill_id: Optional skill ID to exclude from uniqueness check
             
         Returns:
             ValidationResult with errors and warnings
@@ -136,8 +138,14 @@ class SkillValidationService:
         self._validate_instructions_quality(draft, result)
         
         # Check name uniqueness if user_id provided
+        exclude_id = exclude_skill_id or draft.get("id")
         if check_uniqueness and user_id and draft.get("name"):
-            self._validate_name_uniqueness(draft["name"], user_id, result)
+            self._validate_name_uniqueness(
+                name=draft["name"],
+                user_id=user_id,
+                result=result,
+                exclude_skill_id=exclude_id
+            )
         
         # Run AI quality check if requested (separate from deterministic)
         if include_ai_quality and result.is_valid:
@@ -272,14 +280,24 @@ class SkillValidationService:
                 code="VAGUE_INSTRUCTIONS"
             )
     
-    def _validate_name_uniqueness(self, name: str, user_id: str, result: ValidationResult):
-        """Check if skill name is unique for the user."""
+    def _validate_name_uniqueness(
+        self,
+        name: str,
+        user_id: str,
+        result: ValidationResult,
+        exclude_skill_id: Optional[str] = None
+    ):
+        """Check if skill name is unique for the user, excluding current skill ID if updating."""
         db = self._get_db()
         try:
-            existing = db.query(Skill).filter(
+            query = db.query(Skill).filter(
                 Skill.user_id == user_id,
                 Skill.name == name
-            ).first()
+            )
+            if exclude_skill_id:
+                query = query.filter(Skill.id != exclude_skill_id)
+            
+            existing = query.first()
             
             if existing:
                 result.add_error(

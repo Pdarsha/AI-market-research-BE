@@ -9,6 +9,9 @@ class SkillBase(BaseModel):
     description: Optional[str] = Field(None, description="Description of the skill")
     trigger_description: Optional[str] = Field(None, description="Description of when this skill should be triggered")
     instructions: Optional[str] = Field(None, description="Instructions for the skill")
+    description_html: Optional[str] = Field(None, description="Rendered HTML description")
+    trigger_description_html: Optional[str] = Field(None, description="Rendered HTML trigger description")
+    instructions_html: Optional[str] = Field(None, description="Rendered HTML instructions")
     status: str = Field(default="draft", description="Status of the skill: draft, published")
     version: str = Field(default="1.0.0", description="Version of the skill")
 
@@ -25,6 +28,9 @@ class SkillUpdate(BaseModel):
     description: Optional[str] = None
     trigger_description: Optional[str] = None
     instructions: Optional[str] = None
+    description_html: Optional[str] = None
+    trigger_description_html: Optional[str] = None
+    instructions_html: Optional[str] = None
     status: Optional[str] = None
     version: Optional[str] = None
 
@@ -67,6 +73,9 @@ class SkillDraftResponse(BaseModel):
     description: str = Field(..., description="Generated skill description")
     trigger_description: str = Field(..., description="Generated trigger description")
     instructions: str = Field(..., description="Generated operational instructions")
+    description_html: Optional[str] = Field(default=None, description="Rendered HTML description")
+    trigger_description_html: Optional[str] = Field(default=None, description="Rendered HTML trigger description")
+    instructions_html: Optional[str] = Field(default=None, description="Rendered HTML instructions")
 
 
 class SkillDraftError(BaseModel):

@@ -1,0 +1,10 @@
+{
+  "id": "ascii-art-diagrams",
+  "title": "ASCII art diagrams",
+  "prompt": "Create a new skill for generating ASCII art diagrams from a text description.",
+  "chip_text": "Create a new skill for generating ASCII art diagrams ...",
+  "description": "Create a new skill for generating ASCII art diagrams from a text description.",
+  "category": "diagrams",
+  "enabled": true,
+  "display_order": 1
+}
