@@ -57,6 +57,29 @@ class SkillSuggestionRegistry:
     def __init__(self, suggestions_dir: Path = SUGGESTIONS_DIR):
         self.suggestions_dir = suggestions_dir
         self._cache: Dict[str, SkillSuggestion] = {}
+        self.reload()
+
+    def reload(self) -> None:
+        """Scan suggestions_dir and populate _cache with valid SkillSuggestion instances."""
+        self._cache.clear()
+        if not self.suggestions_dir.exists() or not self.suggestions_dir.is_dir():
+            return
+
+        for item in self.suggestions_dir.iterdir():
+            if item.is_dir():
+                manifest_file = item / "manifest.json"
+                if manifest_file.exists() and manifest_file.is_file():
+                    try:
+                        data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                        if isinstance(data, dict) and all(field in data for field in REQUIRED_FIELDS):
+                            suggestion_id = data["id"]
+                            self._cache[suggestion_id] = SkillSuggestion(
+                                id=suggestion_id,
+                                manifest=data,
+                                suggestion_dir=item,
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to parse suggestion manifest %s: %s", manifest_file, e)
 
     def list_suggestions(self, include_disabled: bool = False) -> List[SkillSuggestion]:
         """Return list of suggestions sorted by display_order."""

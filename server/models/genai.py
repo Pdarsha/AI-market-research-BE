@@ -71,6 +71,9 @@ class ChatMessage(Base):
     citations = Column(
         JSON, nullable=True
     )
+    skills_used = Column(
+        JSON, nullable=True
+    )
     mode_used = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -36,6 +36,9 @@ from server.utils.source_attribution import (
     cited_document_names,
     source_attribution_from_citations,
 )
+from server.services.skill_selection_service import get_skill_selection_service
+from server.services.skill_instruction_service import get_skill_instruction_service
+
 
 logger = logging.getLogger(__name__)
 
@@ -228,11 +231,73 @@ class ChatOrchestrationService:
             or request.content.strip().lower() == "analyze this workspace"
         )
 
+        # Selected skills (manual or automatic)
+        manual_skills = []
+        auto_skills = []
+        if request.skill_ids:
+            if len(request.skill_ids) > 5:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A maximum of 5 skills can be selected for a query.",
+                )
+
+            unique_skill_ids = list(dict.fromkeys(request.skill_ids))
+            if len(unique_skill_ids) > 5:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A maximum of 5 skills can be selected for a query.",
+                )
+            fetched_skills = crud.skill.fetch_skills_by_ids(
+                db, skill_ids=unique_skill_ids, user_id=str(current_user.id)
+            )
+
+            fetched_map = {s.id: s for s in fetched_skills}
+            for sid in unique_skill_ids:
+                if sid not in fetched_map:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Skill '{sid}' not found, unauthorized, or not published.",
+                    )
+
+            manual_skills = [fetched_map[sid] for sid in unique_skill_ids]
+        else:
+            # Trigger automatic skill selection from user's published skills
+            skill_selection_svc = get_skill_selection_service()
+            auto_skills = skill_selection_svc.select_skills(
+                db=db,
+                user_id=str(current_user.id),
+                query=request.content,
+                max_skills=5,
+            )
+
+        active_skills = manual_skills if request.skill_ids else auto_skills
+        selection_mode = "manual" if request.skill_ids else ("automatic" if auto_skills else "none")
+
+        logger.info(
+            "[SKILL_CHAT_ORCHESTRATION] User %s | selection_mode=%s | selected_skill_ids=%s | selected_skill_names=%s | count=%d",
+            str(current_user.id),
+            selection_mode,
+            [s.id for s in active_skills],
+            [s.name for s in active_skills],
+            len(active_skills),
+        )
+
+        # Step 3: Load complete instructions for final selected skills (up to 5)
+        skill_instruction_svc = get_skill_instruction_service()
+        skills_context, skills_meta = skill_instruction_svc.load_and_format_instructions(
+            skills=active_skills,
+            max_skills=5,
+        )
+        for sk_meta in skills_meta:
+            sk_meta["selection_type"] = selection_mode
+            sk_meta["is_auto"] = (selection_mode != "manual")
+
         matched_agent = None
-        for _, agent_info in AGENT_PROMPTS.items():
-            if agent_info["prompt_substring"] in request.content:
-                matched_agent = agent_info
-                break
+        if not active_skills:
+            for _, agent_info in AGENT_PROMPTS.items():
+                if agent_info["prompt_substring"] in request.content:
+                    matched_agent = agent_info
+                    break
 
         if is_workspace_analysis and session.workspace_id:
             documents = crud.document.get_multi_by_workspace(
@@ -350,7 +415,10 @@ class ChatOrchestrationService:
             is_document_question = precomputed_is_document_question
             live_internet_keywords = ["latest", "live", "current", "news today"]
             requires_live_internet = any(kw in optimized_prompt.lower() for kw in live_internet_keywords)
-            is_document_intent = is_document_question or explicit_document_request
+            if document_ids and precomputed_general_intent not in ["Greeting", "Small Talk"]:
+                is_document_intent = True
+            else:
+                is_document_intent = is_document_question or explicit_document_request
 
             if (
                 document_ids
@@ -660,6 +728,7 @@ class ChatOrchestrationService:
                 roic_context=roic_context,
                 companies_house_context=companies_house_context,
                 intent=intent,
+                skills_context=skills_context,
             )
             mode_used = "auto"
             selected_model = settings.LLM_MODEL
@@ -756,8 +825,10 @@ class ChatOrchestrationService:
                 if cited_sources:
                     try:
                         ai_response, citations = citation_svc.generate_citations(ai_response, cited_sources)
-                        if not citations and retrieved_chunks:
+                        if not citations:
                             citations = citation_svc.generate_citations_from_chunks(cited_sources)
+                        if citations:
+                            ai_response = citation_svc.attach_fallback_markers(ai_response, citations)
                     except Exception as _cite_exc:
                         logger.exception("Citation generation failed: %s", _cite_exc)
                         ai_response = strip_citation_markers(ai_response)
@@ -780,6 +851,7 @@ class ChatOrchestrationService:
                     document_ids=document_ids or None,
                     source_documents=source_documents,
                     citations=citations,
+                    skills_used=skills_meta,
                     mode_used=mode_used,
                 ),
             )
@@ -797,6 +869,10 @@ class ChatOrchestrationService:
                     "follow_up_questions": follow_up_questions,
                     "mode_requested": getattr(request, "mode", None),
                     "mode_used": mode_used,
+                    "skill_selection_mode": selection_mode,
+                    "selected_skill_ids": [s.id for s in active_skills],
+                    "selected_skill_names": [s.name for s in active_skills],
+                    "applied_skills_count": len(active_skills),
                 },
             )
 
@@ -811,7 +887,12 @@ class ChatOrchestrationService:
                 "attachments": [],
                 "source_documents": source_documents,
                 "citations": citations,
+                "sources": citations,
                 "source_attribution": source_attribution,
+                "skills_used": skills_meta,
+                "selected_skills": skills_meta,
+                "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                "selection_mode": selection_mode,
                 "follow_up_questions": follow_up_questions,
                 "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
                 "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
@@ -827,6 +908,11 @@ class ChatOrchestrationService:
                     "response": ai_response,
                     "document_ids": document_ids,
                     "active_document_ids": document_ids,
+                    "skills_used": skills_meta,
+                    "selected_skills": skills_meta,
+                    "skills": skills_meta,
+                    "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                    "selection_mode": selection_mode,
                     "mode_used": mode_used,
                     "uploaded_document_ids": (
                         document_ids if context_reason == "new_upload" else []
@@ -835,6 +921,7 @@ class ChatOrchestrationService:
                     "used_web_search": used_web,
                     "source_documents": source_documents,
                     "citations": citations,
+                    "sources": citations,
                     "source_attribution": source_attribution,
                     "web_sources": web_sources,
                     "financial_news": financial_news_response,

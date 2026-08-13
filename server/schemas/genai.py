@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, Union
 
 from pydantic import BaseModel
 
@@ -51,17 +51,22 @@ class ChatMessageBase(BaseModel):
 class ChatMessageRequest(BaseModel):
     content: str
     document_ids: Optional[list[str]] = None
+    skill_ids: Optional[list[str]] = None
     workspace_id: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[Literal["auto", "think_longer", "deep_research"]] = "auto"
     create_grid: Optional[bool] = None
     action: Optional[Literal["chat", "analyze"]] = "chat"
+    stream: Optional[bool] = True
 
 
 class CitationMetadata(BaseModel):
     """Provider-neutral citation schema; legacy fields remain optional."""
     id: str
-    citation_id: Optional[str] = None
+    citation_id: Optional[Union[int, str]] = None
+    citation_number: Optional[Union[int, str]] = None
+    number: Optional[Union[int, str]] = None
+    index: Optional[Union[int, str]] = None
     type: Optional[str] = None
     provider: Optional[str] = None
     description: Optional[str] = None
@@ -104,6 +109,7 @@ class ChatMessageCreate(ChatMessageBase):
     document_ids: Optional[list[str]] = None
     source_documents: Optional[list] = None
     citations: Optional[list[CitationMetadata]] = None
+    skills_used: Optional[list] = None
     mode_used: Optional[str] = None
 
 
