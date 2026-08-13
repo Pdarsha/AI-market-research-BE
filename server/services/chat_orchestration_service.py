@@ -274,10 +274,11 @@ class ChatOrchestrationService:
         selection_mode = "manual" if request.skill_ids else ("automatic" if auto_skills else "none")
 
         logger.info(
-            "[SKILL_CHAT_ORCHESTRATION] User %s | selection_mode=%s | selected_skill_ids=%s | count=%d",
+            "[SKILL_CHAT_ORCHESTRATION] User %s | selection_mode=%s | selected_skill_ids=%s | selected_skill_names=%s | count=%d",
             str(current_user.id),
             selection_mode,
             [s.id for s in active_skills],
+            [s.name for s in active_skills],
             len(active_skills),
         )
 
@@ -287,6 +288,9 @@ class ChatOrchestrationService:
             skills=active_skills,
             max_skills=5,
         )
+        for sk_meta in skills_meta:
+            sk_meta["selection_type"] = selection_mode
+            sk_meta["is_auto"] = (selection_mode != "manual")
 
         matched_agent = None
         if not active_skills:
@@ -411,7 +415,10 @@ class ChatOrchestrationService:
             is_document_question = precomputed_is_document_question
             live_internet_keywords = ["latest", "live", "current", "news today"]
             requires_live_internet = any(kw in optimized_prompt.lower() for kw in live_internet_keywords)
-            is_document_intent = is_document_question or explicit_document_request
+            if document_ids and precomputed_general_intent not in ["Greeting", "Small Talk"]:
+                is_document_intent = True
+            else:
+                is_document_intent = is_document_question or explicit_document_request
 
             if (
                 document_ids
@@ -818,8 +825,10 @@ class ChatOrchestrationService:
                 if cited_sources:
                     try:
                         ai_response, citations = citation_svc.generate_citations(ai_response, cited_sources)
-                        if not citations and retrieved_chunks:
+                        if not citations:
                             citations = citation_svc.generate_citations_from_chunks(cited_sources)
+                        if citations:
+                            ai_response = citation_svc.attach_fallback_markers(ai_response, citations)
                     except Exception as _cite_exc:
                         logger.exception("Citation generation failed: %s", _cite_exc)
                         ai_response = strip_citation_markers(ai_response)
@@ -842,6 +851,7 @@ class ChatOrchestrationService:
                     document_ids=document_ids or None,
                     source_documents=source_documents,
                     citations=citations,
+                    skills_used=skills_meta,
                     mode_used=mode_used,
                 ),
             )
@@ -861,6 +871,7 @@ class ChatOrchestrationService:
                     "mode_used": mode_used,
                     "skill_selection_mode": selection_mode,
                     "selected_skill_ids": [s.id for s in active_skills],
+                    "selected_skill_names": [s.name for s in active_skills],
                     "applied_skills_count": len(active_skills),
                 },
             )
@@ -876,6 +887,7 @@ class ChatOrchestrationService:
                 "attachments": [],
                 "source_documents": source_documents,
                 "citations": citations,
+                "sources": citations,
                 "source_attribution": source_attribution,
                 "skills_used": skills_meta,
                 "selected_skills": skills_meta,
@@ -909,6 +921,7 @@ class ChatOrchestrationService:
                     "used_web_search": used_web,
                     "source_documents": source_documents,
                     "citations": citations,
+                    "sources": citations,
                     "source_attribution": source_attribution,
                     "web_sources": web_sources,
                     "financial_news": financial_news_response,

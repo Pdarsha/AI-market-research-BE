@@ -141,8 +141,11 @@ class CitationData:
         """Return the universal citation schema plus legacy frontend aliases."""
         return {
             "id": self.id,
-            "citation_id": self.citation_id,
+            "citation_id": self.reference_index,
             "reference_index": self.reference_index,
+            "citation_number": self.reference_index,
+            "number": self.reference_index,
+            "index": self.reference_index,
             "provider": self.provider,
             "type": self.type,
             "title": self.title,
@@ -210,13 +213,16 @@ class CitationService:
         """
         marker_pattern = r"\[(\d+)\]"
         markers = []
-        for match in re.finditer(marker_pattern, answer):
-            marker_number = int(match.group(1))
-            markers.append({
-                "position": match.start(),
-                "marker_number": marker_number,
-                "end_position": match.end(),
-            })
+        for match in re.finditer(r"\[([^\]]+)\]", answer):
+            inner = match.group(1)
+            # Find all numbers in the bracketed expression (e.g. "1", "Doc 1", "1, 2")
+            nums = [int(n) for n in re.findall(r"\b\d+\b", inner)]
+            for n in nums:
+                markers.append({
+                    "position": match.start(),
+                    "marker_number": n,
+                    "end_position": match.end(),
+                })
 
         if not markers:
             logger.info(
@@ -350,6 +356,43 @@ class CitationService:
             len(citations),
         )
         return citations
+
+    @staticmethod
+    def attach_fallback_markers(answer: str, citations: list[dict]) -> str:
+        """Ensure that generated citations have corresponding [n] markers in answer text
+        so frontend MarkdownMessage can render inline pills and citation rows.
+        """
+        if not citations or not answer:
+            return answer
+
+        existing_markers = set(int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", answer))
+        missing_indices = []
+
+        for cite in citations:
+            ref_idx = cite.get("reference_index")
+            if ref_idx is None:
+                cite_id = str(cite.get("id") or "")
+                match = re.search(r"\d+", cite_id)
+                if match:
+                    ref_idx = int(match.group(0))
+            if ref_idx is not None and ref_idx not in existing_markers:
+                missing_indices.append(ref_idx)
+
+        if not missing_indices:
+            return answer
+
+        missing_indices = sorted(list(set(missing_indices)))
+        markers_str = " " + "".join(f"[{i}]" for i in missing_indices)
+
+        if "<<<FOLLOW_UP_QUESTIONS>>>" in answer:
+            parts = answer.split("<<<FOLLOW_UP_QUESTIONS>>>", 1)
+            main_body = parts[0].rstrip()
+            answer = main_body + markers_str + "\n\n<<<FOLLOW_UP_QUESTIONS>>>" + parts[1]
+        else:
+            answer = answer.rstrip() + markers_str
+
+        return answer
+
 
     @staticmethod
     def _cleanup_spacing(text: str) -> str:

@@ -1979,6 +1979,7 @@ class RAGService:
                     user_id=user_id,
                     document_ids=document_ids,
                     top_k=3,
+                    workspace_id=workspace_id,
                 )
                 return sources, chunks
         except Exception:
