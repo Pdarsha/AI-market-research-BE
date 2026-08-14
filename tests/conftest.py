@@ -1,7 +1,7 @@
 import pytest
 import requests
 import uuid
-from config import config
+from tests.config import config
 
 @pytest.fixture(scope="session")
 def base_url():

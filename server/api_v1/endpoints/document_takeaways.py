@@ -235,6 +235,9 @@ def rename_grid(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    workspace = crud.workspace._get_owned_workspace(db, workspace_id, str(current_user.id))
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     grid = crud.document_takeaways.get_grid(db, grid_id)
     if not grid or grid.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Grid not found")
@@ -249,6 +252,9 @@ def delete_grid(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    workspace = crud.workspace._get_owned_workspace(db, workspace_id, str(current_user.id))
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     grid = crud.document_takeaways.get_grid(db, grid_id)
     if not grid or grid.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Grid not found")

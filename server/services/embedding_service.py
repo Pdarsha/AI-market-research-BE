@@ -29,14 +29,6 @@ logger = logging.getLogger(__name__)
 # output vector; older models (e.g. text-embedding-ada-002) do not.
 _MODELS_SUPPORTING_DIMENSIONS = ("text-embedding-3",)
 
-_sync_client = OpenAI(
-    api_key=settings.OPENAI_API_KEY,
-)
-
-_async_client = AsyncOpenAI(
-    api_key=settings.OPENAI_API_KEY,
-)
-
 
 class EmbeddingService:
     """Generate embeddings with the OpenAI Embeddings API.
@@ -145,10 +137,7 @@ class EmbeddingService:
             },
         ):
             try:
-                # response = self.client.embeddings.create(**self._request_kwargs(batch))
-                response = _sync_client.embeddings.create(
-                    model="text-embedding-3-small", input=batch
-                )
+                response = self.client.embeddings.create(**self._request_kwargs(batch))
             except OpenAIError as exc:
                 logger.exception(
                     "OpenAI embedding request failed (model=%s, batch_size=%d)",
@@ -198,10 +187,7 @@ class EmbeddingService:
             },
         ):
             try:
-                # response = await self.aclient.embeddings.create(**self._request_kwargs(batch))
-                response = await _async_client.embeddings.create(
-                    model="text-embedding-3-small", input=batch
-                )
+                response = await self.aclient.embeddings.create(**self._request_kwargs(batch))
             except OpenAIError as exc:
                 logger.exception(
                     "OpenAI async embedding request failed (model=%s, batch_size=%d)",

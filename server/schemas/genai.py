@@ -1,6 +1,6 @@
 from typing import Optional, Literal, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class GenAIBase(BaseModel):
@@ -49,7 +49,7 @@ class ChatMessageBase(BaseModel):
 
 
 class ChatMessageRequest(BaseModel):
-    content: str
+    content: str = Field(..., min_length=1)
     document_ids: Optional[list[str]] = None
     skill_ids: Optional[list[str]] = None
     workspace_id: Optional[str] = None
@@ -58,6 +58,13 @@ class ChatMessageRequest(BaseModel):
     create_grid: Optional[bool] = None
     action: Optional[Literal["chat", "analyze"]] = "chat"
     stream: Optional[bool] = True
+
+    @field_validator("content")
+    @classmethod
+    def validate_content_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Content cannot be empty or whitespace only.")
+        return v
 
 
 class CitationMetadata(BaseModel):

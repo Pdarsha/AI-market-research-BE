@@ -378,11 +378,14 @@ class ChatOrchestrationService:
             fut_intent = planner_exec.submit(
                 rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
             )
+            fut_general_intent = planner_exec.submit(
+                rag.classify_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
+            )
 
             resolved_company, resolved_ticker, is_sec_registrant = fut_resolve.result()
             precomputed_is_document_question = fut_doc.result() if fut_doc else False
-            res_intent = fut_intent.result()
-            precomputed_intent, precomputed_general_intent = res_intent[0], res_intent[1]
+            precomputed_intent = fut_intent.result()
+            precomputed_general_intent = fut_general_intent.result()
 
         user_message = crud.chat_message.create(
             db=db,
@@ -565,55 +568,55 @@ class ChatOrchestrationService:
             executor = _retrieval_executor
             if is_document_intent:
                 futures["rag"] = executor.submit(
-                        rag.retrieve_documents_context, db, is_workspace_analysis, ws_name, user_id_str, document_ids, session.workspace_id, optimized_prompt, chat_id
-                    )
-                if sec_tickers:
-                    futures["sec"] = executor.submit(
-                        rag.retrieve_sec_company_facts_context, chat_id, user_id_str, session.workspace_id, sec_tickers, sec_options
-                    )
-                if roic_query:
-                    futures["roic"] = executor.submit(
-                        rag.retrieve_roic_ai_context, chat_id, user_id_str, session.workspace_id, roic_query
-                    )
-                if financial_ticker:
-                    futures["news"] = executor.submit(
-                        rag.retrieve_financial_news_context, chat_id, user_id_str, session.workspace_id, financial_ticker
-                    )
-                if companies_house_query:
-                    futures["companies_house"] = executor.submit(
-                        rag.retrieve_companies_house_context, chat_id, user_id_str, session.workspace_id, companies_house_query
-                    )
+                    rag.retrieve_documents_context, db, is_workspace_analysis, ws_name, user_id_str, document_ids, session.workspace_id, optimized_prompt, chat_id
+                )
+            if sec_tickers:
+                futures["sec"] = executor.submit(
+                    rag.retrieve_sec_company_facts_context, chat_id, user_id_str, session.workspace_id, sec_tickers, sec_options
+                )
+            if roic_query:
+                futures["roic"] = executor.submit(
+                    rag.retrieve_roic_ai_context, chat_id, user_id_str, session.workspace_id, roic_query
+                )
+            if financial_ticker:
+                futures["news"] = executor.submit(
+                    rag.retrieve_financial_news_context, chat_id, user_id_str, session.workspace_id, financial_ticker
+                )
+            if companies_house_query:
+                futures["companies_house"] = executor.submit(
+                    rag.retrieve_companies_house_context, chat_id, user_id_str, session.workspace_id, companies_house_query
+                )
 
-                if "rag" in futures:
-                    try:
-                        source_documents, retrieved_chunks = futures["rag"].result()
-                    except Exception as e:
-                        logger.error(f"RAG retrieval failed: {e}")
-                        source_documents, retrieved_chunks = [], []
-                if "sec" in futures:
-                    try:
-                        sec_company_facts_response = futures["sec"].result()
-                    except Exception as e:
-                        logger.error(f"SEC retrieval failed: {e}")
-                        sec_company_facts_response = [{"error": {"message": str(e)}}]
-                if "roic" in futures:
-                    try:
-                        roic_response = futures["roic"].result()
-                    except Exception as e:
-                        logger.error(f"ROIC retrieval failed: {e}")
-                        roic_response = {"error": str(e)}
-                if "news" in futures:
-                    try:
-                        financial_news_response = futures["news"].result()
-                    except Exception as e:
-                        logger.error(f"News retrieval failed: {e}")
-                        financial_news_response = {"error": str(e)}
-                if "companies_house" in futures:
-                    try:
-                        companies_house_response = futures["companies_house"].result()
-                    except Exception as e:
-                        logger.error(f"Companies House retrieval failed: {e}")
-                        companies_house_response = {"error": str(e)}
+            if "rag" in futures:
+                try:
+                    source_documents, retrieved_chunks = futures["rag"].result()
+                except Exception as e:
+                    logger.error(f"RAG retrieval failed: {e}")
+                    source_documents, retrieved_chunks = [], []
+            if "sec" in futures:
+                try:
+                    sec_company_facts_response = futures["sec"].result()
+                except Exception as e:
+                    logger.error(f"SEC retrieval failed: {e}")
+                    sec_company_facts_response = [{"error": {"message": str(e)}}]
+            if "roic" in futures:
+                try:
+                    roic_response = futures["roic"].result()
+                except Exception as e:
+                    logger.error(f"ROIC retrieval failed: {e}")
+                    roic_response = {"error": str(e)}
+            if "news" in futures:
+                try:
+                    financial_news_response = futures["news"].result()
+                except Exception as e:
+                    logger.error(f"News retrieval failed: {e}")
+                    financial_news_response = {"error": str(e)}
+            if "companies_house" in futures:
+                try:
+                    companies_house_response = futures["companies_house"].result()
+                except Exception as e:
+                    logger.error(f"Companies House retrieval failed: {e}")
+                    companies_house_response = {"error": str(e)}
 
             if retrieved_chunks:
                 document_context = rag.build_context_with_citations(retrieved_chunks) or None

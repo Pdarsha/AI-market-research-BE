@@ -2,7 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from httpx2 import query
 
 from server import crud, schemas
 from server.api_v1.deps import get_db

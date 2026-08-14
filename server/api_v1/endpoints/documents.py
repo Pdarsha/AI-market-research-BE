@@ -281,8 +281,16 @@ def get_document_file(
         raise HTTPException(status_code=403, detail="Invalid or expired document link")
 
     doc = crud.document.get(db, document_id)
-    if not doc or doc.user_id != payload["user_id"]:
+    if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    token_user = payload.get("user_id")
+    if token_user != "public" and token_user != doc.user_id:
+        if doc.workspace_id:
+            ws = crud.workspace.get(db, doc.workspace_id)
+            if not ws or (ws.user_id != token_user and not ws.is_public):
+                raise HTTPException(status_code=403, detail="Access denied")
+        else:
+            raise HTTPException(status_code=403, detail="Access denied")
 
     abs_path = _abs_path(doc.storage_path)
     if not abs_path or not abs_path.exists():

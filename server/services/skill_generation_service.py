@@ -154,6 +154,10 @@ class SkillGenerationService:
                 db, user_id=user_id, base_name=draft["name"], exclude_skill_id=exclude_id
             )
 
+        draft["description_html"] = render_rich_text(draft.get("description", ""))
+        draft["trigger_description_html"] = render_rich_text(draft.get("trigger_description", ""))
+        draft["instructions_html"] = render_rich_text(draft.get("instructions", ""))
+
         return draft
     
     def _call_llm_and_validate(self, messages: list, operation: str) -> Dict[str, Any]:

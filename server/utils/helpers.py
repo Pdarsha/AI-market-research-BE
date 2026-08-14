@@ -55,19 +55,23 @@ def _mime_type(file_format: Optional[str]) -> str:
 
 
 def get_owned_document(db, document_id: str, current_user=None):
-    """Return the document if caller owns it or if it exists for public citation viewing."""
+    """Return the document if caller owns it or if it belongs to an accessible workspace."""
     doc = crud.document.get(db, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user and getattr(current_user, "id", None):
         user_id_str = str(current_user.id)
         if doc.user_id == user_id_str:
-            if doc.workspace_id:
-                workspace = crud.workspace.get(db, doc.workspace_id)
-                if workspace and workspace.user_id == user_id_str:
-                    return doc
-            else:
+            return doc
+        if doc.workspace_id:
+            workspace = crud.workspace.get(db, doc.workspace_id)
+            if workspace and (workspace.user_id == user_id_str or workspace.is_public):
                 return doc
+        raise HTTPException(status_code=403, detail="Access denied")
+    if doc.workspace_id:
+        workspace = crud.workspace.get(db, doc.workspace_id)
+        if workspace and workspace.is_public:
+            return doc
     return doc
 
 
