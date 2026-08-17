@@ -10,13 +10,10 @@ class CRUDUSER(CRUDBase[User, UserCreate, UserUpdate]):
     def get_all(self, db: Session) -> List[User]:
         return db.query(User).all()
 
-    def get_by_id(self, db: Session, *, id: str) -> User:
+    def get_by_id(self, db: Session, *, id: str) -> Optional[User]:
         return db.query(User).filter(User.id == id).first()
 
-    def get_by_fb_uid(self, db: Session, *, fb_uid: str) -> User:
-        return db.query(User).filter(User.fb_uid == fb_uid).first()
-
-    def get_by_email(self, db: Session, *, email: str) -> User:
+    def get_by_email(self, db: Session, *, email: str) -> Optional[User]:
         return db.query(User).filter(User.email == email).first()
 
     def get_by_google_id(self, db: Session, *, google_id: str) -> Optional[User]:

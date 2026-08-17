@@ -1,0 +1,10 @@
+{
+  "id": "pdf-report-extractor",
+  "title": "PDF Report Extractor",
+  "prompt": "Create a skill to extract tabular data and financial takeaways from uploaded PDF reports.",
+  "chip_text": "Create a skill to extract tabular data and financial takeaways ...",
+  "description": "Extract tabular data and key financial insights from PDF documents.",
+  "category": "extraction",
+  "enabled": true,
+  "display_order": 4
+}

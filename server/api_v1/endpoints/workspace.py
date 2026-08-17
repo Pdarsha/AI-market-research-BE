@@ -310,7 +310,7 @@ async def upload_docs(
     The file's text is chunked, embedded and stored (tagged with the workspace)
     so a chat inside the workspace can retrieve it via the ``@doc`` agent.
     """
-    if doc.size > 10 * 1024 * 1024:  # 10MB limit
+    if doc.size and doc.size > 10 * 1024 * 1024:  # 10MB limit
         raise HTTPException(status_code=400, detail="File size exceeds the 10MB limit.")
 
     # Fallback to form data if parameters are None/empty

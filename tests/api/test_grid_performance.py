@@ -1,10 +1,10 @@
 import time
 from sqlalchemy import event
 from sqlalchemy.orm import Session
-from server.crud.crud_document_takeaways import crud_document_takeaways
 from server.services.document_takeaways_service import document_takeaways_service
 from server.models.document_takeaways import DocumentTakeawayGrid, DocumentTakeawayGridRow, DocumentTakeawayGridColumn, DocumentTakeawayGridCell
 from server.models.workspace import Document
+from server import crud, schemas
 
 
 from server.db.session import SessionLocal
@@ -29,13 +29,13 @@ def test_grid_fetch_query_count_and_performance(auth_session, base_url, workspac
         doc_ids.append(str(doc.id))
 
     # Create a grid with 20 rows and 3 columns (60 cells total)
-    grid = crud_document_takeaways.create_grid(db, ws_id, "Perf Test Grid", user_id)
-    col1 = crud_document_takeaways.add_column(db, grid.id, "Document", "document", 1)
-    col2 = crud_document_takeaways.add_column(db, grid.id, "Summary", "ai_generated", 2)
-    col3 = crud_document_takeaways.add_column(db, grid.id, "Takeaways", "ai_generated", 3)
+    grid = crud.document_takeaways.create_grid(db, ws_id, "Perf Test Grid", user_id)
+    col1 = crud.document_takeaways.add_column(db, grid.id, "Document", "document", 1)
+    col2 = crud.document_takeaways.add_column(db, grid.id, "Summary", "ai_generated", 2)
+    col3 = crud.document_takeaways.add_column(db, grid.id, "Takeaways", "ai_generated", 3)
 
     for i, d_id in enumerate(doc_ids):
-        row = crud_document_takeaways.add_row(db, grid.id, d_id, i + 1)
+        row = crud.document_takeaways.add_row(db, grid.id, d_id, i + 1)
         cell1 = DocumentTakeawayGridCell(grid_row_id=row.id, grid_column_id=col1.id, value=f"Doc {i}", status="completed")
         cell2 = DocumentTakeawayGridCell(grid_row_id=row.id, grid_column_id=col2.id, value=f"Summary {i}", status="completed")
         cell3 = DocumentTakeawayGridCell(grid_row_id=row.id, grid_column_id=col3.id, value=f"Takeaways {i}", status="completed")
@@ -54,7 +54,7 @@ def test_grid_fetch_query_count_and_performance(auth_session, base_url, workspac
 
     try:
         t0 = time.perf_counter()
-        fetched_grid = crud_document_takeaways.get_grid(db, grid.id)
+        fetched_grid = crud.document_takeaways.get_grid(db, grid.id)
         data = document_takeaways_service.serialize_grid(fetched_grid, db)
         elapsed = (time.perf_counter() - t0) * 1000
     finally:

@@ -71,6 +71,8 @@ class DocumentProcessor:
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="File is empty")
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size exceeds the 10MB limit.")
 
         # 2. Persist the original file to disk.
         storage_path = self._save_original(file.filename or "", content)

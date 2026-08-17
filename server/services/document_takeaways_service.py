@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
-async def process_grid_cell_task(
+def process_grid_cell_task(
     cell_id: str, prompt: str, document_id: str, workspace_id: str, user_id: str
 ):
     from server.db.session import SessionLocal

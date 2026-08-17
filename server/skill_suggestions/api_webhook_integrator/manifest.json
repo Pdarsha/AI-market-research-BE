@@ -1,0 +1,10 @@
+{
+  "id": "api-webhook-integrator",
+  "title": "API & Webhook Integrator",
+  "prompt": "Create a skill to process incoming webhook events and transform JSON payloads for analytical reports.",
+  "chip_text": "Create a skill to process incoming webhook events ...",
+  "description": "Transform incoming API webhooks into structured analytical reports.",
+  "category": "integration",
+  "enabled": true,
+  "display_order": 6
+}

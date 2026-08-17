@@ -1,0 +1,10 @@
+{
+  "id": "scheduled-morning-brief",
+  "title": "Scheduled Morning Brief",
+  "prompt": "Build a skill that runs daily to aggregate market news and format an executive morning brief.",
+  "chip_text": "Build a skill that runs daily to aggregate market news ...",
+  "description": "Aggregate daily market news and deliver formatted executive briefs.",
+  "category": "briefs",
+  "enabled": true,
+  "display_order": 5
+}

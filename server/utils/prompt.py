@@ -195,6 +195,7 @@ number in square brackets: [1], [2], [3], ...
 
 - Add the matching [n] marker immediately after any statement that is grounded in
   that source. Place it before the sentence's final punctuation.
+- You MUST include [n] citation markers (e.g. [1], [2]) directly in your text after every statement, table cell, or section drawn from the CONTEXT, including summaries and document analysis.
 - Use the exact number shown for the source you relied on. Reuse a number when you
   cite the same source again.
 - Cite EVERY factual claim, figure, date and quotation that comes from a source.

@@ -7,6 +7,8 @@ from server.config import settings
 from server.models.user import User, EmailOtp
 from server.models.genai import GenAI, ChatSession, ChatMessage
 from server.models.workspace import Workspace, Document, DocumentChunk
+from server.models.document_takeaways import DocumentTakeawayGrid
+from server.models.skill import Skill
 from server.db.base_class import Base
 
 

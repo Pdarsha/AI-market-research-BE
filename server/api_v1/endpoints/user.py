@@ -267,9 +267,13 @@ async def verify_otp(data: schemas.VerifyOTP, db: Session = Depends(get_db)):
     if user_obj:
         if user_obj.is_verified:
             logger.warning("verify_otp: email=%s already verified", email)
-            raise HTTPException(
+            return JSONResponse(
                 status_code=status.HTTP_200_OK,
-                detail="Your email is already verified.",
+                content={
+                    "success": True,
+                    "message": "Your email is already verified.",
+                    "data": None,
+                },
             )
 
     if not email_otp_obj:
@@ -488,10 +492,15 @@ async def reset_forgot_password(
 
     email_otp_obj = crud.email_otp.get_by_email(db, email=email)
     user_obj = crud.user.get_by_email(db, email=email)
+    if not user_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This email is not associated with any account, please sign up.",
+        )
     if not email_otp_obj:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This email is not associated with any account, please sign up.",
+            detail="First proceed via sending OTP request.",
         )
 
     otp = email_otp_obj.otp
@@ -500,7 +509,7 @@ async def reset_forgot_password(
     if (((time_now - email_otp_obj.updated_at).total_seconds()) / 60) < 10:
         if str(otp_sent) == str(otp):
             hashed_password = get_password_hash(new_password)
-            if verify_password(new_password, user_obj.hashed_password):
+            if user_obj.hashed_password and verify_password(new_password, user_obj.hashed_password):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="New password is same as your old password.",
@@ -511,7 +520,6 @@ async def reset_forgot_password(
                 db_obj=user_obj,
                 obj_in=schemas.UserUpdate(hashed_password=hashed_password),
             )
-            hashed_password = get_password_hash(new_password)
 
             crud.email_otp.remove(db, id=email_otp_obj.id)
             logger.info(

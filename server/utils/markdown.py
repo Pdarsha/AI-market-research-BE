@@ -55,3 +55,37 @@ def tidy_markdown_spacing(text: str) -> str:
     # Trim only blank lines at the very start/end; interior blank lines separate
     # Markdown blocks and must survive.
     return "\n".join(out).strip("\n")
+
+
+def render_rich_text(text: str | None) -> str:
+    """Convert text with Markdown or rich-text syntax to clean, renderable HTML.
+
+    Supports:
+    - Bold (**text**)
+    - Italic (*text*)
+    - Underline (<u>text</u>)
+    - Strikethrough (~~text~~ or ~text~)
+    - Headings (# Heading)
+    - Ordered/Unordered Lists (1., -, *)
+    - Blockquotes (> text)
+    - Code blocks & inline code (`code` / ```code```)
+    - Links ([text](url))
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+
+    try:
+        import markdown
+        # Pre-process strikethrough syntax before markdown conversion
+        processed = re.sub(r"~~(.*?)~~", r"<del>\1</del>", text)
+        processed = re.sub(r"(?<!~)~(?!~)(.*?)(?<!~)~(?!~)", r"<del>\1</del>", processed)
+        
+        html = markdown.markdown(
+            processed,
+            extensions=["fenced_code", "tables", "nl2br", "sane_lists", "extra"]
+        )
+        return html
+    except Exception:
+        return text
