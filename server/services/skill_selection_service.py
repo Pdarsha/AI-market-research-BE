@@ -34,10 +34,10 @@ class SkillSelectionService:
         """Extract lightweight metadata for candidate matching (excluding full instructions)."""
         return [
             {
-                "id": s.id,
-                "name": s.name,
-                "description": s.description or "",
-                "trigger_description": s.trigger_description or "",
+                "id": str(getattr(s, "id", "")),
+                "name": getattr(s, "name", ""),
+                "description": getattr(s, "description", "") or "",
+                "trigger_description": getattr(s, "trigger_description", "") or "",
             }
             for s in skills
         ]

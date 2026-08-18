@@ -28,9 +28,14 @@ async def lifespan(app: FastAPI):
 
     import threading
 
-    from server.services.ocr_service import warm_up_ocr
-    threading.Thread(target=warm_up_ocr, name="ocr-warmup", daemon=True).start()
-    yield
+    from server.services.agent_scheduler_service import agent_scheduler_service
+    agent_scheduler_service.start(poll_interval_seconds=30)
+
+    try:
+        yield
+    finally:
+        agent_scheduler_service.stop()
+
 
 
 app = FastAPI(

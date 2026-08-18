@@ -27,6 +27,9 @@ ai_router = APIRouter(prefix="/ai", tags=["GenAI"])
 def create_chat_session(
     title: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    execution_type: Optional[str] = None,
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -35,26 +38,82 @@ def create_chat_session(
         if not workspace or workspace.user_id != str(current_user.id):
             raise HTTPException(status_code=404, detail="Workspace not found")
 
-    session = crud.chat_session.create(
-        db=db,
-        obj_in=schemas.ChatSessionCreate(
-            user_id=str(current_user.id), title=title, workspace_id=workspace_id
-        ),
-    )
+    # If this is an Agent chat or agent_id is provided, resolve the canonical Agent title
+    is_agent = bool(agent_id) or (execution_type == "agent") or (title and title.startswith("Agent ·"))
+    final_title = title
+    resolved_agent_name = agent_name
+    resolved_execution_type = "agent" if is_agent else (execution_type or "chat")
+
+    if is_agent:
+        from server.services.agent_title_service import generate_agent_chat_title
+        agent = None
+        if agent_id:
+            agent = crud.agent_workflow.get_by_user_and_id(db, user_id=str(current_user.id), agent_id=agent_id)
+
+        if agent:
+            resolved_agent_name = agent.name
+            doc_names = []
+            if agent.selected_document_ids:
+                from server.models.workspace import Document
+                docs = db.query(Document.file_name).filter(Document.id.in_(agent.selected_document_ids)).all()
+                doc_names = [d[0] for d in docs if d[0]]
+            final_title = generate_agent_chat_title(
+                agent_name=agent.name,
+                instructions=agent.instructions,
+                document_names=doc_names,
+                trigger_source="manual",
+            )
+        elif not final_title or not final_title.startswith("Agent ·"):
+            final_title = generate_agent_chat_title(
+                agent_name=resolved_agent_name or "Agent Workflow",
+                trigger_source="manual",
+            )
+
+    created = True
+    if is_agent and agent_id:
+        from datetime import datetime
+        session, created = crud.chat_session.get_or_create_daily_agent_session(
+            db=db,
+            user_id=str(current_user.id),
+            agent_id=agent_id,
+            agent_name=resolved_agent_name,
+            workspace_id=workspace_id,
+            execution_date=datetime.utcnow().date(),
+            title=final_title,
+        )
+    else:
+        from datetime import datetime
+        session = crud.chat_session.create(
+            db=db,
+            obj_in=schemas.ChatSessionCreate(
+                user_id=str(current_user.id),
+                title=final_title,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                agent_name=resolved_agent_name,
+                execution_type=resolved_execution_type,
+                execution_date=datetime.utcnow().date() if is_agent else None,
+            ),
+        )
 
     AuditLogger.log(
-        action="CHAT_CREATE",
+        action="CHAT_CREATE" if created else "CHAT_REUSED",
         user_id=str(current_user.id),
         workspace_id=workspace_id,
         chat_id=session.id,
         endpoint="/v1/ai/chats",
         http_method="POST",
-        status="201",
-        metadata={"title": session.title},
+        status="201" if created else "200",
+        metadata={
+            "title": session.title,
+            "agent_id": session.agent_id,
+            "execution_type": session.execution_type,
+            "created": created,
+        },
     )
 
     return JSONResponse(
-        status_code=201,
+        status_code=201 if created else 200,
         content={
             "success": True,
             "error": None,
@@ -63,10 +122,16 @@ def create_chat_session(
                 "title": session.title,
                 "user_id": session.user_id,
                 "workspace_id": session.workspace_id,
+                "agent_id": session.agent_id,
+                "agent_name": session.agent_name,
+                "execution_type": session.execution_type or "chat",
+                "execution_date": session.execution_date.isoformat() if session.execution_date else None,
+                "chat_metadata": session.chat_metadata,
+                "created": created,
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
             },
-            "message": "Chat session created successfully.",
+            "message": "Chat session created successfully." if created else "Reused existing agent chat session for today.",
         },
     )
 
@@ -102,6 +167,10 @@ def list_chat_sessions(
                     "title": item.title,
                     "user_id": item.user_id,
                     "workspace_id": item.workspace_id,
+                    "agent_id": getattr(item, "agent_id", None),
+                    "agent_name": getattr(item, "agent_name", None),
+                    "execution_type": getattr(item, "execution_type", None) or "chat",
+                    "chat_metadata": getattr(item, "chat_metadata", None),
                     "created_at": (
                         item.created_at.isoformat() if item.created_at else None
                     ),
@@ -302,6 +371,10 @@ def get_chat_session(
                 "id": session.id,
                 "title": session.title,
                 "workspace_id": session.workspace_id,
+                "agent_id": getattr(session, "agent_id", None),
+                "agent_name": getattr(session, "agent_name", None),
+                "execution_type": getattr(session, "execution_type", None) or "chat",
+                "chat_metadata": getattr(session, "chat_metadata", None),
                 "document_ids": crud.chat_message.get_latest_document_ids(
                     db, chat_id=chat_id
                 ),

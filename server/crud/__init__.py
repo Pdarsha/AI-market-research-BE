@@ -9,3 +9,4 @@ from .crud_workspace import workspace
 from .crud_document_chuck import document_chunk
 from .crud_document_takeaways import document_takeaways
 from .crud_skill import skill
+from .crud_agent_workflow import agent_workflow
