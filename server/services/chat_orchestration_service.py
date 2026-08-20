@@ -39,11 +39,11 @@ from server.utils.source_attribution import (
 from server.services.agent_trigger_service import agent_trigger_service
 from server.services.skill_selection_service import get_skill_selection_service
 from server.services.skill_instruction_service import get_skill_instruction_service
-
+from server.utils.llm_client import get_openai_client
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+client = get_openai_client()
 rag = get_rag_service()
 citation_svc = get_citation_service()
 
@@ -920,10 +920,14 @@ class ChatOrchestrationService:
                 "citations": citations,
                 "sources": citations,
                 "source_attribution": source_attribution,
-                "skills_used": skills_meta,
-                "selected_skills": skills_meta,
-                "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                "skills_used": skills_meta if skills_meta else None,
+                "selected_skills": skills_meta if skills_meta else None,
+                "skills": skills_meta if skills_meta else None,
+                "auto_selected_skills": skills_meta if not request.skill_ids and skills_meta else None,
                 "selection_mode": selection_mode,
+                "agent_id": None,
+                "agent_name": None,
+                "agents": None,
                 "follow_up_questions": follow_up_questions,
                 "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
                 "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
@@ -939,11 +943,15 @@ class ChatOrchestrationService:
                     "response": ai_response,
                     "document_ids": document_ids,
                     "active_document_ids": document_ids,
-                    "skills_used": skills_meta,
-                    "selected_skills": skills_meta,
-                    "skills": skills_meta,
-                    "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                    "skills_used": skills_meta if skills_meta else None,
+                    "selected_skills": skills_meta if skills_meta else None,
+                    "skills": skills_meta if skills_meta else None,
+                    "auto_selected_skills": skills_meta if not request.skill_ids and skills_meta else None,
                     "selection_mode": selection_mode,
+                    "agent_id": None,
+                    "agent_name": None,
+                    "agent_workflow_id": None,
+                    "agents": None,
                     "mode_used": mode_used,
                     "uploaded_document_ids": (
                         document_ids if context_reason == "new_upload" else []

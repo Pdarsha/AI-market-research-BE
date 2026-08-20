@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ from server.models.agent_workflow import (
 )
 from server.schemas.agent_workflow import AgentWorkflowCreate, AgentWorkflowUpdate
 from server.services.agent_validation_service import agent_validation_service
-
+from server.models.agent_workflow import ExecutionStatus
 
 
 class CRUDAgentWorkflow(
@@ -36,6 +36,10 @@ class CRUDAgentWorkflow(
             )
             .first()
         )
+
+    def get_agent_by_id(self, db: Session, *, agent_id: str) -> Optional[AgentWorkflow]:
+        """Fetch an Agent by ID without user ownership check."""
+        return db.query(AgentWorkflow).filter(AgentWorkflow.id == str(agent_id)).first()
 
     def get_by_user_and_name(
         self, db: Session, *, user_id: str, name: str
@@ -144,7 +148,10 @@ class CRUDAgentWorkflow(
 
         # Normalize limit docs
         if agent_data.get("limit_documents_to_past_7_days") is not None:
-            agent_data["limit_docs_past_7_days"] = bool(agent_data.get("limit_docs_past_7_days") or agent_data["limit_documents_to_past_7_days"])
+            agent_data["limit_docs_past_7_days"] = bool(
+                agent_data.get("limit_docs_past_7_days")
+                or agent_data["limit_documents_to_past_7_days"]
+            )
 
         # Normalize schedule time
         norm_time, _, _, _ = agent_validation_service.normalize_time_string(
@@ -165,6 +172,9 @@ class CRUDAgentWorkflow(
                     frequency=agent_data.get("schedule_frequency"),
                     day=agent_data.get("schedule_day"),
                     time_str=agent_data.get("schedule_time"),
+                    interval=agent_data.get("schedule_interval")
+                    or agent_data.get("minute_interval")
+                    or agent_data.get("interval_minutes"),
                 )
                 if computed_cron:
                     agent_data["schedule_cron"] = computed_cron
@@ -178,15 +188,26 @@ class CRUDAgentWorkflow(
             agent_data["activated_at"] = datetime.utcnow()
 
         db_data = {
-            k: v for k, v in agent_data.items() if k in AgentWorkflow.__table__.columns
+            k: v
+            for k, v in agent_data.items()
+            if k in AgentWorkflow.__table__.columns.keys()
         }
-        agent = AgentWorkflow(**db_data)
+        db_obj = AgentWorkflow(**db_data)
+
+        # Pre-compute next_run_at if agent is created directly in active state
+        if agent_status == AgentStatus.ACTIVE.value and trigger_type in (
+            TriggerType.SCHEDULED.value,
+            TriggerType.BOTH.value,
+        ):
+            from server.services.agent_scheduler_service import agent_scheduler_service
+
+            db_obj.next_run_at = agent_scheduler_service.calculate_next_run_time(db_obj)
 
         try:
-            db.add(agent)
+            db.add(db_obj)
             db.commit()
-            db.refresh(agent)
-            return agent
+            db.refresh(db_obj)
+            return db_obj
         except IntegrityError:
             db.rollback()
             raise ValueError(f"Agent with name '{obj_in.name}' already exists.")
@@ -196,47 +217,69 @@ class CRUDAgentWorkflow(
         db: Session,
         *,
         db_obj: AgentWorkflow,
-        obj_in: AgentWorkflowUpdate,
+        obj_in: AgentWorkflowUpdate | dict,
     ) -> AgentWorkflow:
-        """Update an existing Agent Workflow, recalculating computed cron when schedule changes."""
-        update_data = obj_in.model_dump(exclude_unset=True)
+        """Update an existing Agent Workflow, auto-updating timestamps and cron."""
+        update_data = (
+            obj_in
+            if isinstance(obj_in, dict)
+            else obj_in.model_dump(exclude_unset=True)
+        )
 
-        if "limit_documents_to_past_7_days" in update_data and "limit_docs_past_7_days" not in update_data:
-            update_data["limit_docs_past_7_days"] = bool(update_data["limit_documents_to_past_7_days"])
+        # Ignore empty/None name and instructions so it doesn't overwrite existing values
+        if "name" in update_data and not update_data["name"]:
+            del update_data["name"]
+        if "instructions" in update_data and update_data["instructions"] is None:
+            del update_data["instructions"]
+        if "prompt" in update_data and update_data["prompt"] is None:
+            del update_data["prompt"]
 
-        # Normalize schedule time if changed
-        if any(k in update_data for k in ("schedule_time", "schedule_start_time", "schedule_end_time")):
-            s_time = update_data.get("schedule_time", db_obj.schedule_time)
-            s_start = update_data.get("schedule_start_time")
-            s_end = update_data.get("schedule_end_time")
-            norm_time, _, _, _ = agent_validation_service.normalize_time_string(
-                time_str=s_time,
-                start_time=s_start,
-                end_time=s_end,
+
+        # Check name uniqueness if name is changed
+        if "name" in update_data and update_data["name"] != db_obj.name:
+            existing = self.get_by_user_and_name(
+                db, user_id=db_obj.user_id, name=update_data["name"]
             )
-            if norm_time:
-                update_data["schedule_time"] = norm_time
+            if existing and str(existing.id) != str(db_obj.id):
+                raise ValueError(
+                    f"An Agent with the name '{update_data['name']}' already exists."
+                )
 
-        # Recalculate schedule_cron if schedule fields change
-        new_trigger = update_data.get("trigger_type", db_obj.trigger_type)
-        is_scheduled = new_trigger in (
+
+        target_trigger = update_data.get("trigger_type", db_obj.trigger_type)
+        is_scheduled = getattr(target_trigger, "value", target_trigger) in (
             TriggerType.SCHEDULED.value,
             TriggerType.BOTH.value,
+            "scheduled",
+            "both",
         )
 
         if is_scheduled:
             if "schedule_cron" not in update_data and any(
                 k in update_data
-                for k in ("schedule_frequency", "schedule_day", "schedule_time", "schedule_start_time", "schedule_end_time")
+                for k in (
+                    "schedule_frequency",
+                    "schedule_interval",
+                    "minute_interval",
+                    "interval_minutes",
+                    "schedule_day",
+                    "schedule_time",
+                    "schedule_start_time",
+                    "schedule_end_time",
+                )
             ):
                 freq = update_data.get("schedule_frequency", db_obj.schedule_frequency)
                 day = update_data.get("schedule_day", db_obj.schedule_day)
                 time_str = update_data.get("schedule_time", db_obj.schedule_time)
+                interval = update_data.get(
+                    "schedule_interval", getattr(db_obj, "schedule_interval", None)
+                )
                 if freq and freq != "custom":
                     computed_cron = agent_validation_service.compute_cron_expression(
                         frequency=freq,
                         day=day,
                         time_str=time_str,
+                        interval=interval,
                     )
                     if computed_cron:
                         update_data["schedule_cron"] = computed_cron
@@ -246,6 +289,20 @@ class CRUDAgentWorkflow(
         for field, value in update_data.items():
             if field in table_columns:
                 setattr(db_obj, field, value)
+
+        from server.services.agent_scheduler_service import agent_scheduler_service
+
+        status_val = getattr(db_obj.status, "value", db_obj.status)
+        trigger_val = getattr(db_obj.trigger_type, "value", db_obj.trigger_type)
+        if status_val == AgentStatus.ACTIVE.value and trigger_val in (
+            TriggerType.SCHEDULED.value,
+            TriggerType.BOTH.value,
+            "scheduled",
+            "both",
+        ):
+            db_obj.next_run_at = agent_scheduler_service.calculate_next_run_time(db_obj)
+        elif status_val != AgentStatus.ACTIVE.value:
+            db_obj.next_run_at = None
 
         db.add(db_obj)
         db.commit()
@@ -258,9 +315,19 @@ class CRUDAgentWorkflow(
         *,
         db_obj: AgentWorkflow,
     ) -> AgentWorkflow:
-        """Transition agent to active state with timestamp."""
+        """Transition agent to active state with timestamp and calculated next run time."""
         db_obj.status = AgentStatus.ACTIVE.value
         db_obj.activated_at = datetime.utcnow()
+        from server.services.agent_scheduler_service import agent_scheduler_service
+
+        trigger_val = getattr(db_obj.trigger_type, "value", db_obj.trigger_type)
+        if trigger_val in (
+            TriggerType.SCHEDULED.value,
+            TriggerType.BOTH.value,
+            "scheduled",
+            "both",
+        ):
+            db_obj.next_run_at = agent_scheduler_service.calculate_next_run_time(db_obj)
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
@@ -272,8 +339,9 @@ class CRUDAgentWorkflow(
         *,
         db_obj: AgentWorkflow,
     ) -> AgentWorkflow:
-        """Transition agent to paused state."""
+        """Transition agent to paused state and clear next run time."""
         db_obj.status = AgentStatus.PAUSED.value
+        db_obj.next_run_at = None
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
@@ -285,8 +353,9 @@ class CRUDAgentWorkflow(
         *,
         db_obj: AgentWorkflow,
     ) -> AgentWorkflow:
-        """Transition agent to inactive/paused state."""
+        """Transition agent to inactive/paused state and clear next run time."""
         db_obj.status = AgentStatus.PAUSED.value
+        db_obj.next_run_at = None
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
@@ -359,6 +428,46 @@ class CRUDAgentWorkflow(
             .all()
         )
 
+    def stale_executions(self, db: Session) -> List[AgentWorkflowExecution]:
+        return (
+            db.query(AgentWorkflowExecution)
+            .filter(
+                AgentWorkflowExecution.status.in_(
+                    [
+                        ExecutionStatus.RUNNING.value,
+                        ExecutionStatus.PENDING.value,
+                        "running",
+                        "pending",
+                    ]
+                )
+            )
+            .all()
+        )
+
+    def get_active_scheduled_agents(self, db: Session) -> List[AgentWorkflow]:
+        return db.query(AgentWorkflow).filter(
+            AgentWorkflow.status.in_(
+                [AgentStatus.ACTIVE.value, AgentStatus.ACTIVE, "active"]
+            ),
+            AgentWorkflow.trigger_type.in_(
+                [
+                    TriggerType.SCHEDULED.value,
+                    TriggerType.BOTH.value,
+                    "scheduled",
+                    "both",
+                ]
+            ),
+        )
+
+    def get_exec_count(self, db: Session, agent: AgentWorkflow):
+        return (
+            db.query(func.count(AgentWorkflowExecution.id))
+            .filter(
+                AgentWorkflowExecution.workflow_id == agent.id,
+                AgentWorkflowExecution.trigger_source == "scheduled",
+            )
+            .scalar()
+        )
+
 
 agent_workflow = CRUDAgentWorkflow(AgentWorkflow)
-

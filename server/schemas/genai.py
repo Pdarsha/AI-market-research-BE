@@ -133,6 +133,8 @@ class ChatMessageCreate(ChatMessageBase):
     source_documents: Optional[list] = None
     citations: Optional[list[CitationMetadata]] = None
     skills_used: Optional[list] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
     mode_used: Optional[str] = None
 
 

@@ -11,6 +11,7 @@ from server.api_v1.deps import get_db
 from server.config import WORKSPACE_DOCS_DIR
 from server.services.audit_logger import AuditLogger
 from server.services.chat_orchestration_service import chat_orchestration_service
+from server.services.rag_service import RAGService
 from server.utils.auth import get_current_user
 from server.utils.helpers import document_sources_only, resolve_or_create_session
 from server.utils.source_attribution import (
@@ -230,21 +231,28 @@ def public_chat_session(
         raise HTTPException(status_code=404, detail="Chat session not found")
 
     conversation = crud.chat_message.get_visible_by_chat(db, chat_id=chat_id)
-    messages = [
-        {
-            "id": msg.id,
-            "role": msg.role,
-            "content": msg.content,
-            "source_documents": document_sources_only(
-                cited_document_names(msg.citations)
-            ),
-            "citations": msg.citations,
-            "source_attribution": source_attribution_from_citations(msg.citations),
-            "follow_up_questions": [],
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        }
-        for msg in conversation
-    ]
+    messages = []
+    for msg in conversation:
+        follow_ups = []
+        if msg.role == "assistant" and msg.content:
+            _, follow_ups = RAGService.split_answer_and_followups(msg.content)
+            if not follow_ups:
+                follow_ups = RAGService.generate_contextual_followups(msg.content)
+        messages.append(
+            {
+                "id": msg.id,
+                "role": msg.role,
+                "content": msg.content,
+                "source_documents": document_sources_only(
+                    cited_document_names(msg.citations)
+                ),
+                "citations": msg.citations or [],
+                "sources": msg.citations or [],
+                "source_attribution": source_attribution_from_citations(msg.citations),
+                "follow_up_questions": follow_ups,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
+        )
     AuditLogger.log(
         action="CHAT_GET_PUBLIC",
         workspace_id=session.workspace_id,
@@ -329,6 +337,23 @@ def get_chat_session(
     for msg in visible_conversation:
         uploaded = uploaded_by_message.get(msg.id, [])
         attachments = [info for info in (_doc_info(d) for d in uploaded) if info]
+        follow_ups = []
+        if msg.role == "assistant" and msg.content:
+            _, follow_ups = RAGService.split_answer_and_followups(msg.content)
+            if not follow_ups:
+                follow_ups = RAGService.generate_contextual_followups(msg.content)
+        msg_agent_id = getattr(msg, "agent_id", None)
+        msg_agent_name = getattr(msg, "agent_name", None)
+        if not msg_agent_name and getattr(session, "execution_type", None) == "agent" and len(visible_conversation) <= 2 and msg.role == "assistant":
+            msg_agent_id = getattr(session, "agent_id", None)
+            msg_agent_name = getattr(session, "agent_name", None)
+
+        msg_agents = (
+            [{"id": msg_agent_id or "agent", "name": msg_agent_name, "isWorkflow": True}]
+            if msg_agent_name
+            else None
+        )
+
         messages.append(
             {
                 "id": msg.id,
@@ -342,11 +367,15 @@ def get_chat_session(
                 "source_documents": document_sources_only(
                     cited_document_names(msg.citations)
                 ),
-                "citations": msg.citations,
+                "citations": msg.citations or [],
+                "sources": msg.citations or [],
                 "source_attribution": source_attribution_from_citations(msg.citations),
                 "skills_used": getattr(msg, "skills_used", None),
                 "skills": getattr(msg, "skills_used", None),
-                "follow_up_questions": [],
+                "agent_id": msg_agent_id,
+                "agent_name": msg_agent_name,
+                "agents": msg_agents,
+                "follow_up_questions": follow_ups,
                 "created_at": msg.created_at.isoformat() if msg.created_at else None,
                 "updated_at": msg.updated_at.isoformat() if msg.updated_at else None,
             }

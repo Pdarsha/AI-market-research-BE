@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from server import crud
@@ -176,12 +176,24 @@ class AgentValidationService:
         frequency: Optional[str],
         day: Optional[str],
         time_str: Optional[str],
+        interval: Optional[int] = None,
     ) -> Optional[str]:
-        """Compute standard 5-part cron expression from structured frequency, day, and time."""
+        """Compute standard 5-part cron expression from structured frequency, day, time, and interval."""
         if not frequency:
             return None
 
         freq = frequency.lower().strip()
+
+        if freq in ("minutes", "minute", "min", "mins"):
+            inv = interval
+            if not inv and time_str:
+                m = re.search(r"every\s+(\d+)\s+min", str(time_str), re.IGNORECASE)
+                if m:
+                    inv = int(m.group(1))
+            if not inv or inv <= 1:
+                return "*/1 * * * *"
+            return f"*/{inv} * * * *"
+
         minute = "0"
         hour = "9"
 
@@ -270,7 +282,7 @@ class AgentValidationService:
 
         # 2. Status & Instructions validation
         status = data.get("status") or AgentStatus.DRAFT.value
-        instructions = (data.get("instructions") or "").strip()
+        instructions = (data.get("instructions") or data.get("prompt") or "").strip()
 
         if status == AgentStatus.ACTIVE.value:
             if not instructions:
@@ -318,6 +330,11 @@ class AgentValidationService:
                 )
             )
 
+        VALID_FREQUENCIES = (
+            "minutes", "minute", "min", "mins",
+            "hourly", "daily", "weekly", "monthly", "custom",
+        )
+
         if is_scheduled:
             # If status is active, scheduling parameters are strictly required
             if status == AgentStatus.ACTIVE.value:
@@ -325,15 +342,15 @@ class AgentValidationService:
                     errors.append(
                         ValidationIssue(
                             field="schedule_frequency",
-                            message="Schedule frequency ('daily', 'weekly', 'monthly', 'hourly', 'custom') is required for scheduled agents.",
+                            message="Schedule frequency ('minutes', 'hourly', 'daily', 'weekly', 'monthly', 'custom') is required for scheduled agents.",
                             code="MISSING_SCHEDULE_FREQUENCY",
                         )
                     )
-                elif schedule_freq not in ("daily", "weekly", "monthly", "hourly", "custom"):
+                elif schedule_freq not in VALID_FREQUENCIES:
                     errors.append(
                         ValidationIssue(
                             field="schedule_frequency",
-                            message="Schedule frequency must be one of: 'daily', 'weekly', 'monthly', 'hourly', 'custom'.",
+                            message="Schedule frequency must be one of: 'minutes', 'hourly', 'daily', 'weekly', 'monthly', 'custom'.",
                             code="INVALID_SCHEDULE_FREQUENCY",
                         )
                     )
@@ -347,6 +364,31 @@ class AgentValidationService:
                                     code="INVALID_CRON_EXPRESSION",
                                 )
                             )
+                    elif schedule_freq in ("minutes", "minute", "min", "mins"):
+                        inv = data.get("schedule_interval") or data.get("minute_interval") or data.get("interval_minutes")
+                        if not inv and schedule_time:
+                            m = re.search(r"every\s+(\d+)\s+min", str(schedule_time), re.IGNORECASE)
+                            if m:
+                                inv = int(m.group(1))
+                        if inv is not None:
+                            try:
+                                inv_int = int(inv)
+                                if inv_int < 1:
+                                    errors.append(
+                                        ValidationIssue(
+                                            field="schedule_interval",
+                                            message="Schedule interval must be at least 1 minute.",
+                                            code="INVALID_SCHEDULE_INTERVAL",
+                                        )
+                                    )
+                            except (ValueError, TypeError):
+                                errors.append(
+                                    ValidationIssue(
+                                        field="schedule_interval",
+                                        message="Schedule interval must be a valid integer.",
+                                        code="INVALID_SCHEDULE_INTERVAL",
+                                    )
+                                )
                     else:
                         has_time_input = bool(schedule_time or schedule_start_time)
                         if not has_time_input:
@@ -428,6 +470,14 @@ class AgentValidationService:
                             code="INCOMPLETE_SCHEDULE_CONFIG",
                         )
                     )
+                if schedule_cron and not self.validate_cron_expression(schedule_cron):
+                    errors.append(
+                        ValidationIssue(
+                            field="schedule_cron",
+                            message="Invalid cron expression format. Must be standard 5-part cron expression.",
+                            code="INVALID_CRON_EXPRESSION",
+                        )
+                    )
                 elif schedule_time or schedule_start_time or schedule_end_time:
                     norm_time, s_start, s_end, err_msg = self.normalize_time_string(
                         time_str=schedule_time,
@@ -447,6 +497,7 @@ class AgentValidationService:
                                 code=code,
                             )
                         )
+
 
             if scheduled_count_limit is not None and scheduled_count_limit < 1:
                 errors.append(

@@ -51,6 +51,7 @@ from server.utils.prompt import (
     companies_house_classification_prompt,
     classify_intent_prompt,
 )
+from server.utils.chat_helpers import get_llm_kwargs, is_reasoning_model
 
 logger = logging.getLogger(__name__)
 
@@ -598,9 +599,8 @@ class RAGService:
         the chunks are aggregated into the final response string.
         """
         token_kwargs = {}
-        if "gpt-5" in model.lower():
+        if is_reasoning_model(model):
             token_kwargs["max_completion_tokens"] = 1024
-            token_kwargs["temperature"] = 1
         else:
             token_kwargs["max_tokens"] = 1024
             token_kwargs["temperature"] = 0
@@ -617,7 +617,7 @@ class RAGService:
                     if match:
                         affordable_tokens = int(match.group(1))
                         # Retry with the exact affordable tokens
-                        if "gpt-5" in model.lower():
+                        if is_reasoning_model(model):
                             token_kwargs["max_completion_tokens"] = affordable_tokens
                         else:
                             token_kwargs["max_tokens"] = affordable_tokens
@@ -645,9 +645,10 @@ class RAGService:
         """LLM response generation for Think Longer mode with reasoning effort."""
         try:
             token_kwargs = {}
-            if "gpt-5" in model.lower():
+            if is_reasoning_model(model):
                 token_kwargs["max_completion_tokens"] = 4096
-                token_kwargs["temperature"] = 1
+                if reasoning_effort:
+                    token_kwargs["reasoning_effort"] = reasoning_effort
             else:
                 token_kwargs["max_tokens"] = 4096
                 token_kwargs["temperature"] = 0
@@ -666,7 +667,7 @@ class RAGService:
                         match = re.search(r"can only afford (\d+)", str(e))
                         if match:
                             affordable_tokens = int(match.group(1))
-                            if "gpt-5" in model.lower():
+                            if is_reasoning_model(model):
                                 token_kwargs["max_completion_tokens"] = affordable_tokens
                             else:
                                 token_kwargs["max_tokens"] = affordable_tokens
@@ -702,14 +703,14 @@ class RAGService:
         Defaults to 'Other' on error.
         """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=15)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": classify_intent_prompt()},
                     {"role": "user", "content": f'User message:\n"{question}"\nIntent:'},
                 ],
-                **({"max_completion_tokens": 15} if "gpt-5" in model.lower() else {"max_tokens": 15}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             intent = (completion.choices[0].message.content or "").strip()
             valid_intents = {
@@ -734,14 +735,14 @@ class RAGService:
         documents rather than silently ignoring them).
         """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=1024)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": classification_prompt()},
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
-                **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             requires = answer.startswith("Y")
@@ -767,14 +768,14 @@ class RAGService:
         latency / spurious context).
         """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=1024)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": web_search_classification_prompt()},
                     {"role": "user", "content": f'Question:\n"{question}"\nAnswer:'},
                 ],
-                **({"max_completion_tokens": 1024} if "gpt-5" in model.lower() else {"max_tokens": 1024}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             requires = answer.startswith("Y")
@@ -839,11 +840,11 @@ class RAGService:
                 f"CONTEXT:\n{context[:2500]}\n\n"
                 "ANSWER (YES or NO):"
             )
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=10)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({"max_completion_tokens": 10} if "gpt-5" in model.lower() else {"max_tokens": 10}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             ans = (completion.choices[0].message.content or "").strip().upper()
             sufficient = ans.startswith("Y")
@@ -891,11 +892,11 @@ class RAGService:
                 f"FINANCIAL CONTEXT:\n{context[:3000]}\n\n"
                 "ANSWER (YES or NO):"
             )
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=10)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({"max_completion_tokens": 10} if "gpt-5" in model.lower() else {"max_tokens": 10}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             ans = (completion.choices[0].message.content or "").strip().upper()
             sufficient = ans.startswith("Y")
@@ -915,14 +916,14 @@ class RAGService:
         question uses the Alpha Vantage tool instead of an unrelated web search.
         """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=16)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": financial_news_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
@@ -936,11 +937,11 @@ class RAGService:
     @staticmethod
     def classify_roic_ai_query(client, question: str, model: str) -> str | None:
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=16)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": roic_ai_classification_prompt()}, {"role": "user", "content": question}],
-                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(r"YES:([A-Z][A-Z0-9.\-]{0,9})", answer)
@@ -952,14 +953,14 @@ class RAGService:
     @staticmethod
     def classify_companies_house_query(client, question: str, model: str) -> str | None:
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=16)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": companies_house_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip()
             if answer.upper().startswith("YES:"):
@@ -1264,14 +1265,14 @@ class RAGService:
     def classify_sec_edgar_tickers(client, question: str, model: str) -> list[str]:
         """Return one or two tickers for SEC questions, including comparisons."""
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=16)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": sec_edgar_classification_prompt()},
                     {"role": "user", "content": question},
                 ],
-                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16}),
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
+                **call_kwargs,
             )
             answer = (completion.choices[0].message.content or "").strip().upper()
             match = re.fullmatch(
@@ -2185,11 +2186,11 @@ History:
 Latest Query: {question}
 """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=256)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
-                **({"max_completion_tokens": 256} if "gpt-5" in model.lower() else {"max_tokens": 256})
+                **call_kwargs,
             )
             resp = (completion.choices[0].message.content or "").strip()
             
@@ -2232,11 +2233,11 @@ RESOLVED_NAME: <official name>
 TICKER: <ticker or NONE>
 """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=64)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
-                **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
+                **call_kwargs,
             )
             resp = (completion.choices[0].message.content or "").strip()
             
@@ -2286,11 +2287,11 @@ Format your response EXACTLY as a comma-separated list of tickers, or NONE if no
 Example: AAPL, MSFT, GOOGL
 """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=64)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
-                **({"max_completion_tokens": 64} if "gpt-5" in model.lower() else {"max_tokens": 64})
+                **call_kwargs,
             )
             resp = (completion.choices[0].message.content or "").strip()
             
@@ -2333,11 +2334,11 @@ Query: {question}
 Return ONLY the exact intent name from the list above.
 """
         try:
+            call_kwargs = get_llm_kwargs(model, temperature=0, max_tokens=16)
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                **({} if any(p in model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0}),
-                **({"max_completion_tokens": 16} if "gpt-5" in model.lower() else {"max_tokens": 16})
+                **call_kwargs,
             )
             intent = (completion.choices[0].message.content or "").strip()
             if intent in ["SEC_FILINGS", "FINANCIAL_MARKET_DATA", "WATCHLIST_NEWS", "ROIC", "COMPANIES_HOUSE", "WEB_SEARCH", "OTHER"]:

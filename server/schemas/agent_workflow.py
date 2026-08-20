@@ -1,6 +1,7 @@
 from datetime import datetime
 from enum import Enum as PyEnum
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -12,11 +13,13 @@ class TriggerType(str, PyEnum):
 
 
 class ScheduleFrequency(str, PyEnum):
+    MINUTES = "minutes"
+    HOURLY = "hourly"
     DAILY = "daily"
     WEEKLY = "weekly"
     MONTHLY = "monthly"
-    HOURLY = "hourly"
     CUSTOM = "custom"
+
 
 
 class AIExecutionMode(str, PyEnum):
@@ -34,6 +37,9 @@ class AgentStatus(str, PyEnum):
 
 
 class AgentWorkflowBase(BaseModel):
+    id: Optional[str] = Field(
+        None, description="Optional client-specified or persistent ID of the agent"
+    )
     name: str = Field(
         ..., description="Name of the agent", min_length=1, max_length=255
     )
@@ -44,6 +50,7 @@ class AgentWorkflowBase(BaseModel):
         None, description="System instructions / prompt guiding the agent"
     )
 
+
     # Trigger configuration
     trigger_type: TriggerType = Field(
         default=TriggerType.AUTOMATIC,
@@ -52,13 +59,22 @@ class AgentWorkflowBase(BaseModel):
 
     # Schedule configuration
     schedule_frequency: Optional[str] = Field(
-        None, description="Schedule frequency: daily, weekly, monthly, hourly, custom"
+        None, description="Schedule frequency: minutes, hourly, daily, weekly, monthly, custom"
+    )
+    schedule_interval: Optional[int] = Field(
+        None, description="Interval in minutes/hours for interval-based scheduling"
+    )
+    minute_interval: Optional[int] = Field(
+        None, description="Alias for schedule_interval in minutes"
+    )
+    interval_minutes: Optional[int] = Field(
+        None, description="Alias for schedule_interval in minutes"
     )
     schedule_day: Optional[str] = Field(
         None, description="Day of schedule (e.g. monday, tuesday or 1, 15)"
     )
     schedule_time: Optional[str] = Field(
-        None, description="Execution time (e.g. 09:00 or 09:00-17:00)"
+        None, description="Execution time (e.g. 09:00, 09:00-17:00, 'Every 1 minute')"
     )
     schedule_start_time: Optional[str] = Field(
         None, description="Schedule start time in 24-hour HH:MM format"
@@ -95,6 +111,12 @@ class AgentWorkflowBase(BaseModel):
     custom_sources: Optional[List[Dict[str, Any]]] = Field(
         default_factory=list, description="Custom external sources or API integrations"
     )
+    prompt: Optional[str] = Field(
+        None, description="Alias for instructions (system instructions / prompt guiding the agent)"
+    )
+    tools: Optional[List[str]] = Field(
+        default_factory=list, description="Alias for selected_sources (enabled tool/data sources)"
+    )
 
     # AI Execution Mode
     execution_mode: AIExecutionMode = Field(
@@ -118,7 +140,38 @@ class AgentWorkflowBase(BaseModel):
     @classmethod
     def normalize_schedule_and_limits(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # 1. Sync duplicate limit fields
+            # 1. Sync duplicate prompt / instructions fields
+            if data.get("prompt") and not data.get("instructions"):
+                data["instructions"] = data["prompt"]
+            elif data.get("instructions") and not data.get("prompt"):
+                data["prompt"] = data["instructions"]
+
+            # 2. Sync duplicate tools / selected_sources fields
+            if data.get("tools") and not data.get("selected_sources"):
+                data["selected_sources"] = data["tools"]
+            elif data.get("selected_sources") and not data.get("tools"):
+                data["tools"] = data["selected_sources"]
+
+            # 3. Sync duplicate interval fields & extract from schedule_time if applicable
+            interval = (
+                data.get("schedule_interval")
+                or data.get("minute_interval")
+                or data.get("interval_minutes")
+            )
+            if not interval and data.get("schedule_time"):
+                m = re.search(r"every\s+(\d+)\s+min", str(data.get("schedule_time")), re.IGNORECASE)
+                if m:
+                    interval = int(m.group(1))
+            if interval is not None:
+                try:
+                    int_val = int(interval)
+                    data["schedule_interval"] = int_val
+                    data["minute_interval"] = int_val
+                    data["interval_minutes"] = int_val
+                except (ValueError, TypeError):
+                    pass
+
+            # 4. Sync duplicate limit fields
             if (
                 "limit_documents_to_past_7_days" in data
                 and "limit_docs_past_7_days" not in data
@@ -147,30 +200,35 @@ class AgentWorkflowBase(BaseModel):
                     data["limit_docs_past_7_days"]
                 )
 
-            # 2. Normalize times
-            s_time = data.get("schedule_time")
-            s_start = data.get("schedule_start_time")
-            s_end = data.get("schedule_end_time")
+            # 5. Normalize times
+            freq = str(data.get("schedule_frequency") or "").lower().strip()
+            if freq not in ("minutes", "minute", "min", "mins"):
+                s_time = data.get("schedule_time")
+                s_start = data.get("schedule_start_time")
+                s_end = data.get("schedule_end_time")
 
-            if s_start or s_end or s_time:
-                from server.services.agent_validation_service import (
-                    agent_validation_service,
-                )
-
-                norm_time, norm_start, norm_end, _ = (
-                    agent_validation_service.normalize_time_string(
-                        time_str=s_time,
-                        start_time=s_start,
-                        end_time=s_end,
+                if s_start or s_end or s_time:
+                    from server.services.agent_validation_service import (
+                        agent_validation_service,
                     )
-                )
-                if norm_time:
-                    data["schedule_time"] = norm_time
-                if norm_start:
-                    data["schedule_start_time"] = norm_start
-                if norm_end:
-                    data["schedule_end_time"] = norm_end
+
+                    norm_time, norm_start, norm_end, _ = (
+                        agent_validation_service.normalize_time_string(
+                            time_str=s_time,
+                            start_time=s_start,
+                            end_time=s_end,
+                        )
+                    )
+                    if norm_time:
+                        data["schedule_time"] = norm_time
+                    if norm_start:
+                        data["schedule_start_time"] = norm_start
+                    if norm_end:
+                        data["schedule_end_time"] = norm_end
+            elif data.get("schedule_time") is None and interval:
+                data["schedule_time"] = f"Every {interval} minute{'s' if interval > 1 else ''}"
         return data
+
 
     @field_validator("name")
     @classmethod
@@ -212,11 +270,16 @@ class AgentWorkflowCreate(AgentWorkflowBase):
 
 
 class AgentWorkflowUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    name: Optional[str] = Field(None, max_length=255)
     description: Optional[str] = None
     instructions: Optional[str] = None
+    prompt: Optional[str] = None
+    tools: Optional[List[str]] = None
     trigger_type: Optional[TriggerType] = None
     schedule_frequency: Optional[str] = None
+    schedule_interval: Optional[int] = None
+    minute_interval: Optional[int] = None
+    interval_minutes: Optional[int] = None
     schedule_day: Optional[str] = None
     schedule_time: Optional[str] = None
     schedule_start_time: Optional[str] = None
@@ -240,6 +303,46 @@ class AgentWorkflowUpdate(BaseModel):
     @classmethod
     def normalize_update_schedule_and_limits(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            # 0. Clean name if provided as empty string
+            if "name" in data:
+                if isinstance(data["name"], str):
+                    clean_name = data["name"].strip()
+                    data["name"] = clean_name if clean_name else None
+                elif data["name"] is None:
+                    data["name"] = None
+
+            # 1. Sync prompt / instructions
+            if data.get("prompt") and not data.get("instructions"):
+                data["instructions"] = data["prompt"]
+            elif data.get("instructions") and not data.get("prompt"):
+                data["prompt"] = data["instructions"]
+
+            # 2. Sync tools / selected_sources
+            if data.get("tools") and not data.get("selected_sources"):
+                data["selected_sources"] = data["tools"]
+            elif data.get("selected_sources") and not data.get("tools"):
+                data["tools"] = data["selected_sources"]
+
+            # 3. Sync interval
+            interval = (
+                data.get("schedule_interval")
+                or data.get("minute_interval")
+                or data.get("interval_minutes")
+            )
+            if not interval and data.get("schedule_time"):
+                m = re.search(r"every\s+(\d+)\s+min", str(data.get("schedule_time")), re.IGNORECASE)
+                if m:
+                    interval = int(m.group(1))
+            if interval is not None:
+                try:
+                    int_val = int(interval)
+                    data["schedule_interval"] = int_val
+                    data["minute_interval"] = int_val
+                    data["interval_minutes"] = int_val
+                except (ValueError, TypeError):
+                    pass
+
+            # 4. Sync limits
             if (
                 "limit_documents_to_past_7_days" in data
                 and "limit_docs_past_7_days" not in data
@@ -255,41 +358,36 @@ class AgentWorkflowUpdate(BaseModel):
                     data["limit_docs_past_7_days"]
                 )
 
-            s_time = data.get("schedule_time")
-            s_start = data.get("schedule_start_time")
-            s_end = data.get("schedule_end_time")
+            # 5. Times
+            freq = str(data.get("schedule_frequency") or "").lower().strip()
+            if freq not in ("minutes", "minute", "min", "mins"):
+                s_time = data.get("schedule_time")
+                s_start = data.get("schedule_start_time")
+                s_end = data.get("schedule_end_time")
 
-            if s_start or s_end or s_time:
-                from server.services.agent_validation_service import (
-                    agent_validation_service,
-                )
-
-                norm_time, norm_start, norm_end, _ = (
-                    agent_validation_service.normalize_time_string(
-                        time_str=s_time,
-                        start_time=s_start,
-                        end_time=s_end,
+                if s_start or s_end or s_time:
+                    from server.services.agent_validation_service import (
+                        agent_validation_service,
                     )
-                )
-                if norm_time:
-                    data["schedule_time"] = norm_time
-                if norm_start:
-                    data["schedule_start_time"] = norm_start
-                if norm_end:
-                    data["schedule_end_time"] = norm_end
-        return data
 
-    @field_validator("name")
-    @classmethod
-    def validate_name_not_empty(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            if not v or not v.strip():
-                raise ValueError("Agent name cannot be empty or whitespace only.")
-            return v.strip()
-        return v
+                    norm_time, norm_start, norm_end, _ = (
+                        agent_validation_service.normalize_time_string(
+                            time_str=s_time,
+                            start_time=s_start,
+                            end_time=s_end,
+                        )
+                    )
+                    if norm_time:
+                        data["schedule_time"] = norm_time
+                    if norm_start:
+                        data["schedule_start_time"] = norm_start
+                    if norm_end:
+                        data["schedule_end_time"] = norm_end
+        return data
 
 
 class AgentWorkflowResponse(AgentWorkflowBase):
+
     id: str
     user_id: str
     schedule_start_time: Optional[str] = None
@@ -312,11 +410,13 @@ class AgentWorkflowListItem(BaseModel):
     description: Optional[str] = None
     trigger_type: TriggerType
     schedule_frequency: Optional[str] = None
+    schedule_interval: Optional[int] = None
     schedule_day: Optional[str] = None
     schedule_time: Optional[str] = None
     schedule_start_time: Optional[str] = None
     schedule_end_time: Optional[str] = None
     schedule_timezone: Optional[str] = None
+
     execution_mode: AIExecutionMode
     status: AgentStatus
     version: str
@@ -467,6 +567,9 @@ class AgentWorkflowStepLogResponse(BaseModel):
 class AgentWorkflowExecutionResponse(BaseModel):
     id: str
     workflow_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    workflow_name: Optional[str] = None
     user_id: str
     workspace_id: Optional[str] = None
     trigger_source: str
@@ -474,8 +577,15 @@ class AgentWorkflowExecutionResponse(BaseModel):
     query_or_goal: str
     plan_steps: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     final_response: Optional[str] = None
+    response: Optional[str] = None
+    content: Optional[str] = None
     citations: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    sources: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     source_documents: Optional[List[str]] = Field(default_factory=list)
+    source_attribution: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(
+        default_factory=dict
+    )
+    follow_up_questions: Optional[List[str]] = Field(default_factory=list)
     skills_applied: Optional[List[str]] = Field(default_factory=list)
     tools_called: Optional[List[str]] = Field(default_factory=list)
     shared_state: Optional[Dict[str, Any]] = Field(default_factory=dict)
@@ -489,6 +599,32 @@ class AgentWorkflowExecutionResponse(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def sync_response_fields(self) -> "AgentWorkflowExecutionResponse":
+        if not self.final_response and self.response:
+            self.final_response = self.response
+        if not self.final_response and self.content:
+            self.final_response = self.content
+        if not self.response and self.final_response:
+            self.response = self.final_response
+        if not self.content and self.final_response:
+            self.content = self.final_response
+        if not self.sources and self.citations:
+            self.sources = self.citations
+        if not self.citations and self.sources:
+            self.citations = self.sources
+        if isinstance(self.shared_state, dict):
+            if not self.follow_up_questions and self.shared_state.get("follow_up_questions"):
+                self.follow_up_questions = self.shared_state.get("follow_up_questions") or []
+            if not self.source_attribution and self.shared_state.get("source_attribution"):
+                self.source_attribution = self.shared_state.get("source_attribution") or {}
+            if not self.citations and self.shared_state.get("citations"):
+                self.citations = self.shared_state.get("citations") or []
+                self.sources = self.citations
+            if not self.source_documents and self.shared_state.get("source_documents"):
+                self.source_documents = self.shared_state.get("source_documents") or []
+        return self
 
 
 class AgentWorkflowExecutionListItem(BaseModel):

@@ -22,6 +22,8 @@ from functools import lru_cache
 from typing import Callable, Sequence, TypeVar
 
 from openai import OpenAI
+from server.utils.chat_helpers import get_llm_kwargs
+from server.utils.llm_client import get_openai_client, execute_with_llm_retry
 
 from server.config import settings
 from server.services.audit_logger import audit_context
@@ -44,10 +46,11 @@ class RerankService:
 
     @property
     def client(self) -> OpenAI:
-        """Lazily create the OpenAI-compatible client (OpenRouter), cached."""
+        """Lazily create the OpenAI-compatible client, cached."""
         if self._client is None:
-            self._client = OpenAI(
+            self._client = get_openai_client(
                 api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL,
             )
         return self._client
 
@@ -99,15 +102,41 @@ class RerankService:
                 f"Return the top {top_k} passage numbers as a JSON array."
             )
 
+            rerank_kwargs = get_llm_kwargs(
+                self.model_name,
+                temperature=0,
+                max_tokens=1024,
+            )
+
             try:
-                completion = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0,
-                    max_tokens=1024,
+                def _do_rerank_call():
+                    try:
+                        return self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            **rerank_kwargs,
+                        )
+                    except Exception as api_err:
+                        if "temperature" in str(api_err).lower() and "temperature" in rerank_kwargs:
+                            retry_kwargs = {k: v for k, v in rerank_kwargs.items() if k != "temperature"}
+                            return self.client.chat.completions.create(
+                                model=self.model_name,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ],
+                                **retry_kwargs,
+                            )
+                        raise api_err
+
+                completion = execute_with_llm_retry(
+                    _do_rerank_call,
+                    max_attempts=3,
+                    initial_delay=1.0,
+                    operation_name="Rerank LLM call",
                 )
                 content = (completion.choices[0].message.content or "").strip()
             except Exception as exc:

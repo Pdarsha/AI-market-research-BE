@@ -264,10 +264,12 @@ def get_scheduler_status(
 
 @agent_workflow_router.post("/scheduler/tick")
 async def trigger_scheduler_tick(
+    db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Trigger a scheduler tick manually to evaluate and execute due scheduled agents."""
-    tick_result = await agent_scheduler_service.tick()
+    tick_result = await agent_scheduler_service.tick(db=db)
+
     return JSONResponse(
         status_code=200,
         content={
@@ -451,15 +453,24 @@ def update_agent(
     # Prepare merged state for validation
     current_data = schemas.AgentWorkflowResponse.model_validate(agent).model_dump()
     update_data = request.model_dump(exclude_unset=True)
-    merged_data = {**current_data, **update_data}
+
+    # For partial updates (PATCH), ignore None or empty string for name/instructions so existing values are preserved
+    non_null_updates = {
+        k: v for k, v in update_data.items()
+        if v is not None and (k != "name" or (isinstance(v, str) and v.strip()))
+    }
+    merged_data = {**current_data, **non_null_updates}
 
     validation_res = agent_validation_service.validate_agent_config(
         agent=merged_data,
         user_id=user_id,
         db=db,
-        check_uniqueness=bool(request.name and request.name != agent.name),
+        check_uniqueness=bool(
+            non_null_updates.get("name") and non_null_updates["name"] != agent.name
+        ),
         exclude_agent_id=agent_id,
     )
+
 
     if not validation_res.valid:
         return JSONResponse(
@@ -702,235 +713,49 @@ def delete_agent(
 async def run_agent_workflow(
     agent_id: str,
     request: schemas.AgentExecutionRequest = schemas.AgentExecutionRequest(),
-    db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Execute a configured Agent Workflow through the multi-step cognitive execution engine."""
+    """Execute a configured Agent Workflow through the isolated agent execution service."""
+    from server.services.agent_execution_service import agent_execution_service
+
     user_id = str(current_user.id)
 
-    # 1. Ownership & Authorization Verification
-    agent = crud.agent_workflow.get_by_user_and_id(db, user_id=user_id, agent_id=agent_id)
-    if not agent:
-        # Check if agent exists for another user (403 Forbidden vs 404 Not Found)
-        existing_agent = db.query(AgentWorkflow).filter(AgentWorkflow.id == agent_id).first()
-        if existing_agent:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to execute this agent",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
-        )
-
-    # 1b. Verify Agent is Active (Reject manual execution for inactive/paused/draft agents)
-    if agent.status not in (AgentStatus.ACTIVE.value, AgentStatus.ACTIVE):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Agent is inactive and cannot be executed.",
-        )
-
-    # 2. Workspace Validation
-    target_workspace_id = request.workspace_id or agent.workspace_id
-
-    # 3. Execution Parameters & Context
-    merged_params = dict(request.parameters or {})
-    if target_workspace_id:
-        merged_params["workspace_id"] = target_workspace_id
-    if request.chat_id:
-        merged_params["chat_id"] = request.chat_id
-
-    # 4. If streaming requested, return StreamingResponse with live execution status events
     if request.stream:
-        async def run_event_stream():
-            queue: asyncio.Queue = asyncio.Queue()
+        return StreamingResponse(
+            agent_execution_service.execute_stream(
+                agent_id=agent_id,
+                user_id=user_id,
+                request=request,
+            ),
+            media_type="text/event-stream",
+        )
 
-            async def on_status_event(event: dict):
-                await queue.put(event)
-
-            start_payload = {
-                "type": "agent_started",
-                "status": "agent_started",
-                "step": f"Starting agent '{agent.name}'...",
-                "agent_id": agent.id,
-                "agent_name": agent.name,
-                "execution_mode": (
-                    agent.execution_mode.value
-                    if hasattr(agent.execution_mode, "value")
-                    else str(agent.execution_mode)
-                ),
-            }
-            yield f"data: {json.dumps(start_payload)}\n\n"
-
-            workflow_task = asyncio.create_task(
-                agent_workflow_engine.execute_workflow(
-                    db=db,
-                    workflow=agent,
-                    user_id=user_id,
-                    query=request.query,
-                    document_ids=request.document_ids,
-                    filter_past_7_days=request.filter_past_7_days,
-                    trigger_source=request.trigger_source or "manual",
-                    parameters=merged_params,
-                    status_callback=on_status_event,
-                )
-            )
-
-            # Stream live status events in real time as they arrive
-            while not workflow_task.done() or not queue.empty():
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.05)
-                    yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.TimeoutError:
-                    continue
-
-            exec_res = await workflow_task
-            final_text = exec_res.final_response or ""
-
-            # Stream tokens
-            chunk_size = 16
-            for i in range(0, len(final_text), chunk_size):
-                token_chunk = final_text[i : i + chunk_size]
-                yield f"data: {json.dumps({'type': 'token', 'content': token_chunk})}\n\n"
-
-            # Optional Chat persistence
-            if request.chat_id:
-                try:
-                    chat = crud.chat_session.get(db, id=request.chat_id)
-                    if chat and str(chat.user_id) == user_id:
-                        from server.services.agent_title_service import generate_agent_chat_title
-                        chat.agent_id = agent.id
-                        chat.agent_name = agent.name
-                        chat.execution_type = "agent"
-                        if not chat.title or chat.title in ("New Task", "Untitled", "New Chat", "Chat", agent.name):
-                            chat.title = generate_agent_chat_title(
-                                agent_name=agent.name,
-                                instructions=agent.instructions,
-                                query=request.query,
-                                trigger_source="manual",
-                            )
-                        db.add(chat)
-                        db.commit()
-
-                        if request.query and request.query.strip():
-                            crud.chat_message.create(
-                                db=db,
-                                obj_in=schemas.ChatMessageCreate(
-                                    chat_id=request.chat_id,
-                                    content=request.query.strip(),
-                                    role="user",
-                                    user_id=user_id,
-                                    workspace_id=target_workspace_id,
-                                    document_ids=request.document_ids or agent.selected_document_ids,
-                                ),
-                            )
-                        mode_used = (
-                            agent.execution_mode.value
-                            if hasattr(agent.execution_mode, "value")
-                            else str(agent.execution_mode)
-                        )
-                        crud.chat_message.create(
-                            db=db,
-                            obj_in=schemas.ChatMessageCreate(
-                                chat_id=request.chat_id,
-                                content=final_text,
-                                role="assistant",
-                                user_id=user_id,
-                                workspace_id=target_workspace_id,
-                                document_ids=request.document_ids or agent.selected_document_ids,
-                                source_documents=exec_res.source_documents or None,
-                                citations=exec_res.citations or None,
-                                skills_used=[
-                                    {"name": s, "selection_type": "agent_skill", "is_auto": True}
-                                    for s in (exec_res.skills_applied or [])
-                                ],
-                                mode_used=mode_used,
-                            ),
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to persist chat message for agent run {agent_id}: {e}")
-
-            yield f"data: {json.dumps({'type': 'complete', 'data': exec_res.model_dump(mode='json')})}\n\n"
-
-        return StreamingResponse(run_event_stream(), media_type="text/event-stream")
-
-    # Non-streaming execution
-    execution_response = await agent_workflow_engine.execute_workflow(
-        db=db,
-        workflow=agent,
+    execution_response = await agent_execution_service.execute(
+        agent_id=agent_id,
         user_id=user_id,
         query=request.query,
+        workspace_id=request.workspace_id,
         document_ids=request.document_ids,
         filter_past_7_days=request.filter_past_7_days,
         trigger_source=request.trigger_source or "manual",
-        parameters=merged_params,
+        parameters=request.parameters,
+        chat_id=request.chat_id,
     )
-
-    # 5. Optional Chat Session Message Persistence
-    if request.chat_id:
-        try:
-            chat = crud.chat_session.get(db, id=request.chat_id)
-            if chat and str(chat.user_id) == user_id:
-                from server.services.agent_title_service import generate_agent_chat_title
-                chat.agent_id = agent.id
-                chat.agent_name = agent.name
-                chat.execution_type = "agent"
-                if not chat.title or chat.title in ("New Task", "Untitled", "New Chat", "Chat", agent.name):
-                    chat.title = generate_agent_chat_title(
-                        agent_name=agent.name,
-                        instructions=agent.instructions,
-                        query=request.query,
-                        trigger_source="manual",
-                    )
-                db.add(chat)
-                db.commit()
-
-                if request.query and request.query.strip():
-                    crud.chat_message.create(
-                        db=db,
-                        obj_in=schemas.ChatMessageCreate(
-                            chat_id=request.chat_id,
-                            content=request.query.strip(),
-                            role="user",
-                            user_id=user_id,
-                            workspace_id=target_workspace_id,
-                            document_ids=request.document_ids or agent.selected_document_ids,
-                        ),
-                    )
-                mode_used = (
-                    agent.execution_mode.value
-                    if hasattr(agent.execution_mode, "value")
-                    else str(agent.execution_mode)
-                )
-                crud.chat_message.create(
-                    db=db,
-                    obj_in=schemas.ChatMessageCreate(
-                        chat_id=request.chat_id,
-                        content=execution_response.final_response or "",
-                        role="assistant",
-                        user_id=user_id,
-                        workspace_id=target_workspace_id,
-                        document_ids=request.document_ids or agent.selected_document_ids,
-                        source_documents=execution_response.source_documents or None,
-                        citations=execution_response.citations or None,
-                        skills_used=[
-                            {"name": s, "selection_type": "agent_skill", "is_auto": True}
-                            for s in (execution_response.skills_applied or [])
-                        ],
-                        mode_used=mode_used,
-                    ),
-                )
-        except Exception as e:
-            logger.warning(f"Failed to persist chat message for agent run {agent_id}: {e}")
 
     return JSONResponse(
         status_code=200,
         content={
-            "success": True,
-            "error": None,
+            "success": execution_response.status == "completed",
+            "error": execution_response.error_message if execution_response.status != "completed" else None,
             "data": execution_response.model_dump(mode="json"),
-            "message": f"Agent workflow '{agent.name}' executed successfully.",
+            "message": (
+                "Agent execution completed successfully."
+                if execution_response.status == "completed"
+                else f"Agent execution failed: {execution_response.error_message}"
+            ),
         },
     )
+
 
 
 

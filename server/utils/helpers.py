@@ -275,6 +275,22 @@ def strip_citation_markers(answer):
     return tidy_markdown_spacing(rewritten)
 
 
+def strip_textual_sources_list(answer: str) -> str:
+    """Remove trailing plaintext '## Sources' or '## References' bullet lists from the LLM answer.
+
+    The backend citation engine generates structured citation metadata rendered by the UI;
+    trailing plaintext bullet lists of sources in the text body duplicate UI chips and clutter the response.
+    """
+    if not answer:
+        return answer
+
+    pattern = (
+        r"(?i)(\n\s*(?:#{1,6}\s*(?:Sources|References|Data Sources|Sources Consulted|Sources & References|References & Sources|Sources and References|Key Sources|External Sources|Citations|Bibliography|Primary Sources|Sources Used|Data Sources Used)[\s:]*|\*{1,2}(?:Sources|References|Data Sources|Key Sources|External Sources|Sources Consulted|Primary Sources|Citations|Bibliography|Sources & References|References & Sources|Sources and References)[\s:]*\*{1,2}|(?:Sources|References|Data Sources|External Sources|Sources Consulted|Key Sources)[\s:]*\n\s*[-*•0-9])[\s\S]*?)(?=(?:\n\s*<<<FOLLOW_UP_QUESTIONS>>>|$))"
+    )
+    rewritten = re.sub(pattern, "", answer)
+    return tidy_markdown_spacing(rewritten)
+
+
 def resolve_active_document_ids(prior_messages, requested):
     """Resolve the active document context for the current message.
 

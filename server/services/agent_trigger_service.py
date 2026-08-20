@@ -29,7 +29,10 @@ from server.services.agent_workflow_engine import (
     AgentWorkflowEngine,
     get_agent_workflow_engine,
 )
+from server.utils.chat_helpers import get_llm_kwargs
+from server.utils.llm_client import get_openai_client, execute_with_llm_retry
 from server.services.audit_logger import AuditLogger
+from server.utils.source_attribution import source_attribution_from_citations
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ class AgentTriggerService:
         openai_client: Optional[OpenAI] = None,
         workflow_engine: Optional[AgentWorkflowEngine] = None,
     ):
-        self.openai_client = openai_client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.openai_client = openai_client or get_openai_client()
         self.workflow_engine = workflow_engine or get_agent_workflow_engine()
 
     def get_active_automatic_agents(
@@ -158,14 +161,39 @@ class AgentTriggerService:
         )
 
         try:
-            response = self.openai_client.chat.completions.create(
-                model=settings.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
+            trigger_kwargs = get_llm_kwargs(
+                settings.LLM_MODEL,
                 temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            def _do_trigger_eval():
+                try:
+                    return self.openai_client.chat.completions.create(
+                        model=settings.LLM_MODEL,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        **trigger_kwargs,
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in trigger_kwargs:
+                        retry_kwargs = {k: v for k, v in trigger_kwargs.items() if k != "temperature"}
+                        return self.openai_client.chat.completions.create(
+                            model=settings.LLM_MODEL,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            **retry_kwargs,
+                        )
+                    raise api_err
+
+            response = execute_with_llm_retry(
+                _do_trigger_eval,
+                max_attempts=3,
+                initial_delay=1.0,
+                operation_name="Agent Auto-Trigger Evaluation",
             )
             parsed = json.loads(response.choices[0].message.content or "{}")
             matched_id = parsed.get("matched_agent_id")
@@ -305,6 +333,7 @@ class AgentTriggerService:
                 "step": f"Starting agent '{matched_agent.name}'...",
                 "agent_id": matched_agent.id,
                 "agent_name": matched_agent.name,
+                "agents": [{"id": matched_agent.id, "name": matched_agent.name, "isWorkflow": True}],
                 "execution_mode": (
                     matched_agent.execution_mode.value
                     if hasattr(matched_agent.execution_mode, "value")
@@ -370,6 +399,8 @@ class AgentTriggerService:
                         {"name": s, "selection_type": "agent_skill", "is_auto": True}
                         for s in (exec_res.skills_applied or [])
                     ],
+                    agent_id=matched_agent.id,
+                    agent_name=matched_agent.name,
                     mode_used=mode_used,
                 ),
             )
@@ -392,6 +423,13 @@ class AgentTriggerService:
                 },
             )
 
+            source_attribution = (
+                exec_res.source_attribution
+                if getattr(exec_res, "source_attribution", None)
+                else source_attribution_from_citations(exec_res.citations)
+            )
+            follow_up_questions = exec_res.follow_up_questions or []
+
             message_obj = {
                 "id": assistant_message.id,
                 "chat_id": assistant_message.chat_id,
@@ -400,12 +438,16 @@ class AgentTriggerService:
                 "workspace_id": assistant_message.workspace_id,
                 "document_ids": assistant_message.document_ids,
                 "source_documents": exec_res.source_documents,
-                "citations": exec_res.citations,
-                "sources": exec_res.citations,
+                "citations": exec_res.citations or [],
+                "sources": exec_res.citations or [],
+                "source_attribution": source_attribution,
+                "follow_up_questions": follow_up_questions,
                 "skills_used": assistant_message.skills_used,
+                "skills": assistant_message.skills_used,
                 "mode_used": mode_used,
                 "agent_id": matched_agent.id,
                 "agent_name": matched_agent.name,
+                "agents": [{"id": matched_agent.id, "name": matched_agent.name, "isWorkflow": True}],
                 "execution_id": exec_res.id,
                 "created_at": assistant_message.created_at.isoformat()
                 if assistant_message.created_at
@@ -423,15 +465,22 @@ class AgentTriggerService:
                     "user_message_id": user_message.id,
                     "assistant_message_id": assistant_message.id,
                     "response": final_text,
+                    "content": final_text,
+                    "final_response": final_text,
                     "agent_workflow_id": matched_agent.id,
+                    "agent_id": matched_agent.id,
                     "agent_name": matched_agent.name,
+                    "agents": [{"id": matched_agent.id, "name": matched_agent.name, "isWorkflow": True}],
                     "agent_execution_id": exec_res.id,
                     "document_ids": unique_doc_ids,
                     "active_document_ids": unique_doc_ids,
                     "source_documents": exec_res.source_documents,
-                    "citations": exec_res.citations,
-                    "sources": exec_res.citations,
+                    "citations": exec_res.citations or [],
+                    "sources": exec_res.citations or [],
+                    "source_attribution": source_attribution,
+                    "follow_up_questions": follow_up_questions,
                     "skills_used": assistant_message.skills_used,
+                    "skills": assistant_message.skills_used,
                     "mode_used": mode_used,
                     "message": message_obj,
                 },

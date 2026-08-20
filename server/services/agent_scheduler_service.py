@@ -22,8 +22,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from server import crud
+from server import crud, schemas
 from server.db.session import SessionLocal
+
 from server.models.agent_workflow import (
     AgentStatus,
     AgentWorkflow,
@@ -36,6 +37,11 @@ from server.services.agent_workflow_engine import (
     get_agent_workflow_engine,
 )
 from server.services.audit_logger import AuditLogger
+from server.models.agent_workflow import ExecutionStatus
+from server.services.agent_title_service import (
+    generate_agent_chat_title,
+)
+from server.models.genai import ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +83,8 @@ class AgentSchedulerService:
         self, db: Session, *, user_id: Optional[str] = None
     ) -> List[AgentWorkflow]:
         """Query all active agents configured with scheduled or both trigger types."""
-        query = db.query(AgentWorkflow).filter(
-            AgentWorkflow.status == AgentStatus.ACTIVE.value,
-            AgentWorkflow.trigger_type.in_([TriggerType.SCHEDULED.value, TriggerType.BOTH.value]),
-        )
+        query = crud.agent_workflow.get_active_scheduled_agents(db=db)
+
         if user_id:
             query = query.filter(AgentWorkflow.user_id == str(user_id))
         return query.all()
@@ -103,6 +107,7 @@ class AgentSchedulerService:
         if not time_str:
             return (0, 0)
         from server.services.agent_validation_service import agent_validation_service
+
         # Take first part if range e.g. '09:00-10:00'
         first_part = time_str.split("-")[0].strip()
         parsed = agent_validation_service.parse_single_time(first_part)
@@ -167,8 +172,10 @@ class AgentSchedulerService:
         python_weekday = dt.weekday()
         # Convert python_weekday (0-6 where Mon=0) to cron weekday (0=Sun, 1=Mon, ..., 6=Sat, 7=Sun)
         cron_weekday = (python_weekday + 1) % 7
-        dow_matches = cls.matches_cron_field(dow_expr, python_weekday) or cls.matches_cron_field(
-            dow_expr, cron_weekday
+        dow_matches = (
+            cls.matches_cron_field(dow_expr, python_weekday)
+            or cls.matches_cron_field(dow_expr, cron_weekday)
+            or (python_weekday == 6 and cls.matches_cron_field(dow_expr, 7))
         )
         if not dow_matches:
             return False
@@ -176,13 +183,18 @@ class AgentSchedulerService:
         return True
 
     def should_run_now(
-        self, agent: AgentWorkflow, current_utc: Optional[datetime] = None, db: Optional[Session] = None
+        self,
+        agent: AgentWorkflow,
+        current_utc: Optional[datetime] = None,
+        db: Optional[Session] = None,
     ) -> bool:
         """Check if an active agent is scheduled to run at the given UTC time."""
-        if agent.status != AgentStatus.ACTIVE.value:
+        agent_status = getattr(agent.status, "value", agent.status)
+        if agent_status != AgentStatus.ACTIVE.value:
             return False
 
-        if agent.trigger_type not in (TriggerType.SCHEDULED.value, TriggerType.BOTH.value):
+        trigger_type = getattr(agent.trigger_type, "value", agent.trigger_type)
+        if trigger_type not in (TriggerType.SCHEDULED.value, TriggerType.BOTH.value):
             return False
 
         now_utc = current_utc or datetime.now(timezone.utc)
@@ -235,33 +247,49 @@ class AgentSchedulerService:
             return local_dt.hour == sched_hour and local_dt.minute == sched_min
 
         elif freq == "weekly":
-            # Match weekday + hour + minute
+            # Match weekday(s) + hour + minute
             day_str = (agent.schedule_day or "monday").strip().lower()
-            expected_weekday = DAY_NAME_TO_INT.get(day_str, 0)
+            raw_days = [d.strip().lower() for d in day_str.split(",") if d.strip()]
+            target_weekdays = [
+                DAY_NAME_TO_INT[d] for d in raw_days if d in DAY_NAME_TO_INT
+            ]
+            if not target_weekdays:
+                target_weekdays = [0]
             return (
-                local_dt.weekday() == expected_weekday
+                local_dt.weekday() in target_weekdays
                 and local_dt.hour == sched_hour
                 and local_dt.minute == sched_min
             )
 
         elif freq == "monthly":
-            # Match day of month + hour + minute
+            # Match day(s) of month + hour + minute
             day_str = (agent.schedule_day or "1").strip().lower()
-            if day_str == "last":
-                _, last_day = calendar.monthrange(local_dt.year, local_dt.month)
-                day_matches = local_dt.day == last_day
-            else:
-                try:
-                    target_day = int(day_str)
-                    day_matches = local_dt.day == target_day
-                except ValueError:
-                    day_matches = False
+            raw_days = [d.strip().lower() for d in day_str.split(",") if d.strip()]
+            _, last_day = calendar.monthrange(local_dt.year, local_dt.month)
+            target_days = []
+            for d in raw_days:
+                if d == "last":
+                    target_days.append(last_day)
+                elif d.isdigit() and 1 <= int(d) <= 31:
+                    target_days.append(int(d))
+            if not target_days:
+                target_days = [1]
 
-            return day_matches and local_dt.hour == sched_hour and local_dt.minute == sched_min
+            return (
+                local_dt.day in target_days
+                and local_dt.hour == sched_hour
+                and local_dt.minute == sched_min
+            )
 
         elif freq == "hourly":
             # Match minute of every hour
             return local_dt.minute == sched_min
+
+        elif freq in ("minutes", "minute", "min", "mins"):
+            interval = getattr(agent, "schedule_interval", None) or 1
+            if not interval or interval < 1:
+                interval = 1
+            return (local_dt.minute % interval) == 0
 
         return False
 
@@ -269,10 +297,12 @@ class AgentSchedulerService:
         self, agent: AgentWorkflow, from_utc: Optional[datetime] = None
     ) -> Optional[datetime]:
         """Estimate the next UTC run time for an agent for user visibility."""
-        if agent.status != AgentStatus.ACTIVE.value or agent.trigger_type not in (
-            TriggerType.SCHEDULED.value,
-            TriggerType.BOTH.value,
-        ):
+        agent_status = getattr(agent.status, "value", agent.status)
+        if agent_status != AgentStatus.ACTIVE.value:
+            return None
+
+        trigger_type = getattr(agent.trigger_type, "value", agent.trigger_type)
+        if trigger_type not in (TriggerType.SCHEDULED.value, TriggerType.BOTH.value):
             return None
 
         start_utc = from_utc or datetime.now(timezone.utc)
@@ -285,34 +315,93 @@ class AgentSchedulerService:
 
         local_now = start_utc.astimezone(agent_tz)
 
-        if freq == "daily":
-            candidate = local_now.replace(hour=sched_hour, minute=sched_min, second=0, microsecond=0)
+        # 1. Custom Cron or explicit cron expression
+        if agent.schedule_cron and agent.schedule_cron.strip():
+            candidate = (local_now + timedelta(minutes=1)).replace(
+                second=0, microsecond=0
+            )
+            max_minutes = 60 * 24 * 31  # up to 31 days
+            for _ in range(max_minutes):
+                if self.matches_cron(agent.schedule_cron, candidate):
+                    return candidate.astimezone(timezone.utc)
+                candidate += timedelta(minutes=1)
+            return None
+
+        if freq in ("minutes", "minute", "min", "mins"):
+            interval = getattr(agent, "schedule_interval", None) or 1
+            if not interval or interval < 1:
+                interval = 1
+            candidate = (local_now + timedelta(minutes=1)).replace(
+                second=0, microsecond=0
+            )
+            while candidate.minute % interval != 0:
+                candidate += timedelta(minutes=1)
+            return candidate.astimezone(timezone.utc)
+
+        elif freq == "daily":
+            candidate = local_now.replace(
+                hour=sched_hour, minute=sched_min, second=0, microsecond=0
+            )
             if candidate <= local_now:
                 candidate += timedelta(days=1)
             return candidate.astimezone(timezone.utc)
 
         elif freq == "weekly":
             day_str = (agent.schedule_day or "monday").strip().lower()
-            target_dow = DAY_NAME_TO_INT.get(day_str, 0)
-            days_ahead = (target_dow - local_now.weekday()) % 7
-            candidate = local_now.replace(hour=sched_hour, minute=sched_min, second=0, microsecond=0) + timedelta(days=days_ahead)
-            if candidate <= local_now:
-                candidate += timedelta(days=7)
-            return candidate.astimezone(timezone.utc)
+            raw_days = [d.strip().lower() for d in day_str.split(",") if d.strip()]
+            target_dows = [DAY_NAME_TO_INT[d] for d in raw_days if d in DAY_NAME_TO_INT]
+            if not target_dows:
+                target_dows = [0]
+
+            candidates = []
+            for target_dow in target_dows:
+                days_ahead = (target_dow - local_now.weekday()) % 7
+                candidate = local_now.replace(
+                    hour=sched_hour, minute=sched_min, second=0, microsecond=0
+                ) + timedelta(days=days_ahead)
+                if candidate <= local_now:
+                    candidate += timedelta(days=7)
+                candidates.append(candidate)
+            return min(candidates).astimezone(timezone.utc)
 
         elif freq == "monthly":
             day_str = (agent.schedule_day or "1").strip().lower()
-            target_day = int(day_str) if day_str.isdigit() else 1
-            try:
-                candidate = local_now.replace(day=target_day, hour=sched_hour, minute=sched_min, second=0, microsecond=0)
-                if candidate <= local_now:
-                    # Next month
-                    next_month = local_now.month + 1 if local_now.month < 12 else 1
-                    next_year = local_now.year if local_now.month < 12 else local_now.year + 1
-                    candidate = candidate.replace(year=next_year, month=next_month)
-                return candidate.astimezone(timezone.utc)
-            except ValueError:
-                pass
+            raw_days = [d.strip().lower() for d in day_str.split(",") if d.strip()]
+            if not raw_days:
+                raw_days = ["1"]
+
+            candidates = []
+            for year_offset, month_val in [
+                (0, local_now.month),
+                (1 if local_now.month == 12 else 0, (local_now.month % 12) + 1),
+            ]:
+                target_year = local_now.year + year_offset
+                _, last_day = calendar.monthrange(target_year, month_val)
+                for d in raw_days:
+                    t_day = (
+                        last_day
+                        if d == "last"
+                        else (int(d) if d.isdigit() and 1 <= int(d) <= 31 else 1)
+                    )
+                    if t_day > last_day:
+                        t_day = last_day
+                    try:
+                        cand = local_now.replace(
+                            year=target_year,
+                            month=month_val,
+                            day=t_day,
+                            hour=sched_hour,
+                            minute=sched_min,
+                            second=0,
+                            microsecond=0,
+                        )
+                        if cand > local_now:
+                            candidates.append(cand)
+                    except (ValueError, OverflowError):
+                        continue
+
+            if candidates:
+                return min(candidates).astimezone(timezone.utc)
 
         elif freq == "hourly":
             candidate = local_now.replace(minute=sched_min, second=0, microsecond=0)
@@ -327,7 +416,7 @@ class AgentSchedulerService:
     async def execute_scheduled_agent(
         self,
         agent_id: str,
-        db: Session,
+        db: Optional[Session] = None,
         *,
         triggered_at: Optional[datetime] = None,
         status_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
@@ -335,173 +424,51 @@ class AgentSchedulerService:
         """Execute a scheduled Agent Workflow through the common execution engine.
 
         Guarantees:
-          - No duplicate concurrent execution for the same agent ID.
-          - Increments run counter.
+          - Concurrency-safe lock prevents duplicate simultaneous execution for same agent.
+          - Manages independent DB session lifecycle when called asynchronously.
+          - Increments run counter & auto-pauses when count limit is reached.
           - Passes trigger_source="scheduled".
+          - Creates daily agent chat session & records message history.
           - Captures and records errors gracefully without breaking the scheduler.
         """
-        # Concurrency check
-        if agent_id in self._running_agent_ids:
-            logger.warning(
-                "[AGENT_SCHEDULER] Agent '%s' is already currently executing. Skipping duplicate trigger.",
-                agent_id,
-            )
-            return None
-
-        self._running_agent_ids.add(agent_id)
-        execution_time_now = triggered_at or datetime.utcnow()
+        # Concurrency check under lock (fast critical section)
+        async with self._lock:
+            if agent_id in self._running_agent_ids:
+                logger.warning(
+                    "[AGENT_SCHEDULER] Agent '%s' is already currently executing. Skipping duplicate trigger.",
+                    agent_id,
+                )
+                return None
+            self._running_agent_ids.add(agent_id)
 
         try:
-            agent = db.query(AgentWorkflow).filter(AgentWorkflow.id == agent_id).first()
-            if not agent:
-                logger.error(f"[AGENT_SCHEDULER] Agent {agent_id} not found.")
-                return None
-
-            if agent.status != AgentStatus.ACTIVE.value:
-                logger.info(
-                    f"[AGENT_SCHEDULER] Agent {agent.name} is not active ({agent.status}). Skipping."
-                )
-                return None
+            from server.services.agent_execution_service import agent_execution_service
 
             logger.info(
-                "[AGENT_SCHEDULER] Firing scheduled job for Agent '%s' (id=%s, mode=%s, user_id=%s)",
-                agent.name,
-                agent.id,
-                agent.execution_mode,
-                agent.user_id,
+                "[AGENT_SCHEDULER] [TRIGGER] Fired scheduled trigger for agent id=%s",
+                agent_id,
             )
 
-            # Audit start
-            AuditLogger.log(
-                action="AGENT_SCHEDULED_TRIGGER_FIRED",
-                user_id=agent.user_id,
-                workspace_id=agent.workspace_id,
-                endpoint="/scheduler/tick",
-                http_method="SYSTEM",
-                status="200",
-                metadata={
-                    "agent_id": agent.id,
-                    "agent_name": agent.name,
-                    "frequency": agent.schedule_frequency,
-                },
-            )
-
-            # Invoke the SAME execution engine
-            execution_response = await self.workflow_engine.execute_workflow(
-                db=db,
-                workflow=agent,
-                user_id=agent.user_id,
-                query=agent.instructions or agent.name,
-                document_ids=agent.selected_document_ids,
-                filter_past_7_days=agent.limit_docs_past_7_days,
+            execution_response = await agent_execution_service.execute(
+                agent_id=agent_id,
                 trigger_source="scheduled",
-                parameters={
-                    "schedule_frequency": agent.schedule_frequency,
-                    "schedule_time": agent.schedule_time,
-                    "schedule_day": agent.schedule_day,
-                    "scheduled_at": execution_time_now.isoformat(),
-                },
+                triggered_at=triggered_at,
                 status_callback=status_callback,
+                db=db,
             )
-
-            # Create dedicated ChatSession and persist messages for user visibility
-            if execution_response and execution_response.final_response:
-                try:
-                    from server.services.agent_title_service import generate_agent_chat_title
-                    from server.models.genai import ChatSession, ChatMessage
-
-                    sched_title = generate_agent_chat_title(
-                        agent_name=agent.name,
-                        instructions=agent.instructions,
-                        trigger_source="scheduled",
-                        execution_time=execution_time_now,
-                    )
-                    from server import crud
-                    sched_session, _ = crud.chat_session.get_or_create_daily_agent_session(
-                        db=db,
-                        user_id=agent.user_id,
-                        agent_id=agent.id,
-                        agent_name=agent.name,
-                        workspace_id=agent.workspace_id,
-                        execution_date=execution_time_now.date(),
-                        title=sched_title,
-                    )
-
-                    # Save user goal message
-                    user_msg = ChatMessage(
-                        chat_id=sched_session.id,
-                        user_id=agent.user_id,
-                        role="user",
-                        content=agent.instructions or f"Execute scheduled agent: {agent.name}",
-                        workspace_id=agent.workspace_id,
-                        document_ids=agent.selected_document_ids,
-                    )
-                    db.add(user_msg)
-
-                    # Save assistant response message
-                    mode_used = (
-                        agent.execution_mode.value
-                        if hasattr(agent.execution_mode, "value")
-                        else str(agent.execution_mode)
-                    )
-                    assistant_msg = ChatMessage(
-                        chat_id=sched_session.id,
-                        user_id=agent.user_id,
-                        role="assistant",
-                        content=execution_response.final_response,
-                        workspace_id=agent.workspace_id,
-                        document_ids=agent.selected_document_ids,
-                        source_documents=execution_response.source_documents or None,
-                        citations=execution_response.citations or None,
-                        skills_used=[
-                            {"name": s, "selection_type": "agent_skill", "is_auto": True}
-                            for s in (execution_response.skills_applied or [])
-                        ],
-                        mode_used=mode_used,
-                    )
-                    db.add(assistant_msg)
-                    db.commit()
-                except Exception as ex_chat:
-                    logger.warning(
-                        f"[AGENT_SCHEDULER] Failed to persist chat session for scheduled agent {agent.id}: {ex_chat}"
-                    )
-
-            # Update next estimated run time
-            agent.next_run_at = self.calculate_next_run_time(agent, from_utc=datetime.now(timezone.utc))
-            db.add(agent)
-            db.commit()
-
-            # Check if count limit reached -> auto-pause
-            if agent.scheduled_count_limit is not None:
-                total_runs = (
-                    db.query(func.count(AgentWorkflowExecution.id))
-                    .filter(
-                        AgentWorkflowExecution.workflow_id == agent.id,
-                        AgentWorkflowExecution.trigger_source == "scheduled",
-                    )
-                    .scalar()
-                    or 0
-                )
-                if total_runs >= agent.scheduled_count_limit:
-                    agent.status = AgentStatus.PAUSED.value
-                    db.add(agent)
-                    db.commit()
-                    logger.info(
-                        "[AGENT_SCHEDULER] Agent '%s' completed its scheduled limit of %d runs and was paused.",
-                        agent.name,
-                        agent.scheduled_count_limit,
-                    )
-
             return execution_response
 
         except Exception as e:
             logger.error(
-                f"[AGENT_SCHEDULER] Failed execution for scheduled agent {agent_id}: {str(e)}",
+                f"[AGENT_SCHEDULER] [ERROR] Failed scheduled execution for agent {agent_id}: {str(e)}",
                 exc_info=True,
             )
             return None
+
         finally:
-            self._running_agent_ids.discard(agent_id)
+            async with self._lock:
+                self._running_agent_ids.discard(agent_id)
+
 
     # --- 4. Scheduler Tick & Background Loop ---
 
@@ -509,10 +476,14 @@ class AgentSchedulerService:
         self,
         db_session_factory=SessionLocal,
         current_utc: Optional[datetime] = None,
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """Evaluate all active scheduled agents and fire jobs that are due."""
         now = current_utc or datetime.now(timezone.utc)
-        db: Session = db_session_factory()
+        owns_db = False
+        if db is None:
+            db = db_session_factory()
+            owns_db = True
         triggered_agent_ids = []
 
         try:
@@ -525,9 +496,11 @@ class AgentSchedulerService:
                         now.isoformat(),
                     )
                     triggered_agent_ids.append(agent.id)
-                    # Trigger asynchronously
+                    # Trigger asynchronously with isolated DB session
                     asyncio.create_task(
-                        self.execute_scheduled_agent(agent.id, db, triggered_at=now)
+                        self.execute_scheduled_agent(
+                            agent.id, db=None, triggered_at=now
+                        )
                     )
 
             return {
@@ -537,7 +510,8 @@ class AgentSchedulerService:
                 "triggered_agent_ids": triggered_agent_ids,
             }
         finally:
-            db.close()
+            if owns_db:
+                db.close()
 
     async def _scheduler_loop(self, poll_interval_seconds: int = 30):
         """Continuous background loop evaluating schedules every poll_interval_seconds."""
@@ -549,7 +523,10 @@ class AgentSchedulerService:
             try:
                 await self.tick()
             except Exception as e:
-                logger.error(f"[AGENT_SCHEDULER] Error in scheduler loop tick: {e}", exc_info=True)
+                logger.error(
+                    f"[AGENT_SCHEDULER] Error in scheduler loop tick: {e}",
+                    exc_info=True,
+                )
             await asyncio.sleep(poll_interval_seconds)
 
     def start(self, poll_interval_seconds: int = 30):
@@ -575,6 +552,34 @@ class AgentSchedulerService:
             self._background_task.cancel()
             self._background_task = None
             logger.info("[AGENT_SCHEDULER] Background scheduler stopped.")
+
+    def recover_stale_executions(self, db: Session) -> int:
+        """Mark orphaned/stuck running or pending executions as failed upon application restart."""
+        try:
+
+            stale_executions = crud.agent_workflow.stale_executions(db)
+            count = 0
+            for ex in stale_executions:
+                ex.status = ExecutionStatus.FAILED.value
+                ex.error_message = (
+                    "Execution aborted: Server restarted while task was in progress."
+                )
+                ex.completed_at = datetime.utcnow()
+                db.add(ex)
+                count += 1
+            if count > 0:
+                db.commit()
+                logger.info(
+                    f"[AGENT_SCHEDULER] Recovered and marked {count} stale execution(s) as failed on startup."
+                )
+            return count
+        except Exception as e:
+            logger.error(
+                f"[AGENT_SCHEDULER] Error during stale executions recovery: {e}",
+                exc_info=True,
+            )
+            db.rollback()
+            return 0
 
     @property
     def is_running(self) -> bool:

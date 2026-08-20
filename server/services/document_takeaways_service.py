@@ -16,10 +16,12 @@ from server.prompts.document_takeaways import (
     build_custom_column_prompt,
 )
 from server.services.rag_service import get_rag_service, RAGService
+from server.utils.chat_helpers import get_llm_kwargs
+from server.utils.llm_client import get_openai_client
 import json
 
 logger = logging.getLogger(__name__)
-client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+client = get_openai_client()
 
 
 def process_grid_cell_task(
@@ -90,22 +92,31 @@ def process_grid_cell_task(
 
             # We use json format for structured output from the LLM
             response_format = {"type": "json_object"}
-            token_kwargs = {}
-            if "gpt-5" in settings.LLM_MODEL.lower():
-                token_kwargs["max_completion_tokens"] = 1024
-                token_kwargs["temperature"] = 0
-            else:
-                token_kwargs["max_tokens"] = 1024
-                token_kwargs["temperature"] = 0
+            token_kwargs = get_llm_kwargs(
+                settings.LLM_MODEL,
+                temperature=0.0,
+                max_tokens=1024,
+                response_format=response_format,
+            )
 
             try:
                 # Bypass generator and request JSON strictly
-                completion = client.chat.completions.create(
-                    model=settings.LLM_MODEL,
-                    messages=messages,
-                    response_format=response_format,
-                    **token_kwargs,
-                )
+                try:
+                    completion = client.chat.completions.create(
+                        model=settings.LLM_MODEL,
+                        messages=messages,
+                        **token_kwargs,
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in token_kwargs:
+                        retry_kwargs = {k: v for k, v in token_kwargs.items() if k != "temperature"}
+                        completion = client.chat.completions.create(
+                            model=settings.LLM_MODEL,
+                            messages=messages,
+                            **retry_kwargs,
+                        )
+                    else:
+                        raise api_err
                 raw_response = completion.choices[0].message.content or "{}"
                 logger.info(f"AI response generated for cell: {cell_id}")
 

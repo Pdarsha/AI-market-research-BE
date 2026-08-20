@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
+from typing import List, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -56,10 +57,10 @@ class AgentWorkflow(Base):
 
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
     user_id = Column(
-        String, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+        String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     workspace_id = Column(
-        String, ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=True
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True
     )
 
     # Core metadata
@@ -75,12 +76,14 @@ class AgentWorkflow(Base):
     )
 
     # Schedule configuration (applicable when trigger_type is 'scheduled' or 'both')
-    schedule_frequency = Column(String(50), nullable=True)  # daily, weekly, monthly, custom
+    schedule_frequency = Column(String(50), nullable=True)  # minutes, hourly, daily, weekly, monthly, custom
+    schedule_interval = Column(Integer, default=1, nullable=True)  # interval for minutes/hours
     schedule_day = Column(String(100), nullable=True)  # e.g., "monday", "1,15", etc.
-    schedule_time = Column(String(100), nullable=True)  # e.g., "09:00", "09:00-17:00"
+    schedule_time = Column(String(100), nullable=True)  # e.g., "09:00", "09:00-17:00", "Every 1 minute"
     schedule_timezone = Column(String(50), default="UTC", nullable=True)
     schedule_cron = Column(String(100), nullable=True)  # computed/custom cron expression
     scheduled_count_limit = Column(Integer, nullable=True)  # max scheduled execution count
+
 
     # Source & document filtering
     limit_docs_past_7_days = Column(Boolean, default=False, nullable=False)
@@ -160,6 +163,39 @@ class AgentWorkflow(Base):
     def limit_documents_to_past_7_days(self, val: bool):
         self.limit_docs_past_7_days = bool(val)
 
+    @property
+    def minute_interval(self) -> Optional[int]:
+        return self.schedule_interval
+
+    @minute_interval.setter
+    def minute_interval(self, val: Optional[int]):
+        self.schedule_interval = val
+
+    @property
+    def interval_minutes(self) -> Optional[int]:
+        return self.schedule_interval
+
+    @interval_minutes.setter
+    def interval_minutes(self, val: Optional[int]):
+        self.schedule_interval = val
+
+    @property
+    def prompt(self) -> Optional[str]:
+        return self.instructions
+
+    @prompt.setter
+    def prompt(self, val: Optional[str]):
+        self.instructions = val
+
+    @property
+    def tools(self) -> List[str]:
+        return self.selected_sources or []
+
+    @tools.setter
+    def tools(self, val: Optional[List[str]]):
+        self.selected_sources = val or []
+
+
     __table_args__ = (
         Index("ix_agent_workflows_user_id", "user_id"),
         Index("ix_agent_workflows_workspace_id", "workspace_id"),
@@ -193,13 +229,13 @@ class AgentWorkflowExecution(Base):
 
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
     workflow_id = Column(
-        String, ForeignKey("agent_workflows.id", ondelete="CASCADE"), index=True, nullable=True
+        String, ForeignKey("agent_workflows.id", ondelete="CASCADE"), nullable=True
     )
     user_id = Column(
-        String, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+        String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     workspace_id = Column(
-        String, ForeignKey("workspaces.id", ondelete="SET NULL"), index=True, nullable=True
+        String, ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
     )
 
     # Execution context & metadata
@@ -252,7 +288,7 @@ class AgentWorkflowStepLog(Base):
 
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
     execution_id = Column(
-        String, ForeignKey("agent_workflow_executions.id", ondelete="CASCADE"), index=True, nullable=False
+        String, ForeignKey("agent_workflow_executions.id", ondelete="CASCADE"), nullable=False
     )
     step_number = Column(Integer, nullable=False)
     step_name = Column(String(255), nullable=False)

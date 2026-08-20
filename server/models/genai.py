@@ -81,6 +81,8 @@ class ChatMessage(Base):
     skills_used = Column(
         JSON, nullable=True
     )
+    agent_id = Column(String, nullable=True, index=True)
+    agent_name = Column(String, nullable=True)
     mode_used = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from server import crud
 from server.config import settings
 from server.models.skill import Skill, SkillStatus
+from server.utils.chat_helpers import get_llm_kwargs
+from server.utils.llm_client import get_openai_client, execute_with_llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ class SkillSelectionService:
     """Service to evaluate and automatically select relevant skills for a user query."""
 
     def __init__(self, client: Optional[OpenAI] = None, model: Optional[str] = None):
-        self.client = client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = client or get_openai_client()
         self.model = model or settings.LLM_MODEL
 
     def get_candidate_skills(self, db: Session, user_id: str) -> List[Skill]:
@@ -130,16 +132,40 @@ class SkillSelectionService:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+            select_kwargs = get_llm_kwargs(
+                self.model,
                 temperature=0.0,
                 response_format={"type": "json_object"},
             )
+            def _do_skill_eval():
+                try:
+                    return self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        **select_kwargs,
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in select_kwargs:
+                        retry_kwargs = {k: v for k, v in select_kwargs.items() if k != "temperature"}
+                        return self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            **retry_kwargs,
+                        )
+                    raise api_err
 
+            response = execute_with_llm_retry(
+                _do_skill_eval,
+                max_attempts=3,
+                initial_delay=1.0,
+                operation_name="Skill Relevance Evaluation",
+            )
             content = response.choices[0].message.content or "{}"
             parsed = json.loads(content)
             selected_ids = parsed.get("selected_skill_ids", [])

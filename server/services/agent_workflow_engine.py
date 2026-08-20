@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from server import crud
 from server.config import settings
+from server.utils.llm_client import get_openai_client, execute_with_llm_retry
 from server.models.agent_workflow import (
     AgentStatus,
     AgentWorkflow,
@@ -42,6 +43,7 @@ from server.models.agent_workflow import (
     AIExecutionMode,
     ExecutionStatus,
     StepExecutionStatus,
+    TriggerType
 )
 from server.models.skill import Skill
 from server.schemas.agent_workflow import (
@@ -52,10 +54,23 @@ from server.schemas.agent_workflow import (
 from server.services.agent_tool_registry import AgentToolRegistry, get_agent_tool_registry
 from server.services.audit_logger import AuditLogger
 from server.services.citation_service import get_citation_service
+from server.services.rag_service import get_rag_service
 from server.services.skill_instruction_service import SkillInstructionService
 from server.services.skill_selection_service import SkillSelectionService
+from server.utils.chat_helpers import get_llm_kwargs, is_reasoning_model
+from server.utils.helpers import (
+    document_sources_only,
+    strip_citation_markers,
+    strip_textual_sources_list,
+)
+from server.utils.prompt import followup_instruction_block
+from server.utils.source_attribution import (
+    cited_document_names,
+    source_attribution_from_citations,
+)
 
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -80,11 +95,14 @@ class AgentSharedState:
     # Dynamic mutable state accumulated across steps
     step_results: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     retrieved_chunks: List[Dict[str, Any]] = field(default_factory=list)
+    external_sources: List[Dict[str, Any]] = field(default_factory=list)
     source_documents: Set[str] = field(default_factory=set)
     skills_applied: List[str] = field(default_factory=list)
     tools_called: List[str] = field(default_factory=list)
     shared_variables: Dict[str, Any] = field(default_factory=dict)
     citations: List[Dict[str, Any]] = field(default_factory=list)
+    follow_up_questions: List[str] = field(default_factory=list)
+    source_attribution: Dict[str, Any] = field(default_factory=dict)
     errors: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -103,6 +121,9 @@ class AgentSharedState:
             "source_documents": list(self.source_documents),
             "step_count": len(self.step_results),
             "shared_variables": self.shared_variables,
+            "citations": self.citations,
+            "follow_up_questions": self.follow_up_questions,
+            "source_attribution": self.source_attribution,
             "errors": self.errors,
         }
 
@@ -117,7 +138,7 @@ class AgentWorkflowEngine:
         skill_selector: Optional[SkillSelectionService] = None,
         skill_instructor: Optional[SkillInstructionService] = None,
     ):
-        self.openai_client = openai_client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.openai_client = openai_client or get_openai_client()
         self.tool_registry = tool_registry or get_agent_tool_registry()
         self.skill_selector = skill_selector or SkillSelectionService(client=self.openai_client)
         self.skill_instructor = skill_instructor or SkillInstructionService()
@@ -198,7 +219,7 @@ class AgentWorkflowEngine:
             user_id=str(user_id),
             workspace_id=workspace_id,
             trigger_source=shared_state.trigger_source,
-            status=ExecutionStatus.RUNNING.value,
+            status=ExecutionStatus.PENDING.value,
             query_or_goal=shared_state.query_or_goal,
             plan_steps=[],
             started_at=datetime.utcnow(),
@@ -215,10 +236,10 @@ class AgentWorkflowEngine:
     # Step 3: Break Task into Steps (Planning)
     # =========================================================================
 
-    def plan_workflow_steps(
+    async def plan_workflow_steps(
         self, shared_state: AgentSharedState, db: Session
     ) -> List[AgentStepPlanItem]:
-        """Decompose the agent goal and instructions into sequential executable steps."""
+        """Decompose the agent goal and instructions into sequential executable steps asynchronously."""
         available_tools = self.tool_registry.list_tools()
         active_tools = [
             t for t in available_tools if t["name"] in shared_state.selected_sources or t["name"] == "rag"
@@ -246,15 +267,39 @@ class AgentWorkflowEngine:
         )
 
         try:
-            response = self.openai_client.chat.completions.create(
-                model=settings.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
+            planning_kwargs = get_llm_kwargs(
+                settings.LLM_MODEL,
                 temperature=0.2,
+                response_format={"type": "json_object"},
             )
+
+            def _call_planning_llm():
+                def _do_request():
+                    try:
+                        return self.openai_client.chat.completions.create(
+                            model=settings.LLM_MODEL,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            **planning_kwargs,
+                        )
+                    except Exception as api_err:
+                        if "temperature" in str(api_err).lower() and "temperature" in planning_kwargs:
+                            retry_kwargs = {k: v for k, v in planning_kwargs.items() if k != "temperature"}
+                            return self.openai_client.chat.completions.create(
+                                model=settings.LLM_MODEL,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_content},
+                                ],
+                                **retry_kwargs,
+                            )
+                        raise api_err
+
+                return execute_with_llm_retry(_do_request, max_attempts=3, initial_delay=1.0, operation_name="Planning LLM call")
+
+            response = await asyncio.to_thread(_call_planning_llm)
             parsed = json.loads(response.choices[0].message.content or "{}")
             raw_steps = parsed.get("plan") or parsed.get("steps") or []
             if raw_steps:
@@ -288,12 +333,12 @@ class AgentWorkflowEngine:
             step_num += 1
 
         for src in shared_state.selected_sources:
-            if src in ("sec_edgar", "roic_ai", "financial_news", "companies_house") and src not in [s.tool_hint for s in fallback_steps]:
+            if src in ("sec_edgar", "roic_ai", "financial_news", "companies_house", "web_search") and src not in [s.tool_hint for s in fallback_steps]:
                 fallback_steps.append(
                     AgentStepPlanItem(
                         step_number=step_num,
                         step_name=f"Query {src.replace('_', ' ').title()}",
-                        description=f"Fetch external financial or market data using {src}.",
+                        description=f"Fetch external data using {src}.",
                         tool_hint=src,
                     )
                 )
@@ -313,7 +358,7 @@ class AgentWorkflowEngine:
     # Step 4, 5, 6: Check for Relevant Skill & Load Skill + Tools
     # =========================================================================
 
-    def resolve_skill_for_step(
+    async def resolve_skill_for_step(
         self, db: Session, step: AgentStepPlanItem, shared_state: AgentSharedState
     ) -> Tuple[Optional[Skill], str]:
         """Evaluate if a relevant skill exists for the step and load its complete instructions."""
@@ -327,10 +372,11 @@ class AgentWorkflowEngine:
                     matched_skill = s
                     break
 
-        # 2. Match automatically via SkillSelectionService if not yet matched
+        # 2. Match automatically via SkillSelectionService if not yet matched (in worker thread)
         if not matched_skill:
             step_query = f"{step.step_name}: {step.description} (Goal: {shared_state.query_or_goal})"
-            selected = self.skill_selector.select_skills(
+            selected = await asyncio.to_thread(
+                self.skill_selector.select_skills,
                 db, user_id=shared_state.user_id, query=step_query, max_skills=1
             )
             if selected:
@@ -359,7 +405,7 @@ class AgentWorkflowEngine:
     ) -> Dict[str, Any]:
         """Execute step using skills, tools, and shared context with configurable retry strategy."""
         # 1. Check and load skill
-        skill, skill_instructions = self.resolve_skill_for_step(db, step, shared_state)
+        skill, skill_instructions = await self.resolve_skill_for_step(db, step, shared_state)
         step_log.skill_name = skill.name if skill else None
 
         # 2. Prepare tool context
@@ -382,16 +428,40 @@ class AgentWorkflowEngine:
                 # A. Tool Execution (if tool_hint present or step requires external data)
                 tool_output = None
                 tool_name = step.tool_hint
+                tool = None
                 if tool_name:
                     tool = self.tool_registry.get_tool(tool_name)
-                    if tool:
-                        step_log.tool_name = tool_name
-                        tool_output = await tool.execute(
-                            query=shared_state.query_or_goal,
-                            context=tool_context,
-                        )
-                        if tool_name not in shared_state.tools_called:
-                            shared_state.tools_called.append(tool_name)
+
+                if not tool:
+                    # In case tool_hint was not set by LLM planner, infer tool from step description or selected sources
+                    step_desc_lower = f"{step.step_name} {step.description}".lower()
+                    if any(w in step_desc_lower for w in ["search", "web", "internet", "google", "market news", "industry outlook"]):
+                        tool = self.tool_registry.get_tool("web_search")
+                    elif any(w in step_desc_lower for w in ["sec", "10-k", "10-q", "edgar", "filing"]):
+                        tool = self.tool_registry.get_tool("sec_edgar")
+                    elif any(w in step_desc_lower for w in ["roic", "valuation", "transcript", "earnings call"]):
+                        tool = self.tool_registry.get_tool("roic_ai")
+                    elif any(w in step_desc_lower for w in ["news", "headline", "sentiment"]):
+                        tool = self.tool_registry.get_tool("financial_news")
+                    elif any(w in step_desc_lower for w in ["companies house", "uk registry", "uk company"]):
+                        tool = self.tool_registry.get_tool("companies_house")
+                    elif any(w in step_desc_lower for w in ["document", "workspace document", "pdf", "retrieval", "rag"]) and (
+                        shared_state.document_ids or "workspace_documents" in shared_state.selected_sources
+                    ):
+                        tool = self.tool_registry.get_tool("rag")
+
+                if tool:
+                    resolved_tool_name = tool.name
+                    step_log.tool_name = resolved_tool_name
+                    tool_query = shared_state.query_or_goal
+                    if step.description and len(step.description.strip()) > 5:
+                        tool_query = f"{shared_state.query_or_goal} {step.description.strip()}".strip() if len(shared_state.query_or_goal) < 80 else step.description.strip()
+                    tool_output = await tool.execute(
+                        query=tool_query,
+                        context=tool_context,
+                    )
+                    if resolved_tool_name not in shared_state.tools_called:
+                        shared_state.tools_called.append(resolved_tool_name)
 
                 # B. Execute Custom Sources if configured and not yet executed
                 custom_outputs = []
@@ -414,21 +484,50 @@ class AgentWorkflowEngine:
                 if skill_instructions:
                     step_prompt += f"\nActive Skill Guidance ({skill.name}):\n{skill_instructions}\n"
                 if tool_output:
-                    step_prompt += f"\nTool Data ({tool_name}):\n{json.dumps(tool_output, default=str)[:3000]}\n"
+                    step_prompt += f"\nTool Data ({step_log.tool_name or tool_name}):\n{json.dumps(tool_output, default=str)[:3000]}\n"
                 if custom_outputs:
                     step_prompt += f"\nCustom Source Data:\n{json.dumps(custom_outputs, default=str)[:2000]}\n"
 
-                llm_response = self.openai_client.chat.completions.create(
-                    model=settings.LLM_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are an analytical AI workflow step worker. Perform the requested task step accurately and concisely.",
-                        },
-                        {"role": "user", "content": step_prompt},
-                    ],
-                    temperature=0.2,
-                )
+                step_kwargs = get_llm_kwargs(settings.LLM_MODEL, temperature=0.2)
+
+                def _call_step_llm():
+                    def _do_step_req():
+                        try:
+                            return self.openai_client.chat.completions.create(
+                                model=settings.LLM_MODEL,
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": "You are an analytical AI workflow step worker. Perform the requested task step accurately and concisely.",
+                                    },
+                                    {"role": "user", "content": step_prompt},
+                                ],
+                                **step_kwargs,
+                            )
+                        except Exception as api_err:
+                            if "temperature" in str(api_err).lower() and "temperature" in step_kwargs:
+                                retry_kwargs = {k: v for k, v in step_kwargs.items() if k != "temperature"}
+                                return self.openai_client.chat.completions.create(
+                                    model=settings.LLM_MODEL,
+                                    messages=[
+                                        {
+                                            "role": "system",
+                                            "content": "You are an analytical AI workflow step worker. Perform the requested task step accurately and concisely.",
+                                        },
+                                        {"role": "user", "content": step_prompt},
+                                    ],
+                                    **retry_kwargs,
+                                )
+                            raise api_err
+
+                    return execute_with_llm_retry(
+                        _do_step_req,
+                        max_attempts=2,
+                        initial_delay=1.0,
+                        operation_name=f"Step {step.step_number} reasoning",
+                    )
+
+                llm_response = await asyncio.to_thread(_call_step_llm)
                 reasoning_output = llm_response.choices[0].message.content or ""
 
                 duration_ms = int((time.time() - start_time) * 1000)
@@ -439,8 +538,9 @@ class AgentWorkflowEngine:
                     "step_name": step.step_name,
                     "status": "completed",
                     "skill_used": skill.name if skill else None,
-                    "tool_used": tool_name,
+                    "tool_used": step_log.tool_name or tool_name,
                     "tool_output": tool_output,
+                    "custom_outputs": custom_outputs,
                     "reasoning_output": reasoning_output,
                     "duration_ms": duration_ms,
                 }
@@ -467,8 +567,8 @@ class AgentWorkflowEngine:
                 db.commit()
 
                 if attempt <= max_retries:
-                    # Exponential backoff delay: 0.5s, 1.0s, etc.
-                    await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                    # Exponential backoff delay: 1.0s, 2.0s, etc.
+                    await asyncio.sleep(1.0 * (2 ** (attempt - 1)))
 
         # All retries exhausted
         duration_ms = int((time.time() - start_time) * 1000)
@@ -483,6 +583,9 @@ class AgentWorkflowEngine:
             "step_name": step.step_name,
             "status": "failed",
             "error": last_error,
+            "tool_used": step_log.tool_name or tool_name,
+            "tool_output": tool_output,
+            "custom_outputs": custom_outputs,
             "duration_ms": duration_ms,
         }
 
@@ -507,11 +610,41 @@ class AgentWorkflowEngine:
                 for doc in tool_output.get("source_documents", []):
                     shared_state.source_documents.add(doc)
 
+            # Incorporate external tool sources (web search, financial news, sec, roic, companies house)
+            if tool_output.get("sources"):
+                for src in tool_output.get("sources", []):
+                    if isinstance(src, dict):
+                        if src.get("type") == "document" or src.get("source_type") == "document" or src.get("document_id"):
+                            shared_state.retrieved_chunks.append(src)
+                        else:
+                            shared_state.external_sources.append(src)
+            elif tool_output.get("tool") == "web_search" and tool_output.get("data"):
+                data_val = tool_output["data"]
+                if isinstance(data_val, list):
+                    shared_state.external_sources.extend(data_val)
+                elif isinstance(data_val, tuple) and len(data_val) == 2:
+                    shared_state.external_sources.extend(data_val[1])
+            elif tool_output.get("data") and isinstance(tool_output.get("data"), list):
+                for item in tool_output.get("data", []):
+                    if isinstance(item, dict) and (item.get("url") or item.get("link") or item.get("title") or item.get("snippet") or item.get("excerpt")):
+                        shared_state.external_sources.append(item)
+
             # Incorporate financial variables
             if tool_output.get("tool") == "sec_edgar" and "data" in tool_output:
                 shared_state.shared_variables["sec_facts"] = tool_output["data"]
             if tool_output.get("tool") == "roic_ai" and "data" in tool_output:
                 shared_state.shared_variables["roic_data"] = tool_output["data"]
+
+        # Incorporate custom outputs if present
+        for c_out in step_result.get("custom_outputs") or []:
+            if isinstance(c_out, dict) and c_out.get("success"):
+                c_data = c_out.get("data")
+                if isinstance(c_data, list):
+                    for item in c_data:
+                        if isinstance(item, dict) and (item.get("url") or item.get("link") or item.get("title")):
+                            shared_state.external_sources.append(item)
+                elif isinstance(c_data, dict) and (c_data.get("url") or c_data.get("link") or c_data.get("title")):
+                    shared_state.external_sources.append(c_data)
 
         # Record step reasoning in shared variables
         if step_result.get("reasoning_output"):
@@ -529,21 +662,29 @@ class AgentWorkflowEngine:
     # Step 13 & 14: Final Synthesis & Response
     # =========================================================================
 
-    def synthesize_final_response(
+    async def synthesize_final_response(
         self, shared_state: AgentSharedState
-    ) -> Tuple[str, List[Dict[str, Any]]]:
-        """Synthesize accumulated findings into a structured response with citations."""
+    ) -> Tuple[str, List[Dict[str, Any]], List[str], List[str], Dict[str, Any]]:
+        """Synthesize accumulated findings into a structured response with citations and follow-up questions."""
         # Determine model and reasoning based on execution_mode
         mode = shared_state.execution_mode
         if mode == AIExecutionMode.THINK_LONGER.value:
             model = settings.THINK_LONGER_MODEL
-            kwargs = {}
+            kwargs = get_llm_kwargs(
+                model,
+                temperature=0.3,
+                reasoning_effort=settings.THINK_LONGER_REASONING_EFFORT,
+            )
         elif mode == AIExecutionMode.DEEP_RESEARCH.value:
             model = settings.DEEP_RESEARCH_MODEL
-            kwargs = {}
+            kwargs = get_llm_kwargs(
+                model,
+                temperature=0.3,
+                reasoning_effort=settings.DEEP_RESEARCH_REASONING_EFFORT,
+            )
         else:
             model = settings.LLM_MODEL
-            kwargs = {}
+            kwargs = get_llm_kwargs(model, temperature=0.3)
 
         # Compile step summaries and evidence
         steps_summary = []
@@ -556,27 +697,108 @@ class AgentWorkflowEngine:
 
         context_block = "\n\n".join(steps_summary)
 
-        # Include retrieved document context directly in the final synthesis prompt
-        doc_context = ""
-        if shared_state.retrieved_chunks:
-            doc_snippets = []
-            for i, chunk in enumerate(shared_state.retrieved_chunks[:10], start=1):
-                if isinstance(chunk, dict):
-                    c_text = chunk.get("content", "").strip()
-                    c_file = chunk.get("file_name", "Document")
-                    if c_text:
-                        doc_snippets.append(f"[{i}] ({c_file}): {c_text}")
-                elif hasattr(chunk, "content") and chunk.content:
-                    doc_snippets.append(f"[{i}] ({getattr(chunk, 'file_name', 'Document')}): {chunk.content.strip()}")
-            if doc_snippets:
-                doc_context = "\n\n--- Retrieved Document Context ---\n" + "\n\n".join(doc_snippets)
+        # Collect and combine all sources in order: Document chunks, then external sources
+        all_sources: List[Dict[str, Any]] = []
+        seen_source_keys: Set[str] = set()
+
+        # 1. Document chunks
+        for chunk in shared_state.retrieved_chunks:
+            if isinstance(chunk, dict):
+                chunk_dict = dict(chunk)
+                doc_name = (
+                    chunk_dict.get("file_name")
+                    or chunk_dict.get("title")
+                    or chunk_dict.get("document_name")
+                    or "Document"
+                )
+                chunk_dict["file_name"] = doc_name
+                chunk_dict["title"] = doc_name
+                chunk_dict["document_name"] = doc_name
+                chunk_dict["type"] = "document"
+                chunk_dict["source_type"] = "document"
+            else:
+                doc_name = getattr(chunk, "file_name", "Document")
+                chunk_dict = {
+                    "id": getattr(chunk, "id", None),
+                    "chunk_id": getattr(chunk, "id", None),
+                    "document_id": getattr(chunk, "document_id", None),
+                    "file_name": doc_name,
+                    "title": doc_name,
+                    "document_name": doc_name,
+                    "content": getattr(chunk, "content", "") or "",
+                    "excerpt": getattr(chunk, "content", "") or "",
+                    "page_number": getattr(chunk, "page_number", None),
+                    "page": getattr(chunk, "page_number", None),
+                    "section_title": getattr(chunk, "section_title", None),
+                    "section": getattr(chunk, "section_title", None),
+                    "document_url": getattr(chunk, "document_url", None) or getattr(chunk, "document_path", None),
+                    "document_path": getattr(chunk, "document_path", None),
+                    "start_offset": getattr(chunk, "start_offset", None),
+                    "end_offset": getattr(chunk, "end_offset", None),
+                    "type": "document",
+                    "source_type": "document",
+                }
+            key = str(chunk_dict.get("chunk_id") or chunk_dict.get("id") or chunk_dict.get("content", "")[:50])
+            if key not in seen_source_keys:
+                all_sources.append(chunk_dict)
+                seen_source_keys.add(key)
+
+        # 2. External sources (web search, financial news, sec edgar, roic, etc.)
+        for ext in shared_state.external_sources:
+            if isinstance(ext, dict):
+                key = str(ext.get("url") or ext.get("link") or ext.get("title") or ext.get("snippet", "")[:50])
+                if key not in seen_source_keys:
+                    all_sources.append(dict(ext))
+                    seen_source_keys.add(key)
+
+        # Retain top sources for prompt and citations
+        effective_sources = all_sources[:30]
+
+        # Format numbered source context for the prompt
+        source_snippets = []
+        for i, src in enumerate(effective_sources, start=1):
+            s_type = src.get("source_type") or src.get("type") or "source"
+            if s_type == "document":
+                doc_name = src.get("file_name") or src.get("title") or "Document"
+                page_info = f", Page: {src.get('page') or src.get('page_number')}" if (src.get("page") or src.get("page_number")) else ""
+                content = src.get("content") or src.get("excerpt") or ""
+                source_snippets.append(f"[{i}] (Document: {doc_name}{page_info}): {content.strip()}")
+            elif s_type == "web":
+                title = src.get("title") or src.get("source_title") or "Web Article"
+                url = src.get("url") or src.get("link") or ""
+                snippet = src.get("snippet") or src.get("excerpt") or src.get("description") or ""
+                url_info = f" - {url}" if url else ""
+                source_snippets.append(f"[{i}] (Web: {title}{url_info}): {snippet.strip()}")
+            else:
+                title = src.get("title") or src.get("source_title") or s_type.replace("_", " ").title()
+                url = src.get("url") or src.get("link") or ""
+                snippet = src.get("excerpt") or src.get("snippet") or src.get("content") or ""
+                url_info = f" - {url}" if url else ""
+                source_snippets.append(f"[{i}] ({s_type.replace('_', ' ').title()}: {title}{url_info}): {snippet.strip()}")
+
+        sources_context_block = ""
+        if source_snippets:
+            sources_context_block = "\n\n--- Retrieved Reference Sources ---\n" + "\n\n".join(source_snippets)
+
+        citation_rules = (
+            "\n\n========================================\n"
+            "CITATION & ATTRIBUTION RULES (STRICT)\n"
+            "========================================\n"
+            "1. Every source provided under 'Retrieved Reference Sources' is numbered in square brackets: [1], [2], [3], etc.\n"
+            "2. You MUST cite every factual claim, number, percentage, date, metric, or finding using inline bracketed markers like [1], [2] immediately following the statement.\n"
+            "3. Place markers directly on the relevant claims, bullet points, or table cells (e.g. 'Global EV sales grew 25% in 2025 [1].').\n"
+            "4. Reuse the exact source number [n] whenever referencing facts from that source.\n"
+            "5. CRITICAL: DO NOT generate a textual 'Sources' or 'References' bullet list at the end of your response. All source attributions will be rendered automatically by the platform's interactive citation UI from your inline markers.\n"
+        )
 
         system_prompt = (
             "You are a state-of-the-art AI Financial and Workflow Research Analyst. "
-            "Synthesize the provided step findings, data facts, and document context into a "
+            "Synthesize the provided step findings, data facts, and source context into a "
             "comprehensive, executive-ready final report. Use clear markdown headings, bullet points, "
-            "and cite all source data accurately. Adhere strictly to the agent instructions."
-        )
+            "and cite all source data accurately using inline bracketed reference markers like [1], [2], etc., corresponding to the numbered sources provided. "
+            "Adhere strictly to the agent instructions."
+            + citation_rules
+        ) + followup_instruction_block()
 
         instructions_block = (
             f"Agent Instructions: {shared_state.agent_instructions}\n"
@@ -594,51 +816,103 @@ class AgentWorkflowEngine:
             f"Tools Called: {', '.join(shared_state.tools_called) if shared_state.tools_called else 'None'}\n"
             f"Source Documents: {', '.join(shared_state.source_documents) if shared_state.source_documents else 'None'}\n\n"
             f"--- Step Execution Findings ---\n{context_block}\n"
-            f"{doc_context}\n\n"
-            "Provide the final executive synthesis now, ensuring all instructions and formatting guidelines are honored."
+            f"{sources_context_block}\n\n"
+            "Provide the final executive synthesis with inline [n] citations and the required follow-up questions now. Remember: Do not include a plaintext Sources/References bullet list at the bottom."
         )
 
-        try:
-            response = self.openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                temperature=0.3,
-                **kwargs,
-            )
-            final_text = response.choices[0].message.content or ""
-        except Exception as e:
-            logger.error(f"Synthesis LLM call failed: {str(e)}", exc_info=True)
-            final_text = (
-                f"## Execution Summary for {shared_state.workflow_name}\n\n"
-                f"Goal: {shared_state.query_or_goal}\n\n"
-                f"{context_block}\n\n"
-                f"*(Note: LLM synthesis fallback was used due to error: {str(e)})*"
-            )
-
-        # Generate / extract citations
-        citations = []
-        try:
+        def _do_synthesis():
+            rag_service = get_rag_service()
             citation_service = get_citation_service()
-            if shared_state.retrieved_chunks:
-                rewritten_text, extracted_citations = citation_service.generate_citations(
-                    final_text, sources=shared_state.retrieved_chunks
-                )
-                if extracted_citations:
-                    final_text = rewritten_text
-                    citations = extracted_citations
-                else:
-                    citations = citation_service.generate_citations_from_chunks(
-                        sources=shared_state.retrieved_chunks
-                    )
-            elif hasattr(citation_service, "generate_citations"):
-                _, citations = citation_service.generate_citations(final_text, sources=[])
-        except Exception as e:
-            logger.warning(f"Citation generation in workflow synthesis failed: {e}")
+            try:
+                def _do_synth_req():
+                    try:
+                        return self.openai_client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            **kwargs,
+                        )
+                    except Exception as api_err:
+                        if "temperature" in str(api_err).lower() and "temperature" in kwargs:
+                            retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
+                            return self.openai_client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_content},
+                                ],
+                                **retry_kwargs,
+                            )
+                        raise api_err
 
-        return final_text, citations
+                response = execute_with_llm_retry(
+                    _do_synth_req,
+                    max_attempts=3,
+                    initial_delay=1.0,
+                    operation_name="Final Response Synthesis",
+                )
+                raw_text = response.choices[0].message.content or ""
+            except Exception as e:
+                logger.error(f"Synthesis LLM call failed after retries: {str(e)}", exc_info=True)
+                shared_state.errors.append({
+                    "step_number": 0,
+                    "step_name": "Final Synthesis",
+                    "error": f"LLM synthesis error: {str(e)}",
+                })
+                raw_text = (
+                    f"## Execution Summary for {shared_state.workflow_name}\n\n"
+                    f"**Goal**: {shared_state.query_or_goal}\n\n"
+                    f"{context_block}\n\n"
+                    f"*(Note: LLM synthesis fallback was used due to error: {str(e)})*"
+                )
+
+            # Strip any trailing plaintext '## Sources' or '## References' bullet list generated by LLM
+            cleaned_raw_text = strip_textual_sources_list(raw_text)
+
+            # Split answer and follow-up questions
+            final_text, follow_up_questions = rag_service.split_answer_and_followups(
+                cleaned_raw_text, question=shared_state.query_or_goal
+            )
+
+            if not follow_up_questions:
+                follow_up_questions = rag_service.generate_contextual_followups(
+                    final_text, question=shared_state.query_or_goal
+                )
+
+            # Generate / extract citations using the shared citation engine
+            citations = []
+            if effective_sources:
+                try:
+                    rewritten_text, extracted_citations = citation_service.generate_citations(
+                        final_text, sources=effective_sources
+                    )
+                    if extracted_citations:
+                        final_text = rewritten_text
+                        citations = extracted_citations
+                    else:
+                        citations = citation_service.generate_citations_from_chunks(
+                            sources=effective_sources
+                        )
+                    if citations:
+                        final_text = citation_service.attach_fallback_markers(final_text, citations)
+                except Exception as e:
+                    logger.warning(f"Citation generation in workflow synthesis failed: {e}")
+                    final_text = strip_citation_markers(final_text)
+            else:
+                final_text = strip_citation_markers(final_text)
+
+            source_docs = (
+                document_sources_only(cited_document_names(citations))
+                or list(shared_state.source_documents)
+            )
+            source_attribution = source_attribution_from_citations(citations)
+
+            return final_text, citations, follow_up_questions, source_docs, source_attribution
+
+        return await asyncio.to_thread(_do_synthesis)
+
 
     # =========================================================================
     # Main Orchestrator Entry Point (Trigger Agnostic)
@@ -713,6 +987,12 @@ class AgentWorkflowEngine:
         )
 
         try:
+            # Transition execution status to RUNNING
+            execution_db.status = ExecutionStatus.RUNNING.value
+            db.add(execution_db)
+            db.commit()
+            db.refresh(execution_db)
+
             # Emit agent_started event
             await emit_status(
                 status="agent_started",
@@ -728,7 +1008,7 @@ class AgentWorkflowEngine:
                 status="planning",
                 message="Formulating execution plan...",
             )
-            plan_items = self.plan_workflow_steps(shared_state, db)
+            plan_items = await self.plan_workflow_steps(shared_state, db)
             execution_db.plan_steps = [item.model_dump() for item in plan_items]
             db.add(execution_db)
             db.commit()
@@ -808,17 +1088,39 @@ class AgentWorkflowEngine:
             # 5. Final Synthesis
             await emit_status(
                 status="generating_response",
-                message="Synthesizing final executive response and citations...",
+                message="Synthesizing final executive response, citations, and follow-up questions...",
             )
-            final_response, citations = self.synthesize_final_response(shared_state)
+            final_response, citations, follow_up_questions, source_documents, source_attribution = (
+                await self.synthesize_final_response(shared_state)
+            )
             shared_state.citations = citations
+            shared_state.follow_up_questions = follow_up_questions
+            shared_state.source_attribution = source_attribution
 
             # 6. Complete Execution Record
             total_duration_ms = int((time.time() - start_time) * 1000)
-            execution_db.status = ExecutionStatus.COMPLETED.value
+
+            # Evaluate overall workflow execution success
+            has_steps = len(plan_items) > 0
+            all_steps_failed = has_steps and all(
+                res.get("status") == "failed" for res in shared_state.step_results.values()
+            )
+            synthesis_failed = any(err.get("step_name") == "Final Synthesis" for err in shared_state.errors)
+
+            if all_steps_failed and synthesis_failed:
+                execution_status = ExecutionStatus.FAILED.value
+                err_msg = "; ".join(e.get("error", "Unknown error") for e in shared_state.errors if e.get("error")) or "All workflow steps and synthesis failed."
+                execution_db.error_message = err_msg
+            elif all_steps_failed:
+                execution_status = ExecutionStatus.FAILED.value
+                execution_db.error_message = "All workflow execution steps failed."
+            else:
+                execution_status = ExecutionStatus.COMPLETED.value
+
+            execution_db.status = execution_status
             execution_db.final_response = final_response
             execution_db.citations = citations
-            execution_db.source_documents = list(shared_state.source_documents)
+            execution_db.source_documents = source_documents
             execution_db.skills_applied = list(dict.fromkeys(shared_state.skills_applied))
             execution_db.tools_called = list(dict.fromkeys(shared_state.tools_called))
             execution_db.shared_state = shared_state.to_dict()
@@ -827,40 +1129,67 @@ class AgentWorkflowEngine:
 
             if workflow:
                 workflow.last_run_at = datetime.utcnow()
+                status_val = getattr(workflow.status, "value", workflow.status)
+                trigger_val = getattr(workflow.trigger_type, "value", workflow.trigger_type)
+                if status_val == AgentStatus.ACTIVE.value and trigger_val in (
+                    TriggerType.SCHEDULED.value,
+                    TriggerType.BOTH.value,
+                    "scheduled",
+                    "both",
+                ):
+                    from server.services.agent_scheduler_service import agent_scheduler_service
+                    workflow.next_run_at = agent_scheduler_service.calculate_next_run_time(workflow)
                 db.add(workflow)
+
 
             db.add(execution_db)
             db.commit()
             db.refresh(execution_db)
 
             # Audit log
+            audit_action = "AGENT_EXECUTION_COMPLETED" if execution_status == ExecutionStatus.COMPLETED.value else "AGENT_EXECUTION_FAILED"
+            audit_status = "200" if execution_status == ExecutionStatus.COMPLETED.value else "500"
             AuditLogger.log(
-                action="AGENT_EXECUTION_COMPLETED",
+                action=audit_action,
                 user_id=str(user_id),
                 workspace_id=shared_state.workspace_id,
                 endpoint="/v1/agents/execute",
                 http_method="POST",
-                status="200",
+                status=audit_status,
                 processing_time=total_duration_ms,
                 metadata={
                     "execution_id": execution_db.id,
                     "workflow_id": workflow_id,
                     "trigger_source": trigger_source,
                     "steps_count": len(plan_items),
+                    "execution_status": execution_status,
+                    "error": execution_db.error_message if execution_status == ExecutionStatus.FAILED.value else None,
                 },
             )
 
-            # Emit complete status event
-            await emit_status(
-                status="complete",
-                message=f"Agent '{shared_state.workflow_name}' completed.",
-                details={
-                    "execution_id": execution_db.id,
-                    "execution_time_ms": total_duration_ms,
-                    "source_documents": list(shared_state.source_documents),
-                    "citations_count": len(citations),
-                },
-            )
+            # Emit complete/error status event
+            if execution_status == ExecutionStatus.COMPLETED.value:
+                await emit_status(
+                    status="complete",
+                    message=f"Agent '{shared_state.workflow_name}' completed.",
+                    details={
+                        "execution_id": execution_db.id,
+                        "execution_time_ms": total_duration_ms,
+                        "source_documents": list(shared_state.source_documents),
+                        "citations_count": len(citations),
+                        "follow_up_questions_count": len(follow_up_questions),
+                    },
+                )
+            else:
+                await emit_status(
+                    status="error",
+                    message=f"Agent '{shared_state.workflow_name}' execution failed: {execution_db.error_message}",
+                    details={
+                        "execution_id": execution_db.id,
+                        "execution_time_ms": total_duration_ms,
+                        "error": execution_db.error_message,
+                    },
+                )
 
             # Load step logs for response
             step_logs_db = crud.agent_workflow.get_step_logs_by_execution(
@@ -872,6 +1201,14 @@ class AgentWorkflowEngine:
 
             response_obj = AgentWorkflowExecutionResponse.model_validate(execution_db)
             response_obj.step_logs = step_log_responses
+            response_obj.citations = citations
+            response_obj.sources = citations
+            response_obj.source_documents = source_documents
+            response_obj.source_attribution = source_attribution
+            response_obj.follow_up_questions = follow_up_questions
+            response_obj.response = final_response
+            response_obj.final_response = final_response
+            response_obj.content = final_response
             return response_obj
 
         except asyncio.CancelledError:

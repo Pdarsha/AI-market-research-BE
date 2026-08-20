@@ -19,10 +19,12 @@ from server.prompts.skill_generation import (
     skill_edit_system_prompt,
 )
 from server.services.skill_validation_service import skill_validation_service
+from server.utils.chat_helpers import get_llm_kwargs
+from server.utils.llm_client import get_openai_client, execute_with_llm_retry
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+client = get_openai_client()
 
 
 class SkillGenerationError(Exception):
@@ -165,14 +167,35 @@ class SkillGenerationService:
         try:
             logger.info(f"Skill {operation}: calling LLM with {len(messages)} messages")
             
-            completion = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                **({"max_completion_tokens": 2048} if "gpt-5" in self.model.lower() else {"max_tokens": 2048}),
-                **({} if any(p in self.model.lower() for p in ("o1", "o2", "o3")) else {"temperature": 0.1}),
+            call_kwargs = get_llm_kwargs(
+                self.model,
+                temperature=0.1,
+                max_tokens=2048,
                 response_format={"type": "json_object"},
             )
-            
+            def _do_skill_gen():
+                try:
+                    return client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        **call_kwargs,
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in call_kwargs:
+                        retry_kwargs = {k: v for k, v in call_kwargs.items() if k != "temperature"}
+                        return client.chat.completions.create(
+                            model=self.model,
+                            messages=messages,
+                            **retry_kwargs,
+                        )
+                    raise api_err
+
+            completion = execute_with_llm_retry(
+                _do_skill_gen,
+                max_attempts=3,
+                initial_delay=1.0,
+                operation_name=f"Skill {operation} LLM call",
+            )
             raw_response = completion.choices[0].message.content
             if not raw_response:
                 raise SkillGenerationError(

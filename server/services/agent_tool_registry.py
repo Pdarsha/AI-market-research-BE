@@ -7,8 +7,11 @@ during multi-step Agent execution.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
+
 import httpx
 
 from server.config import settings
@@ -65,6 +68,62 @@ class AgentToolRegistry:
         self._tools[tool.name] = tool
 
     def get_tool(self, name: str) -> Optional[AgentTool]:
+        if not name:
+            return None
+        norm_name = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+        if norm_name in self._tools:
+            return self._tools[norm_name]
+
+        alias_map = {
+            "web": "web_search",
+            "search": "web_search",
+            "google": "web_search",
+            "bing": "web_search",
+            "websearch": "web_search",
+            "internet": "web_search",
+            "internet_search": "web_search",
+            "browse": "web_search",
+            "web_crawler": "web_search",
+            "online_search": "web_search",
+            "rag": "rag",
+            "workspace_documents": "rag",
+            "workspace": "rag",
+            "document": "rag",
+            "documents": "rag",
+            "document_search": "rag",
+            "workspace_search": "rag",
+            "retrieval": "rag",
+            "docs": "rag",
+            "pdf_search": "rag",
+            "sec": "sec_edgar",
+            "edgar": "sec_edgar",
+            "sec_edgar": "sec_edgar",
+            "sec_filings": "sec_edgar",
+            "10k": "sec_edgar",
+            "10q": "sec_edgar",
+            "financial_statements": "sec_edgar",
+            "roic": "roic_ai",
+            "roic_ai": "roic_ai",
+            "transcript": "roic_ai",
+            "transcripts": "roic_ai",
+            "earnings_call": "roic_ai",
+            "earnings": "roic_ai",
+            "valuation": "roic_ai",
+            "news": "financial_news",
+            "financial_news": "financial_news",
+            "market_news": "financial_news",
+            "alpha_vantage": "financial_news",
+            "companies_house": "companies_house",
+            "companies_house_uk": "companies_house",
+            "uk_companies": "companies_house",
+            "uk_registry": "companies_house",
+            "company_registry": "companies_house",
+        }
+
+        target = alias_map.get(norm_name)
+        if target and target in self._tools:
+            return self._tools[target]
+
         return self._tools.get(name)
 
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -131,8 +190,9 @@ class AgentToolRegistry:
 
                 top_k = kwargs.get("top_k") or settings.RAG_TOP_K
 
-                # Perform RAG retrieval via rag_service.retrieve
-                chunks = rag_service.retrieve(
+                # Perform RAG retrieval via rag_service.retrieve in a worker thread
+                chunks = await asyncio.to_thread(
+                    rag_service.retrieve,
                     db=db,
                     query=query,
                     user_id=str(user_id) if user_id else "",
@@ -141,18 +201,31 @@ class AgentToolRegistry:
                     top_k=top_k,
                 )
 
-                # Format retrieved chunks
+
+                # Format retrieved chunks with complete citation metadata
                 chunks_data = []
                 for c in (chunks or []):
+                    doc_name = getattr(c, "file_name", "Document")
+                    content_text = getattr(c, "content", "") or ""
                     chunks_data.append({
                         "id": getattr(c, "id", None),
                         "chunk_id": getattr(c, "id", None),
                         "document_id": getattr(c, "document_id", None),
-                        "file_name": getattr(c, "file_name", "Document"),
-                        "content": getattr(c, "content", "") or "",
+                        "file_name": doc_name,
+                        "title": doc_name,
+                        "document_name": doc_name,
+                        "content": content_text,
+                        "excerpt": content_text,
                         "page_number": getattr(c, "page_number", None),
+                        "page": getattr(c, "page_number", None),
                         "section_title": getattr(c, "section_title", None),
+                        "section": getattr(c, "section_title", None),
+                        "document_url": getattr(c, "document_url", None) or getattr(c, "document_path", None),
+                        "document_path": getattr(c, "document_path", None),
+                        "start_offset": getattr(c, "start_offset", None),
+                        "end_offset": getattr(c, "end_offset", None),
                         "type": "document",
+                        "source_type": "document",
                     })
 
                 source_documents = list(dict.fromkeys(c.file_name for c in (chunks or []) if getattr(c, "file_name", None)))
@@ -163,6 +236,7 @@ class AgentToolRegistry:
                     "tool": "rag",
                     "query": query,
                     "chunks": chunks_data,
+                    "sources": chunks_data,
                     "source_documents": source_documents,
                     "summary": context_summary,
                 }
@@ -202,15 +276,36 @@ class AgentToolRegistry:
 
         # 2. SEC EDGAR MCP Tool
         async def run_sec(query: str, context: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-            ticker = kwargs.get("ticker") or query.split()[0].upper()
+            ticker = kwargs.get("ticker")
+            company = kwargs.get("company")
+            if not ticker and not company:
+                q_clean = query.strip()
+                if re.fullmatch(r"[A-Za-z]{1,5}", q_clean):
+                    ticker = q_clean.upper()
+                else:
+                    words = [w.strip(".,;:!?()[]") for w in q_clean.split()]
+                    candidate_tickers = [w for w in words if w.isupper() and 1 <= len(w) <= 5 and w.isalpha()]
+                    if candidate_tickers:
+                        ticker = candidate_tickers[0]
+                    else:
+                        company = q_clean
             period = kwargs.get("period", "latest")
             metrics = kwargs.get("metrics")
-            facts = await sec_company_facts(ticker=ticker, period=period, metrics=metrics)
+            facts = await sec_company_facts(company=company, ticker=ticker, period=period, metrics=metrics)
+            rag_service = get_rag_service()
+            sec_results = [facts] if isinstance(facts, dict) else (facts or [])
+            sec_context, sec_sources = (
+                rag_service.build_sec_contexts(sec_results, start_number=1)
+                if facts and not (isinstance(facts, dict) and facts.get("error"))
+                else ("", [])
+            )
             return {
-                "success": True if not facts.get("error") else False,
+                "success": True if not (isinstance(facts, dict) and facts.get("error")) else False,
                 "tool": "sec_edgar",
-                "ticker": ticker,
+                "ticker": ticker or company,
                 "data": facts,
+                "sources": sec_sources,
+                "summary": sec_context,
             }
 
         self.register_tool(
@@ -227,11 +322,19 @@ class AgentToolRegistry:
         async def run_roic(query: str, context: Dict[str, Any], **kwargs) -> Dict[str, Any]:
             transcript = kwargs.get("transcript", False)
             res = await roic_ai(query=query, transcript=transcript)
+            rag_service = get_rag_service()
+            roic_context, roic_sources = (
+                rag_service.build_roic_context(res, start_number=1, query=query)
+                if res and not (isinstance(res, dict) and res.get("error"))
+                else ("", [])
+            )
             return {
-                "success": True if not res.get("error") else False,
+                "success": True if not (isinstance(res, dict) and res.get("error")) else False,
                 "tool": "roic_ai",
                 "query": query,
                 "data": res,
+                "sources": roic_sources,
+                "summary": roic_context,
             }
 
         self.register_tool(
@@ -247,12 +350,47 @@ class AgentToolRegistry:
         # 4. Financial News MCP Tool
         async def run_financial_news(query: str, context: Dict[str, Any], **kwargs) -> Dict[str, Any]:
             ticker = kwargs.get("ticker")
-            res = await financial_news(query=query, ticker=ticker)
+            limit = int(kwargs.get("limit", settings.ALPHA_VANTAGE_NEWS_MAX_RESULTS))
+            if not ticker:
+                q_clean = query.strip()
+                if re.fullmatch(r"[A-Za-z]{1,5}", q_clean):
+                    ticker = q_clean.upper()
+                else:
+                    words = [w.strip(".,;:!?()[]") for w in q_clean.split()]
+                    candidate_tickers = [w for w in words if w.isupper() and 1 <= len(w) <= 5 and w.isalpha()]
+                    if candidate_tickers:
+                        ticker = candidate_tickers[0]
+
+            res = None
+            try:
+                if ticker:
+                    res = await financial_news(ticker=ticker, limit=limit)
+                else:
+                    res = await financial_news(query=query, limit=limit)
+            except Exception as fn_err:
+                logger.warning("financial_news execution error: %s", fn_err)
+                res = None
+
+            # If Alpha Vantage returns no articles for a general query, augment with web search
+            if not res or not res.get("articles"):
+                web_tool = self.get_tool("web_search")
+                if web_tool:
+                    return await web_tool.execute(query=query, context=context)
+
+            rag_service = get_rag_service()
+            news_context, news_sources = (
+                rag_service.build_financial_news_context(res, start_number=1)
+                if res and not (isinstance(res, dict) and res.get("error"))
+                else ("", [])
+            )
             return {
-                "success": True if not res.get("error") else False,
+                "success": True if not (isinstance(res, dict) and res.get("error")) else False,
                 "tool": "financial_news",
+                "ticker": ticker,
                 "query": query,
                 "data": res,
+                "sources": news_sources,
+                "summary": news_context,
             }
 
         self.register_tool(
@@ -269,14 +407,22 @@ class AgentToolRegistry:
         async def run_companies_house(query: str, context: Dict[str, Any], **kwargs) -> Dict[str, Any]:
             company_number = kwargs.get("company_number")
             if company_number:
-                res = await companies_house_profile(company_number=company_number)
+                res = await companies_house_profile(query=company_number)
             else:
-                res = await companies_house_search(query=query)
+                res = await companies_house_profile(query=query)
+            rag_service = get_rag_service()
+            ch_context, ch_sources = (
+                rag_service.build_companies_house_context(res, start_number=1)
+                if res and not (isinstance(res, dict) and res.get("error"))
+                else ("", [])
+            )
             return {
-                "success": True if not res.get("error") else False,
+                "success": True if not (isinstance(res, dict) and res.get("error")) else False,
                 "tool": "companies_house",
                 "query": query,
                 "data": res,
+                "sources": ch_sources,
+                "summary": ch_context,
             }
 
         self.register_tool(
@@ -292,20 +438,48 @@ class AgentToolRegistry:
         # 6. Web Search Tool
         async def run_web_search(query: str, context: Dict[str, Any], **kwargs) -> Dict[str, Any]:
             rag_service = get_rag_service()
-            if hasattr(rag_service, "web_search"):
-                res = await rag_service.web_search(query)
+            try:
+                context_str, web_sources = await asyncio.to_thread(
+                    rag_service.web_search, query
+                )
+                normalized_sources = []
+                for s in (web_sources or []):
+                    link = s.get("link") or s.get("url") or ""
+                    title = s.get("title") or "Web Source"
+                    snippet = s.get("snippet") or s.get("excerpt") or ""
+                    date_val = s.get("date") or s.get("published_date")
+                    normalized_sources.append({
+                        "type": "web",
+                        "source_type": "web",
+                        "title": title,
+                        "source_title": title,
+                        "url": link,
+                        "link": link,
+                        "snippet": snippet,
+                        "excerpt": snippet,
+                        "description": snippet,
+                        "date": date_val,
+                        "published_date": date_val,
+                    })
                 return {
                     "success": True,
                     "tool": "web_search",
                     "query": query,
-                    "data": res,
+                    "data": normalized_sources,
+                    "sources": normalized_sources,
+                    "summary": context_str,
                 }
-            return {
-                "success": True,
-                "tool": "web_search",
-                "query": query,
-                "data": {"results": [], "note": "Web search fallback returned empty results."},
-            }
+            except Exception as e:
+                logger.error(f"Web search tool error: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "tool": "web_search",
+                    "query": query,
+                    "data": [],
+                    "sources": [],
+                    "summary": "",
+                    "error": str(e),
+                }
 
         self.register_tool(
             AgentTool(

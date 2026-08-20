@@ -14,18 +14,28 @@ def source_attribution_from_citations(citations: list[dict] | None) -> dict:
     }
     seen: dict[str, set] = {name: set() for name in groups}
     for citation in citations or []:
-        source_type = citation.get("source_type") or (
-            "document" if citation.get("document_id") else "web"
-        )
-        group = {
-            "document": "uploaded_documents",
-            "sec_edgar": "sec_edgar",
-            "financial_news": "alpha_vantage",
-            "roic_ai": "roic_ai",
-            "web": "web",
-            "companies_house": "companies_house",
-        }.get(source_type, "other_mcp")
-        key = citation.get("chunk_id") or citation.get("url") or citation.get("title")
+        source_type = (citation.get("source_type") or citation.get("type") or "").lower()
+        if not source_type and citation.get("document_id"):
+            source_type = "document"
+        elif not source_type:
+            source_type = "web" if citation.get("url") else "other_mcp"
+
+        if source_type in ("document", "uploaded_document", "workspace_documents", "rag") or citation.get("document_id"):
+            group = "uploaded_documents"
+        elif source_type in ("sec_edgar", "sec"):
+            group = "sec_edgar"
+        elif source_type in ("financial_news", "alpha_vantage", "news"):
+            group = "alpha_vantage"
+        elif source_type in ("roic_ai", "roic", "roic.ai"):
+            group = "roic_ai"
+        elif source_type in ("web", "web_search", "google", "bing", "external"):
+            group = "web"
+        elif source_type in ("companies_house", "companies_house_uk"):
+            group = "companies_house"
+        else:
+            group = "other_mcp"
+
+        key = str(citation.get("chunk_id") or citation.get("url") or citation.get("title") or citation.get("id"))
         if key not in seen[group]:
             groups[group].append(citation)
             seen[group].add(key)
