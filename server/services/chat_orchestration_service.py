@@ -271,11 +271,13 @@ class ChatOrchestrationService:
             )
 
         # Check for Automatic Trigger Agent Workflow match
+        explicit_agent_id = session.agent_id or getattr(request, "agent_id", None)
         matched_agent_workflow = agent_trigger_service.match_agent_for_request(
             db,
             user_id=str(current_user.id),
             query=request.content,
             workspace_id=session.workspace_id,
+            explicit_agent_id=explicit_agent_id,
         )
 
         if matched_agent_workflow:

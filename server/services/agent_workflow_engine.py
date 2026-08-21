@@ -167,7 +167,7 @@ class AgentWorkflowEngine:
         if workflow:
             workflow_id = workflow.id
             workflow_name = workflow.name
-            workspace_id = workflow.workspace_id
+            workspace_id = workflow.workspace_id or parameters.get("workspace_id")
             agent_instructions = workflow.instructions or ""
             execution_mode = (
                 workflow.execution_mode.value
@@ -180,6 +180,11 @@ class AgentWorkflowEngine:
                 else bool(workflow.limit_docs_past_7_days)
             )
             selected_sources = list(workflow.selected_sources or [])
+            if limit_docs_past_7_days:
+                if "workspace_documents" not in selected_sources:
+                    selected_sources.append("workspace_documents")
+                if "rag" not in selected_sources:
+                    selected_sources.append("rag")
             custom_sources = list(workflow.custom_sources or [])
             bound_docs = list(workflow.selected_document_ids or [])
             all_doc_ids = list(dict.fromkeys(bound_docs + (document_ids or [])))
@@ -192,6 +197,11 @@ class AgentWorkflowEngine:
             execution_mode = parameters.get("execution_mode", "auto")
             limit_docs_past_7_days = bool(filter_past_7_days)
             selected_sources = parameters.get("selected_sources", ["workspace_documents", "sec_edgar"])
+            if limit_docs_past_7_days:
+                if "workspace_documents" not in selected_sources:
+                    selected_sources.append("workspace_documents")
+                if "rag" not in selected_sources:
+                    selected_sources.append("rag")
             custom_sources = parameters.get("custom_sources", [])
             all_doc_ids = document_ids or []
             effective_query = query.strip() if query and query.strip() else agent_instructions
@@ -248,7 +258,10 @@ class AgentWorkflowEngine:
         system_prompt = (
             "You are an expert AI Workflow Planner. Your job is to break down a business analysis task "
             "into 1 to 4 logical, sequential, atomic execution steps.\n"
-            "Respond strictly with valid JSON with the format: {'plan': [{'step_number': 1, 'step_name': '...', 'description': '...', 'tool_hint': '...', 'skill_hint': '...'}]}"
+            "CRITICAL RULES:\n"
+            "- If 'Limit Documents to Past 7 Days' is True (or if 'workspace_documents' / 'rag' is an active tool), you MUST include a retrieval step with tool_hint 'rag' as Step 1 to retrieve relevant context from workspace documents.\n"
+            "- If other active tools (e.g. sec_edgar, roic_ai, financial_news, web_search) are needed, include subsequent steps.\n"
+            "- Respond strictly with valid JSON with the format: {'plan': [{'step_number': 1, 'step_name': '...', 'description': '...', 'tool_hint': '...', 'skill_hint': '...'}]}"
         )
 
         instructions_line = (
@@ -314,6 +327,22 @@ class AgentWorkflowEngine:
                             skill_hint=s.get("skill_hint"),
                         )
                     )
+
+                # Guarantee: If limit_docs_past_7_days or workspace_documents is enabled, ensure RAG retrieval step exists
+                has_rag_step = any(p.tool_hint in ("rag", "workspace_documents") for p in plan_items)
+                if (shared_state.limit_docs_past_7_days or "workspace_documents" in shared_state.selected_sources or shared_state.document_ids) and not has_rag_step:
+                    rag_step = AgentStepPlanItem(
+                        step_number=1,
+                        step_name="Retrieve 7-Day Workspace Documents",
+                        description=f"Retrieve relevant workspace document chunks from the past 7 days for: {shared_state.query_or_goal}",
+                        tool_hint="rag",
+                    )
+                    reordered = [rag_step]
+                    for idx, item in enumerate(plan_items, start=2):
+                        item.step_number = idx
+                        reordered.append(item)
+                    return reordered
+
                 return plan_items
         except Exception as e:
             logger.warning(f"LLM planning fallback triggered: {str(e)}")
@@ -411,6 +440,9 @@ class AgentWorkflowEngine:
         # 2. Prepare tool context
         tool_context = {
             "db": db,
+            "agent_id": shared_state.workflow_id,
+            "workflow_id": shared_state.workflow_id,
+            "workflow_name": shared_state.workflow_name,
             "workspace_id": shared_state.workspace_id,
             "user_id": shared_state.user_id,
             "document_ids": shared_state.document_ids,
@@ -454,8 +486,9 @@ class AgentWorkflowEngine:
                     resolved_tool_name = tool.name
                     step_log.tool_name = resolved_tool_name
                     tool_query = shared_state.query_or_goal
-                    if step.description and len(step.description.strip()) > 5:
-                        tool_query = f"{shared_state.query_or_goal} {step.description.strip()}".strip() if len(shared_state.query_or_goal) < 80 else step.description.strip()
+                    if resolved_tool_name not in ("rag", "workspace_documents"):
+                        if step.description and len(step.description.strip()) > 5:
+                            tool_query = f"{shared_state.query_or_goal} {step.description.strip()}".strip() if len(shared_state.query_or_goal) < 80 else step.description.strip()
                     tool_output = await tool.execute(
                         query=tool_query,
                         context=tool_context,
@@ -484,7 +517,10 @@ class AgentWorkflowEngine:
                 if skill_instructions:
                     step_prompt += f"\nActive Skill Guidance ({skill.name}):\n{skill_instructions}\n"
                 if tool_output:
-                    step_prompt += f"\nTool Data ({step_log.tool_name or tool_name}):\n{json.dumps(tool_output, default=str)[:3000]}\n"
+                    if isinstance(tool_output, dict) and tool_output.get("summary"):
+                        step_prompt += f"\nRetrieved Reference Data ({step_log.tool_name or tool_name}):\n{tool_output.get('summary')}\n"
+                    else:
+                        step_prompt += f"\nTool Data ({step_log.tool_name or tool_name}):\n{json.dumps(tool_output, default=str)[:3000]}\n"
                 if custom_outputs:
                     step_prompt += f"\nCustom Source Data:\n{json.dumps(custom_outputs, default=str)[:2000]}\n"
 
@@ -908,6 +944,22 @@ class AgentWorkflowEngine:
                 or list(shared_state.source_documents)
             )
             source_attribution = source_attribution_from_citations(citations)
+
+            context_doc_ids = list(dict.fromkeys(
+                str(src.get("document_id")) for src in effective_sources if (src.get("source_type") == "document" or src.get("type") == "document") and src.get("document_id")
+            ))
+            citation_doc_ids = list(dict.fromkeys(
+                str(getattr(c, "document_id", None) or (c.get("document_id") if isinstance(c, dict) else ""))
+                for c in citations
+                if getattr(c, "document_id", None) or (isinstance(c, dict) and c.get("document_id"))
+            ))
+
+            logger.info(
+                "[AGENT_SYNTHESIS] [CONTEXT_AND_CITATIONS] Agent ID: %s | Final Context Document IDs: %s | Citation Document IDs: %s",
+                shared_state.workflow_id,
+                context_doc_ids,
+                citation_doc_ids,
+            )
 
             return final_text, citations, follow_up_questions, source_docs, source_attribution
 

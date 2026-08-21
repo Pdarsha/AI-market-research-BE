@@ -19,7 +19,9 @@ from server.services.rag_service import get_rag_service
 from server.services.sec_edgar_mcp import sec_company_facts
 from server.services.roic_ai_mcp import roic_ai
 from server.services.financial_news_mcp import financial_news
-from server.services.companies_house_mcp import companies_house_search, companies_house_profile
+from server.services.companies_house_mcp import companies_house_profile
+from datetime import datetime, timedelta, timezone
+from server.models.workspace import Document
 
 logger = logging.getLogger(__name__)
 
@@ -164,21 +166,54 @@ class AgentToolRegistry:
                     document_ids = []
 
                 # Handle limit_past_7_days filter if enabled
+                agent_id = context.get("agent_id") or context.get("workflow_id")
                 if limit_past_7_days and db is not None and user_id:
-                    from datetime import datetime, timedelta
-                    from server.models.workspace import Document
-                    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-                    doc_query = db.query(Document.id).filter(
-                        Document.user_id == str(user_id),
-                        Document.created_at >= seven_days_ago,
+                    cutoff = datetime.utcnow() - timedelta(days=7)
+
+                    def _is_eligible_date(dt: Any) -> bool:
+                        if dt is None:
+                            return False
+                        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+                            dt_naive = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                        else:
+                            dt_naive = dt
+                        return dt_naive >= cutoff
+
+                    # Query all candidate documents in scope for audit and filtering
+                    all_doc_query = db.query(Document.id, Document.created_at).filter(
+                        Document.user_id == str(user_id)
                     )
                     if workspace_id:
-                        doc_query = doc_query.filter(Document.workspace_id == workspace_id)
+                        all_doc_query = all_doc_query.filter(Document.workspace_id == workspace_id)
                     if document_ids:
-                        doc_query = doc_query.filter(Document.id.in_(document_ids))
-                    valid_doc_ids = [str(r[0]) for r in doc_query.all()]
-                    document_ids = valid_doc_ids
+                        all_doc_query = all_doc_query.filter(Document.id.in_(document_ids))
+
+                    all_docs = all_doc_query.all()
+                    total_docs_count = len(all_docs)
+                    eligible_doc_ids = [str(doc.id) for doc in all_docs if _is_eligible_date(doc.created_at)]
+                    excluded_doc_ids = [str(doc.id) for doc in all_docs if not _is_eligible_date(doc.created_at)]
+
+                    logger.info(
+                        "[AGENT_RAG] [7_DAY_FILTER_APPLIED] Agent ID: %s | Workspace ID: %s | limit_documents_to_past_7_days: %s | Cutoff: %s | Total in Scope: %d | Eligible: %d (%s) | Excluded: %d (%s)",
+                        agent_id,
+                        workspace_id,
+                        limit_past_7_days,
+                        cutoff.isoformat(),
+                        total_docs_count,
+                        len(eligible_doc_ids),
+                        eligible_doc_ids,
+                        len(excluded_doc_ids),
+                        excluded_doc_ids,
+                    )
+
+                    document_ids = eligible_doc_ids
                     if not document_ids:
+                        logger.info(
+                            "[AGENT_RAG] [NO_RECENT_DOCS] Agent ID: %s | Workspace ID: %s | No eligible documents found in the past 7 days (Cutoff: %s). Bypassing vector search.",
+                            agent_id,
+                            workspace_id,
+                            cutoff.isoformat(),
+                        )
                         return {
                             "success": True,
                             "tool": "rag",
@@ -199,6 +234,18 @@ class AgentToolRegistry:
                     document_ids=document_ids,
                     workspace_id=workspace_id,
                     top_k=top_k,
+                )
+
+                retrieved_doc_ids = list(dict.fromkeys(str(getattr(c, "document_id", "")) for c in (chunks or []) if getattr(c, "document_id", None)))
+                retrieved_chunk_ids = [str(getattr(c, "id", "")) for c in (chunks or []) if getattr(c, "id", None)]
+
+                logger.info(
+                    "[AGENT_RAG] [RETRIEVAL_COMPLETE] Agent ID: %s | Workspace ID: %s | Retrieved Chunks: %d (%s) | Retrieved Document IDs: %s",
+                    agent_id,
+                    workspace_id,
+                    len(retrieved_chunk_ids),
+                    retrieved_chunk_ids,
+                    retrieved_doc_ids,
                 )
 
 

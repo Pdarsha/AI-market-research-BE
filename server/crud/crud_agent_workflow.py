@@ -459,11 +459,12 @@ class CRUDAgentWorkflow(
             ),
         )
 
-    def get_exec_count(self, db: Session, agent: AgentWorkflow):
+    def get_exec_count(self, db: Session, agent: Any):
+        agent_id = getattr(agent, "id", agent)
         return (
             db.query(func.count(AgentWorkflowExecution.id))
             .filter(
-                AgentWorkflowExecution.workflow_id == agent.id,
+                AgentWorkflowExecution.workflow_id == str(agent_id),
                 AgentWorkflowExecution.trigger_source == "scheduled",
             )
             .scalar()

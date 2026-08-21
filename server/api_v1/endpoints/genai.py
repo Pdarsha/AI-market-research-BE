@@ -50,6 +50,8 @@ def create_chat_session(
         agent = None
         if agent_id:
             agent = crud.agent_workflow.get_by_user_and_id(db, user_id=str(current_user.id), agent_id=agent_id)
+            if not agent:
+                raise HTTPException(status_code=404, detail="Agent not found")
 
         if agent:
             resolved_agent_name = agent.name

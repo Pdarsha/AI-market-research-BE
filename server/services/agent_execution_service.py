@@ -88,18 +88,17 @@ class AgentExecutionService:
         parameters = dict(parameters or {})
 
         try:
-            # 1. Load agent
-            agent = crud.agent_workflow.get_agent_by_id(db_session, agent_id=agent_id)
+            # 1. Load agent with user ownership verification
+            if user_id:
+                agent = crud.agent_workflow.get_by_user_and_id(
+                    db_session, user_id=str(user_id), agent_id=agent_id
+                )
+            else:
+                agent = crud.agent_workflow.get_agent_by_id(db_session, agent_id=agent_id)
+
             if not agent:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
-                )
-
-            # Check user ownership if user_id was provided
-            if user_id and str(agent.user_id) != str(user_id):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You do not have permission to execute this agent",
                 )
 
             resolved_user_id = str(agent.user_id)
