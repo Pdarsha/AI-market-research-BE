@@ -344,9 +344,6 @@ def get_chat_session(
                 follow_ups = RAGService.generate_contextual_followups(msg.content)
         msg_agent_id = getattr(msg, "agent_id", None)
         msg_agent_name = getattr(msg, "agent_name", None)
-        if not msg_agent_name and getattr(session, "execution_type", None) == "agent" and len(visible_conversation) <= 2 and msg.role == "assistant":
-            msg_agent_id = getattr(session, "agent_id", None)
-            msg_agent_name = getattr(session, "agent_name", None)
 
         msg_agents = (
             [{"id": msg_agent_id or "agent", "name": msg_agent_name, "isWorkflow": True}]
