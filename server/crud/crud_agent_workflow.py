@@ -1,7 +1,7 @@
 import re
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy import desc, func
 from sqlalchemy.exc import IntegrityError
