@@ -58,7 +58,7 @@ class CitationData:
         self.type = raw.get("type") or ("document" if self.source_type == "document" else "external")
         self.url = raw.get("url") or raw.get("link") or raw.get("document_url") or raw.get("document_path")
         self.provider = raw.get("provider") or raw.get("source_type") or raw.get("publisher") or _host_of(self.url) or "unknown"
-        self.title = raw.get("title") or raw.get("document_name") or self.url or "Untitled source"
+        self.title = raw.get("title") or raw.get("document_name") or raw.get("file_name") or self.url or "Untitled source"
         self.source_title = self.title
         self.reference_index = citation_id
         self.description = raw.get("description") or raw.get("excerpt") or raw.get("snippet") or raw.get("highlight_text")
@@ -243,24 +243,24 @@ class CitationService:
 
         if not marker_to_source:
             # Every marker was out of range (hallucinated) — strip them all.
-            rewritten = re.sub(marker_pattern, "", answer)
+            rewritten = re.sub(r"\[([^\]]+)\]", "", answer)
             rewritten = CitationService._cleanup_spacing(rewritten)
             return rewritten, []
 
-        # Do not renumber citations because the frontend streams the raw tokens 
-        # and retains the original marker numbers. Renumbering breaks the mapping
-        # between the streamed [n] and the citation_n metadata object.
+        # Rewrite answer to normalize valid markers and drop hallucinated ones
+        def _replace_bracketed(match):
+            inner = match.group(1)
+            nums = [int(n) for n in re.findall(r"\b\d+\b", inner)]
+            valid_nums = [n for n in nums if n in marker_to_source]
+            if not valid_nums:
+                return ""
+            return "".join(f"[{n}]" for n in valid_nums)
 
-        # Rewrite answer ONLY to drop hallucinated markers (those that point nowhere)
-        def _replace_marker(match):
-            old_number = int(match.group(1))
-            return f"[{old_number}]" if old_number in marker_to_source else ""
-
-        rewritten = re.sub(marker_pattern, _replace_marker, answer)
+        rewritten = re.sub(r"\[([^\]]+)\]", _replace_bracketed, answer)
         rewritten = CitationService._cleanup_spacing(rewritten)
 
         # Build citation metadata using the original marker numbers as the ID
-        unique_markers = sorted(list(set(m["marker_number"] for m in markers)))
+        unique_markers = sorted(list(set(m["marker_number"] for m in markers if m["marker_number"] in marker_to_source)))
         citations = []
         for marker_number in unique_markers:
             if marker_number in marker_to_source:
@@ -314,29 +314,39 @@ class CitationService:
             A list of citation dicts with full metadata.
         """
         citations: list[dict] = []
-        seen_chunk_ids: set = set()
+        seen_keys: set = set()
 
         for idx, source in enumerate(sources, start=1):
             try:
                 is_chunk = isinstance(source, DocumentChunk)
                 is_doc_dict = (
                     isinstance(source, dict)
-                    and source.get("type") == "document"
+                    and (source.get("type") == "document" or source.get("source_type") == "document")
                 )
 
                 if not is_chunk and not is_doc_dict:
                     # Non-document (web/SEC/etc.) — include only if it has a URL or excerpt
-                    if isinstance(source, dict) and (source.get("url") or source.get("excerpt") or source.get("snippet")):
+                    if isinstance(source, dict) and (
+                        source.get("url")
+                        or source.get("link")
+                        or source.get("excerpt")
+                        or source.get("snippet")
+                        or source.get("content")
+                    ):
+                        dedup_key = str(source.get("url") or source.get("link") or source.get("title") or source.get("source_title") or source.get("snippet", "")[:60])
+                        if dedup_key in seen_keys:
+                            continue
+                        seen_keys.add(dedup_key)
                         cd = CitationData(citation_id=idx, source=source)
                         citations.append(cd.to_dict())
                     continue
 
-                # Deduplicate by chunk id
-                chunk_id = source.id if is_chunk else source.get("chunk_id") or source.get("id")
-                if chunk_id and chunk_id in seen_chunk_ids:
+                # Deduplicate by chunk id or content
+                chunk_id = str(source.id if is_chunk else source.get("chunk_id") or source.get("id") or source.get("content", "")[:60])
+                if chunk_id and chunk_id in seen_keys:
                     continue
                 if chunk_id:
-                    seen_chunk_ids.add(chunk_id)
+                    seen_keys.add(chunk_id)
 
                 # Skip contentless chunks unless caller explicitly allows them
                 excerpt = (source.content if is_chunk else source.get("excerpt") or source.get("content")) or ""

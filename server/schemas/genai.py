@@ -1,4 +1,5 @@
 from typing import Optional, Literal, Union
+from datetime import date
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,6 +23,11 @@ class GenAIUpdate(GenAIBase):
 
 class ChatSessionBase(BaseModel):
     title: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    execution_type: Optional[str] = "chat"
+    execution_date: Optional[date] = None
+    chat_metadata: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -30,10 +36,20 @@ class ChatSessionBase(BaseModel):
 class ChatSessionCreate(ChatSessionBase):
     user_id: Optional[str] = None
     workspace_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    execution_type: Optional[str] = "chat"
+    execution_date: Optional[date] = None
+    chat_metadata: Optional[dict] = None
 
 
 class ChatSessionUpdate(BaseModel):
     title: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    execution_type: Optional[str] = None
+    execution_date: Optional[date] = None
+    chat_metadata: Optional[dict] = None
 
 
 class ChatSessionTitleUpdate(BaseModel):
@@ -117,6 +133,8 @@ class ChatMessageCreate(ChatMessageBase):
     source_documents: Optional[list] = None
     citations: Optional[list[CitationMetadata]] = None
     skills_used: Optional[list] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
     mode_used: Optional[str] = None
 
 

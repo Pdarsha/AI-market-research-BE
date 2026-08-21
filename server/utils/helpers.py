@@ -220,20 +220,28 @@ def resolve_or_create_session(
     current_user,
     title: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    execution_type: Optional[str] = "chat",
+    chat_metadata: Optional[dict] = None,
 ):
-    """Return the caller's chat session for ``chat_id``, creating it if absent.
-
-    Shared by the chat/message and ai-agent endpoints so both handle sessions
-    identically:
-      * existing session -> returned only if owned by the caller (else 404);
-      * missing session  -> created with the given ``chat_id`` (so the id the
-        client already uses stays consistent) after validating any workspace.
+    """Fetch an existing session for `current_user` or create a new one (so the id the
+    client already uses stays consistent) after validating any workspace.
     """
     if chat_id:
         session = crud.chat_session.get(db, chat_id)
         if session is not None:
             if session.user_id != str(current_user.id):
                 raise HTTPException(status_code=404, detail="Chat session not found")
+            # If agent metadata was supplied but session didn't have it, update
+            if agent_id and not session.agent_id:
+                session.agent_id = agent_id
+                session.agent_name = agent_name or session.agent_name
+                session.execution_type = execution_type or "agent"
+                if title and not session.title:
+                    session.title = title
+                db.add(session)
+                db.commit()
             return session
 
     if workspace_id:
@@ -247,9 +255,11 @@ def resolve_or_create_session(
         user_id=str(current_user.id),
         title=title,
         workspace_id=workspace_id,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        execution_type=execution_type or "chat",
+        chat_metadata=chat_metadata,
     )
-
-
 
 
 def document_sources_only(names):
@@ -262,6 +272,22 @@ def document_sources_only(names):
 def strip_citation_markers(answer):
     """Remove stray citation markers from non-document-grounded answers."""
     rewritten = re.sub(r"\[(\d+)\]", "", answer or "")
+    return tidy_markdown_spacing(rewritten)
+
+
+def strip_textual_sources_list(answer: str) -> str:
+    """Remove trailing plaintext '## Sources' or '## References' bullet lists from the LLM answer.
+
+    The backend citation engine generates structured citation metadata rendered by the UI;
+    trailing plaintext bullet lists of sources in the text body duplicate UI chips and clutter the response.
+    """
+    if not answer:
+        return answer
+
+    pattern = (
+        r"(?i)(\n\s*(?:#{1,6}\s*(?:Sources|References|Data Sources|Sources Consulted|Sources & References|References & Sources|Sources and References|Key Sources|External Sources|Citations|Bibliography|Primary Sources|Sources Used|Data Sources Used)[\s:]*|\*{1,2}(?:Sources|References|Data Sources|Key Sources|External Sources|Sources Consulted|Primary Sources|Citations|Bibliography|Sources & References|References & Sources|Sources and References)[\s:]*\*{1,2}|(?:Sources|References|Data Sources|External Sources|Sources Consulted|Key Sources)[\s:]*\n\s*[-*•0-9])[\s\S]*?)(?=(?:\n\s*<<<FOLLOW_UP_QUESTIONS>>>|$))"
+    )
+    rewritten = re.sub(pattern, "", answer)
     return tidy_markdown_spacing(rewritten)
 
 

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, Column, Date, DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.orm import relationship
 
 from server.db.base_class import Base
@@ -31,6 +31,13 @@ class ChatSession(Base):
         nullable=True,
     )
     title = Column(String, nullable=True)
+
+    # Agent Workflow metadata for identifying agent-generated chats
+    agent_id = Column(String, nullable=True, index=True)
+    agent_name = Column(String, nullable=True)
+    execution_type = Column(String, default="chat", nullable=True)  # "chat" vs "agent"
+    execution_date = Column(Date, nullable=True, index=True)  # Calendar date for unique daily agent chat reuse
+    chat_metadata = Column(JSON, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -74,6 +81,8 @@ class ChatMessage(Base):
     skills_used = Column(
         JSON, nullable=True
     )
+    agent_id = Column(String, nullable=True, index=True)
+    agent_name = Column(String, nullable=True)
     mode_used = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

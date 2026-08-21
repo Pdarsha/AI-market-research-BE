@@ -17,7 +17,7 @@ class SkillStatus(str, PyEnum):
 class Skill(Base):
     id = Column(String, default=lambda: str(uuid.uuid4()), primary_key=True)
     user_id = Column(
-        String, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+        String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)

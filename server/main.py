@@ -8,6 +8,8 @@ from starlette.staticfiles import StaticFiles
 from server.config import STATIC_DIR, create_storage_directories, settings
 from server.db.init_db import init_db
 from server.services.audit_logger import AuditLogger
+from server.db.session import SessionLocal
+from server.services.agent_scheduler_service import agent_scheduler_service
 
 from .api import api_router
 
@@ -17,20 +19,24 @@ logger = logging.getLogger(__name__)
 async def app_startup():
     try:
         init_db()
+        with SessionLocal() as db:
+            agent_scheduler_service.recover_stale_executions(db)
     except Exception as e:
-        # TODO: log error
-        print(e)
+        logger.error(f"Error during app startup initialization: {e}", exc_info=True)
 
 
 async def lifespan(app: FastAPI):
-
     await app_startup()
 
-    import threading
+    from server.services.agent_scheduler_service import agent_scheduler_service
+    agent_scheduler_service.start(poll_interval_seconds=30)
 
-    from server.services.ocr_service import warm_up_ocr
-    threading.Thread(target=warm_up_ocr, name="ocr-warmup", daemon=True).start()
-    yield
+    try:
+        yield
+    finally:
+        agent_scheduler_service.stop()
+
+
 
 
 app = FastAPI(

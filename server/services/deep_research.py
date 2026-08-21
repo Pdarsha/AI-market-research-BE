@@ -2,6 +2,8 @@ from typing import List
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from server.config import settings
+from server.utils.chat_helpers import get_llm_kwargs, is_reasoning_model
+from server.utils.llm_client import execute_with_llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +23,33 @@ Request: {main_query}
 
 Format your response strictly as a simple list of topics/questions, one per line, with no bullet points or numbering."""
         try:
-            kwargs = {}
-            if not any(p in settings.DEEP_RESEARCH_MODEL.lower() for p in ("o1", "o2", "o3")):
-                kwargs["temperature"] = 0.3
-            completion = self.client.chat.completions.create(
-                model=settings.DEEP_RESEARCH_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                **kwargs
+            kwargs = get_llm_kwargs(
+                settings.DEEP_RESEARCH_MODEL,
+                temperature=0.3,
+                reasoning_effort=settings.DEEP_RESEARCH_REASONING_EFFORT,
+            )
+            def _do_sub_queries():
+                try:
+                    return self.client.chat.completions.create(
+                        model=settings.DEEP_RESEARCH_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        **kwargs
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in kwargs:
+                        retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
+                        return self.client.chat.completions.create(
+                            model=settings.DEEP_RESEARCH_MODEL,
+                            messages=[{"role": "user", "content": prompt}],
+                            **retry_kwargs
+                        )
+                    raise api_err
+
+            completion = execute_with_llm_retry(
+                _do_sub_queries,
+                max_attempts=3,
+                initial_delay=1.0,
+                operation_name="Deep Research Sub-queries",
             )
             response = completion.choices[0].message.content or ""
             queries = [q.strip("- *").strip() for q in response.split("\n") if q.strip()]
@@ -212,13 +234,33 @@ Raw Collected Evidence:
 {combined}
 """
         try:
-            kwargs = {}
-            if not any(p in settings.DEEP_RESEARCH_MODEL.lower() for p in ("o1", "o2", "o3")):
-                kwargs["temperature"] = 0.3
-            completion = self.client.chat.completions.create(
-                model=settings.DEEP_RESEARCH_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                **kwargs
+            kwargs = get_llm_kwargs(
+                settings.DEEP_RESEARCH_MODEL,
+                temperature=0.3,
+                reasoning_effort=settings.DEEP_RESEARCH_REASONING_EFFORT,
+            )
+            def _do_synth():
+                try:
+                    return self.client.chat.completions.create(
+                        model=settings.DEEP_RESEARCH_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        **kwargs
+                    )
+                except Exception as api_err:
+                    if "temperature" in str(api_err).lower() and "temperature" in kwargs:
+                        retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
+                        return self.client.chat.completions.create(
+                            model=settings.DEEP_RESEARCH_MODEL,
+                            messages=[{"role": "user", "content": prompt}],
+                            **retry_kwargs
+                        )
+                    raise api_err
+
+            completion = execute_with_llm_retry(
+                _do_synth,
+                max_attempts=3,
+                initial_delay=1.0,
+                operation_name="Deep Research Synthesis",
             )
             return completion.choices[0].message.content or combined
         except Exception:

@@ -22,6 +22,7 @@ from tenacity import (
 )
 from server.services.audit_logger import audit_context
 from server.config import settings
+from server.utils.llm_client import get_openai_client, get_async_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,9 @@ class EmbeddingService:
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI(
+            self._client = get_openai_client(
                 api_key=self._require_api_key(),
+                base_url=self._base_url,
                 max_retries=self._max_retries,
             )
         return self._client
@@ -74,8 +76,9 @@ class EmbeddingService:
     @property
     def aclient(self) -> AsyncOpenAI:
         if self._aclient is None:
-            self._aclient = AsyncOpenAI(
+            self._aclient = get_async_openai_client(
                 api_key=self._require_api_key(),
+                base_url=self._base_url,
                 max_retries=self._max_retries,
             )
         return self._aclient

@@ -188,3 +188,43 @@ def build_routing_log(
     if skipped_providers:
         log_lines.append("Skipped:\n" + "\n".join(f"- {p}" for p in skipped_providers))
     return "\n\n".join(log_lines)
+
+
+def is_reasoning_model(model_name: Optional[str]) -> bool:
+    """Check if the given model is an OpenAI reasoning model (e.g. o1, o2, o3, o4, gpt-5)
+    which does not support custom temperature values and requires max_completion_tokens.
+    """
+    if not model_name:
+        return False
+    name = model_name.lower()
+    return any(p in name for p in ("o1", "o2", "o3", "o4", "gpt-5", "reasoning"))
+
+
+def get_llm_kwargs(
+    model_name: Optional[str],
+    *,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
+    response_format: Optional[dict] = None,
+) -> dict:
+    """Build kwargs for OpenAI chat.completions.create compatible with reasoning and standard models."""
+    kwargs: dict = {}
+    is_reasoning = is_reasoning_model(model_name)
+
+    if not is_reasoning and temperature is not None:
+        kwargs["temperature"] = temperature
+
+    if max_tokens is not None:
+        if is_reasoning:
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+
+    if is_reasoning and reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
+    return kwargs

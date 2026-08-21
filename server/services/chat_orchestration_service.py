@@ -36,13 +36,14 @@ from server.utils.source_attribution import (
     cited_document_names,
     source_attribution_from_citations,
 )
+from server.services.agent_trigger_service import agent_trigger_service
 from server.services.skill_selection_service import get_skill_selection_service
 from server.services.skill_instruction_service import get_skill_instruction_service
-
+from server.utils.llm_client import get_openai_client
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+client = get_openai_client()
 rag = get_rag_service()
 citation_svc = get_citation_service()
 
@@ -231,6 +232,71 @@ class ChatOrchestrationService:
             or request.content.strip().lower() == "analyze this workspace"
         )
 
+        if is_workspace_analysis and session.workspace_id:
+            documents = crud.document.get_multi_by_workspace(
+                db, workspace_id=session.workspace_id
+            )
+            document_ids = [doc.id for doc in documents]
+            context_reason = "workspace_analysis"
+        else:
+            document_ids, context_reason = resolve_active_document_ids(
+                prior_messages, request.document_ids
+            )
+
+        unique_doc_ids = list(dict.fromkeys(document_ids or []))
+        should_create_grid = False
+        if len(unique_doc_ids) > 1:
+            if request.create_grid is True or getattr(request, "action", None) == "analyze":
+                should_create_grid = True
+            elif getattr(request, "create_grid", None) is not False and getattr(request, "action", None) != "chat":
+                lower_content = request.content.strip().lower()
+                if lower_content.startswith((
+                    "analyze the selected document",
+                    "analyze the selected documents",
+                    "analyze selected document",
+                    "analyze selected documents",
+                )):
+                    should_create_grid = True
+
+        if should_create_grid:
+            return cls._handle_multi_document_grid(
+                db=db,
+                current_user=current_user,
+                chat_id=chat_id,
+                session=session,
+                request=request,
+                unique_doc_ids=unique_doc_ids,
+                context_reason=context_reason,
+                background_tasks=background_tasks,
+            )
+
+        # Check for Automatic Trigger Agent Workflow match
+        explicit_agent_id = session.agent_id or getattr(request, "agent_id", None)
+        matched_agent_workflow = agent_trigger_service.match_agent_for_request(
+            db,
+            user_id=str(current_user.id),
+            query=request.content,
+            workspace_id=session.workspace_id,
+            explicit_agent_id=explicit_agent_id,
+        )
+
+        if matched_agent_workflow:
+            logger.info(
+                "[AGENT_AUTO_TRIGGER] Routing chat message to Agent '%s' (id=%s)",
+                matched_agent_workflow.name,
+                matched_agent_workflow.id,
+            )
+            return agent_trigger_service.execute_and_stream_chat_response(
+                db=db,
+                current_user=current_user,
+                chat_id=chat_id,
+                session=session,
+                request=request,
+                matched_agent=matched_agent_workflow,
+                unique_doc_ids=unique_doc_ids,
+                background_tasks=background_tasks,
+            )
+
         # Selected skills (manual or automatic)
         manual_skills = []
         auto_skills = []
@@ -299,43 +365,7 @@ class ChatOrchestrationService:
                     matched_agent = agent_info
                     break
 
-        if is_workspace_analysis and session.workspace_id:
-            documents = crud.document.get_multi_by_workspace(
-                db, workspace_id=session.workspace_id
-            )
-            document_ids = [doc.id for doc in documents]
-            context_reason = "workspace_analysis"
-        else:
-            document_ids, context_reason = resolve_active_document_ids(
-                prior_messages, request.document_ids
-            )
 
-        unique_doc_ids = list(dict.fromkeys(document_ids or []))
-        should_create_grid = False
-        if len(unique_doc_ids) > 1:
-            if request.create_grid is True or getattr(request, "action", None) == "analyze":
-                should_create_grid = True
-            elif getattr(request, "create_grid", None) is not False and getattr(request, "action", None) != "chat":
-                lower_content = request.content.strip().lower()
-                if lower_content.startswith((
-                    "analyze the selected document",
-                    "analyze the selected documents",
-                    "analyze selected document",
-                    "analyze selected documents",
-                )):
-                    should_create_grid = True
-
-        if should_create_grid:
-            return cls._handle_multi_document_grid(
-                db=db,
-                current_user=current_user,
-                chat_id=chat_id,
-                session=session,
-                request=request,
-                unique_doc_ids=unique_doc_ids,
-                context_reason=context_reason,
-                background_tasks=background_tasks,
-            )
 
         ws_name = "this workspace"
         if session.workspace_id:
@@ -892,10 +922,14 @@ class ChatOrchestrationService:
                 "citations": citations,
                 "sources": citations,
                 "source_attribution": source_attribution,
-                "skills_used": skills_meta,
-                "selected_skills": skills_meta,
-                "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                "skills_used": skills_meta if skills_meta else None,
+                "selected_skills": skills_meta if skills_meta else None,
+                "skills": skills_meta if skills_meta else None,
+                "auto_selected_skills": skills_meta if not request.skill_ids and skills_meta else None,
                 "selection_mode": selection_mode,
+                "agent_id": None,
+                "agent_name": None,
+                "agents": None,
                 "follow_up_questions": follow_up_questions,
                 "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
                 "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
@@ -911,11 +945,15 @@ class ChatOrchestrationService:
                     "response": ai_response,
                     "document_ids": document_ids,
                     "active_document_ids": document_ids,
-                    "skills_used": skills_meta,
-                    "selected_skills": skills_meta,
-                    "skills": skills_meta,
-                    "auto_selected_skills": skills_meta if not request.skill_ids else [],
+                    "skills_used": skills_meta if skills_meta else None,
+                    "selected_skills": skills_meta if skills_meta else None,
+                    "skills": skills_meta if skills_meta else None,
+                    "auto_selected_skills": skills_meta if not request.skill_ids and skills_meta else None,
                     "selection_mode": selection_mode,
+                    "agent_id": None,
+                    "agent_name": None,
+                    "agent_workflow_id": None,
+                    "agents": None,
                     "mode_used": mode_used,
                     "uploaded_document_ids": (
                         document_ids if context_reason == "new_upload" else []

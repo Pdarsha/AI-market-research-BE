@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
+import re
+from server.services.audit_logger import audit_context
 
 from server.config import settings
 
@@ -44,20 +46,36 @@ class FinancialNewsMCPTool:
             cache_ttl if cache_ttl is not None else settings.ALPHA_VANTAGE_NEWS_CACHE_TTL
         )
 
-    async def financial_news(self, ticker: str, limit: int = 10) -> dict[str, Any]:
-        """Return normalized news for ``ticker``.
+    async def financial_news(
+        self,
+        ticker: str | None = None,
+        limit: int = 10,
+        query: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Return normalized news for ``ticker`` or ``query``.
 
         The complete Alpha Vantage feed is normalized, filtered for the requested
         ticker, ranked, and aggregated before the requested number of articles is
         returned. Network I/O runs in a worker thread so an async caller can fetch
         financial news alongside RAG.
         """
-        from server.services.audit_logger import audit_context
+        resolved_ticker = (ticker or kwargs.get("ticker") or "").strip().upper()
+        if not resolved_ticker and query:
+            q_clean = query.strip()
+            if re.fullmatch(r"[A-Za-z]{1,5}", q_clean):
+                resolved_ticker = q_clean.upper()
+            else:
+                words = [w.strip(".,;:!?()[]") for w in q_clean.split()]
+                candidate_tickers = [w for w in words if w.isupper() and 1 <= len(w) <= 5 and w.isalpha()]
+                if candidate_tickers:
+                    resolved_ticker = candidate_tickers[0]
 
-        ticker = ticker.strip().upper()
-        if not ticker or not ticker.replace(".", "").replace("-", "").isalnum():
-            raise ValueError("ticker must be a non-empty market symbol")
         limit = max(1, min(int(limit), 50))
+        if not resolved_ticker:
+            return self._with_limit(self._empty(ticker=query or "GENERAL"), limit, cached=False)
+
+        ticker = resolved_ticker
 
         with audit_context(
             action="FINANCIAL_NEWS_MCP_CALL",
@@ -299,9 +317,14 @@ class FinancialNewsMCPTool:
 _financial_news_tool = FinancialNewsMCPTool()
 
 
-async def financial_news(ticker: str, limit: int = 10) -> dict[str, Any]:
-    """MCP tool entry point: ``financial_news({ticker, limit})``."""
-    return await _financial_news_tool.financial_news(ticker=ticker, limit=limit)
+async def financial_news(
+    ticker: str | None = None,
+    limit: int = 10,
+    query: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """MCP tool entry point: ``financial_news({ticker, limit, query})``."""
+    return await _financial_news_tool.financial_news(ticker=ticker, limit=limit, query=query, **kwargs)
 
 
 def get_financial_news_tool() -> FinancialNewsMCPTool:

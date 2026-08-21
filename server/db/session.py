@@ -8,8 +8,19 @@ from server.db.base_class import Base
 load_dotenv()
 
 
-engine = create_engine(settings.SQLALCHEMY_DATABASE_URI)
+db_url = settings.SQLALCHEMY_DATABASE_URI or ""
+engine_kwargs = {}
+if db_url.startswith("postgresql"):
+    engine_kwargs = {
+        "pool_size": 20,
+        "max_overflow": 30,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    }
+
+engine = create_engine(db_url, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 
 def ensure_vector_extension() -> None:
