@@ -9,15 +9,15 @@ from server.api_v1.deps import get_db
 from server.models.genai import ChatSession
 from server.services.document_processor import get_document_processor
 from server.utils.auth import get_current_user
-from server.utils.helpers import serialize_chat, serialize_document, serialize_workspace
+from server.utils.helpers import document_sources_only, serialize_chat, serialize_document, serialize_workspace
 from server.utils.source_attribution import (
     cited_document_names,
     source_attribution_from_citations,
 )
 from server.models.genai import ChatMessage
-import uuid as _uuid
 from server.services.audit_logger import AuditLogger
 from server.services.document_takeaways_service import document_takeaways_service
+from server.services.rag_service import RAGService
 
 
 logger = logging.getLogger(__name__)
@@ -136,10 +136,19 @@ def public_workspace(
                         "id": m.id,
                         "role": m.role,
                         "content": m.content,
-                        "source_documents": cited_document_names(m.citations),
-                        "citations": m.citations,
+                        "source_documents": document_sources_only(
+                            cited_document_names(m.citations)
+                        ),
+                        "citations": m.citations or [],
+                        "sources": m.citations or [],
                         "source_attribution": source_attribution_from_citations(
                             m.citations
+                        ),
+                        "follow_up_questions": (
+                            RAGService.split_answer_and_followups(m.content)[1]
+                            or RAGService.generate_contextual_followups(m.content)
+                            if m.role == "assistant" and m.content
+                            else []
                         ),
                         "created_at": (
                             m.created_at.isoformat() if m.created_at else None

@@ -27,4 +27,7 @@ class ExportMessage(BaseModel):
 
 class ConversationExportRequest(BaseModel):
     title: Optional[str] = None
-    messages: List[ExportMessage]
+    messages: Optional[List[ExportMessage]] = None
+    html_content: Optional[str] = None
+    content: Optional[str] = None
+    citations: Optional[List[Dict[str, Any]]] = None

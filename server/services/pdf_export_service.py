@@ -39,14 +39,29 @@ def _load_logo_pixmap(logo_path: str, dpi: int = 300) -> fitz.Pixmap | None:
     - If logo fails to load: logs a warning and returns None (PDF export continues).
     """
     if not logo_path or not isinstance(logo_path, str):
-        return None
+        logo_path = ""
 
-    paths_to_try = [logo_path]
-    if logo_path.lower().endswith(".svg"):
-        paths_to_try.append(logo_path[:-4] + ".png")
-        paths_to_try.append(logo_path[:-4] + ".jpg")
-    elif logo_path.lower().endswith(".png") or logo_path.lower().endswith(".jpg"):
-        paths_to_try.append(logo_path[:-4] + ".svg")
+    from pathlib import Path
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    candidate_paths = [
+        logo_path,
+        os.path.join(os.getcwd(), logo_path),
+        str(base_dir / "media" / "logo" / "logo.png"),
+        str(base_dir / "media" / "logo" / "favicon.svg"),
+        os.path.join(os.getcwd(), "media", "logo", "logo.png"),
+        os.path.join(os.getcwd(), "media", "logo", "favicon.svg"),
+    ]
+
+    paths_to_try = []
+    for p in candidate_paths:
+        if not p:
+            continue
+        paths_to_try.append(p)
+        if p.lower().endswith(".svg"):
+            paths_to_try.append(p[:-4] + ".png")
+            paths_to_try.append(p[:-4] + ".jpg")
+        elif p.lower().endswith(".png") or p.lower().endswith(".jpg"):
+            paths_to_try.append(p[:-4] + ".svg")
 
     for path in paths_to_try:
         if not os.path.exists(path):
@@ -153,27 +168,90 @@ def _extract_citation_url(cit: dict) -> str | None:
 
 
 _CSS = """
-body { font-family: 'Helvetica', sans-serif; font-size: 10.5pt; line-height: 1.6; color: #2d3748; }
-h1 { font-size: 20pt; color: #1a202c; margin-bottom: 8pt; border-bottom: 1px solid #e2e8f0; padding-bottom: 4pt; }
-h2 { font-size: 16pt; color: #2d3748; margin-top: 16pt; margin-bottom: 8pt; }
-h3 { font-size: 13pt; color: #4a5568; margin-top: 12pt; margin-bottom: 6pt; }
-p { margin-bottom: 10pt; }
-ul, ol { margin-bottom: 10pt; padding-left: 20pt; }
-li { margin-bottom: 4pt; }
-table { width: 100%; border-collapse: collapse; margin-bottom: 12pt; }
-th, td { border: 1px solid #cbd5e0; padding: 6pt; text-align: left; }
-th { background-color: #edf2f7; font-weight: bold; }
-code { font-family: monospace; background-color: #edf2f7; padding: 2pt 4pt; border-radius: 3pt; font-size: 9pt; }
-pre { background-color: #edf2f7; padding: 10pt; border-radius: 4pt; overflow-x: auto; margin-bottom: 10pt; }
-pre code { padding: 0; background-color: transparent; }
-blockquote { border-left: 3px solid #a0aec0; margin-left: 0; padding-left: 10pt; color: #718096; font-style: italic; }
-.meta { color: #718096; font-size: 8.5pt; margin-bottom: 20pt; }
-.user-query { font-size: 13pt; font-weight: bold; color: #2b6cb0; margin-top: 20pt; margin-bottom: 10pt; }
-.references-section { margin-top: 30pt; border-top: 1px solid #e2e8f0; padding-top: 15pt; }
-.ref-title { font-size: 14pt; font-weight: bold; margin-bottom: 10pt; }
-.ref-item { font-size: 9pt; margin-bottom: 6pt; }
+body { font-family: 'Helvetica', sans-serif; font-size: 10pt; line-height: 1.55; color: #2d3748; }
+h1 { font-size: 18pt; font-weight: bold; color: #1a202c; margin-top: 14pt; margin-bottom: 8pt; border-bottom: 1px solid #e2e8f0; padding-bottom: 4pt; }
+h2 { font-size: 14pt; font-weight: bold; color: #2d3748; margin-top: 14pt; margin-bottom: 6pt; }
+h3 { font-size: 12pt; font-weight: bold; color: #4a5568; margin-top: 10pt; margin-bottom: 4pt; }
+h4 { font-size: 11pt; font-weight: bold; color: #4a5568; margin-top: 8pt; margin-bottom: 3pt; }
+p { margin-bottom: 8pt; }
+ul, ol { margin-bottom: 8pt; padding-left: 18pt; }
+li { margin-bottom: 3pt; }
+table { width: 100%; border-collapse: collapse; margin-top: 8pt; margin-bottom: 12pt; }
+th, td { border: 1px solid #cbd5e0; padding: 5pt 7pt; text-align: left; font-size: 9pt; }
+th { background-color: #edf2f7; font-weight: bold; color: #2d3748; }
+code { font-family: monospace; background-color: #edf2f7; padding: 2pt 4pt; border-radius: 3pt; font-size: 8.5pt; color: #805ad5; }
+pre { background-color: #f7fafc; border: 1px solid #e2e8f0; padding: 8pt; border-radius: 4pt; overflow-x: auto; margin-bottom: 10pt; }
+pre code { padding: 0; background-color: transparent; color: #2d3748; }
+blockquote { border-left: 3px solid #3182ce; margin-left: 0; padding-left: 10pt; color: #4a5568; font-style: italic; margin-bottom: 8pt; }
+.meta { color: #718096; font-size: 8.5pt; margin-bottom: 16pt; }
+.user-query { font-size: 11.5pt; font-weight: bold; color: #2b6cb0; margin-top: 16pt; margin-bottom: 8pt; padding: 6pt 10pt; background-color: #ebf8ff; border-left: 3px solid #3182ce; border-radius: 2pt; }
+.user-query p { margin: 0; color: #2b6cb0; }
+.assistant-response { margin-bottom: 14pt; }
+.references-section { margin-top: 24pt; border-top: 1px solid #e2e8f0; padding-top: 12pt; }
+.ref-title { font-size: 13pt; font-weight: bold; margin-bottom: 8pt; color: #2d3748; }
+.ref-item { font-size: 8.5pt; margin-bottom: 5pt; line-height: 1.4; }
 a { color: #3182ce; text-decoration: none; }
 """
+
+
+def _preprocess_markdown(text: str) -> str:
+    """Preprocess LLM markdown text to ensure headings, tables, and blocks render cleanly into HTML.
+
+    - Normalizes CRLF and CR line endings to LF.
+    - Unescapes literal '\\n' sequences when raw string escapes are present.
+    - Strips internal system markers like '<<<FOLLOW_UP_QUESTIONS>>>'.
+    - Normalizes markdown headings like '###Heading' to '### Heading'.
+    - Ensures heading lines have proper blank-line boundaries so python-markdown converts
+      # -> <h1>, ## -> <h2>, ### -> <h3> without leaking '#' markers into the document.
+    - Ensures markdown table blocks have clean blank-line boundaries so the tables extension
+      always parses them into <table> structures without flattening them into plain text.
+    """
+    if not text:
+        return ""
+    # Normalize line endings
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # If text has literal escaped newlines and no actual newlines, unescape them
+    if "\\n" in text and "\n" not in text:
+        text = text.replace("\\n", "\n")
+    # Remove follow-up questions section
+    if "<<<FOLLOW_UP_QUESTIONS>>>" in text:
+        text = text.split("<<<FOLLOW_UP_QUESTIONS>>>")[0].rstrip()
+    # Normalize headings without a space after hashes (e.g. "###Heading" -> "### Heading")
+    text = re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", text, flags=re.MULTILINE)
+    # Ensure headings have a blank line before them if preceded by text
+    text = re.sub(r"([^\n])\n(#{1,6}\s+)", r"\1\n\n\2", text)
+
+    # Ensure table blocks have blank lines before and after
+    lines = text.split("\n")
+    new_lines = []
+    in_table = False
+
+    for i, line in enumerate(lines):
+        trimmed = line.strip()
+        is_row = bool(re.match(r"^\|?.+\|.+\|?$", trimmed)) and not trimmed.startswith("#")
+        is_sep = bool(re.match(r"^\|?\s*:?-+:?\s*(\|(?:\s*:?-+:?\s*\|?)+)+$", trimmed))
+
+        # Detect table start (a row followed by a separator row)
+        if not in_table:
+            if i + 1 < len(lines):
+                next_trimmed = lines[i + 1].strip()
+                next_is_sep = bool(
+                    re.match(r"^\|?\s*:?-+:?\s*(\|(?:\s*:?-+:?\s*\|?)+)+$", next_trimmed)
+                )
+                if is_row and next_is_sep:
+                    if new_lines and new_lines[-1].strip() != "":
+                        new_lines.append("")
+                    in_table = True
+
+        # Detect table end
+        if in_table and not is_row and not is_sep:
+            if new_lines and new_lines[-1].strip() != "":
+                new_lines.append("")
+            in_table = False
+
+        new_lines.append(line)
+
+    return "\n".join(new_lines)
 
 
 def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
@@ -223,7 +301,11 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
             content = m.get("content") or ""
 
             if role == "user":
-                body_parts.append(f'<div class="user-query">{_esc(content)}</div>')
+                pre_user = _preprocess_markdown(content)
+                user_html = markdown.markdown(
+                    pre_user, extensions=["tables", "fenced_code", "nl2br", "sane_lists"]
+                )
+                body_parts.append(f'<div class="user-query">{user_html}</div>')
                 continue
 
             # Build this message's citation index
@@ -257,11 +339,12 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                     return f'<a href="{_esc(url)}" target="_blank" rel="noopener noreferrer">[{n}]</a>'
                 return f"[{n}]"
 
-            linked_content = re.sub(r"\[(\d+)\]", _replace, content)
+            pre_content = _preprocess_markdown(content)
+            linked_content = re.sub(r"\[(\d+)\]", _replace, pre_content)
             html_content = markdown.markdown(
-                linked_content, extensions=["tables", "fenced_code", "nl2br"]
+                linked_content, extensions=["tables", "fenced_code", "nl2br", "sane_lists"]
             )
-            body_parts.append(f"<div>{html_content}</div>")
+            body_parts.append(f'<div class="assistant-response">{html_content}</div>')
 
             # Per-message Sources section
             if msg_cit_map:
@@ -361,6 +444,7 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                 )
 
             # 1b. Header — Top-left Logo + Centered Company Name
+            logo_w = 0.0
             if logo_pixmap:
                 aspect = logo_pixmap.width / max(logo_pixmap.height, 1)
                 logo_w = logo_height_pt * aspect
@@ -373,10 +457,19 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                 page.insert_image(logo_rect, pixmap=logo_pixmap)
 
             if company_name:
-                cn_size = 15.0
+                logo_taken_w = (logo_w + 16.0) if logo_pixmap else 0.0
+                max_header_w = max(100.0, pw - 2 * pdf_margin - logo_taken_w)
+                cn_size = 11.5  # Compact, professional header size (down from 15.0)
                 cn_w = helv_font.text_length(company_name, fontsize=cn_size)
+                # If header text is unusually long, dynamically scale font size so it fits without truncation or '...'
+                if cn_w > max_header_w and cn_w > 0:
+                    cn_size = max(8.0, cn_size * (max_header_w / cn_w))
+                    cn_w = helv_font.text_length(company_name, fontsize=cn_size)
+
+                # Center text cleanly across page width
+                cn_x = max(logo_margin + logo_taken_w, (pw - cn_w) / 2)
                 page.insert_text(
-                    fitz.Point((pw - cn_w) / 2, header_yc + 5),
+                    fitz.Point(cn_x, header_yc + 4),
                     company_name,
                     fontsize=cn_size,
                     fontname="helv",

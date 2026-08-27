@@ -51,7 +51,7 @@ from server.utils.prompt import (
     companies_house_classification_prompt,
     classify_intent_prompt,
 )
-from server.utils.chat_helpers import get_llm_kwargs, is_reasoning_model
+from server.utils.chat_helpers import get_llm_kwargs, is_reasoning_model, is_explicit_document_request
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +220,9 @@ class RAGService:
     def build_context_with_citations(chunks: list[DocumentChunk]) -> str:
         """Build context string with numbered markers for chunks.
 
-        The chunks are numbered [1], [2], etc., so the LLM can cite them
-        explicitly in its response using these markers. This enables automatic
-        citation mapping through the CitationService.
+        The chunks are numbered [1], [2], etc., with document name, page number,
+        and section title metadata so the LLM can cite them explicitly across
+        analysis sections using these markers.
 
         Returns:
             A context string with chunks numbered [1], [2], etc.
@@ -233,8 +233,15 @@ class RAGService:
         numbered_chunks = []
         for i, chunk in enumerate(chunks, start=1):
             if chunk.content:
-                # Include a numbered marker so the LLM knows which chunk is which
-                numbered_chunks.append(f"[{i}] {chunk.content}")
+                meta_parts = []
+                if getattr(chunk, "file_name", None):
+                    meta_parts.append(f"Document: {chunk.file_name}")
+                if getattr(chunk, "page_number", None) is not None:
+                    meta_parts.append(f"Page: {chunk.page_number}")
+                if getattr(chunk, "section_title", None):
+                    meta_parts.append(f"Section: {chunk.section_title}")
+                meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
+                numbered_chunks.append(f"[{i}]{meta_str}\n{chunk.content}")
 
         return "\n\n---\n\n".join(numbered_chunks)
 
@@ -339,13 +346,26 @@ class RAGService:
         return messages
 
     @staticmethod
-    def generate_contextual_followups(answer: str, question: str = "") -> list[str]:
+    def _normalize_question_text(q: str) -> str:
+        """Normalize a question for fuzzy deduplication."""
+        cleaned = re.sub(r"[^\w\s]", "", (q or "").lower())
+        stop = {
+            "can", "you", "the", "a", "an", "what", "how", "why", "is", "are", "do", "does",
+            "in", "on", "of", "to", "for", "with", "about", "please", "more", "detail", "details",
+            "could", "would", "tell", "me", "explain", "describe"
+        }
+        words = [w for w in cleaned.split() if w not in stop]
+        return " ".join(words)
+
+    @staticmethod
+    def generate_contextual_followups(answer: str, question: str = "", context: str = "") -> list[str]:
         """Generate high-quality, contextual, source-derived follow-up questions.
 
-        Extracts entities, company names, financial terms, and core topics from the AI answer
-        and question to generate specific, actionable, and non-generic follow-up questions.
+        Extracts entities, company names, financial metrics, specific risks, and core topics
+        from the AI answer, user question, and retrieved document/source context to generate specific,
+        actionable, and non-generic follow-up questions.
         """
-        combined = (answer or "") + " " + (question or "")
+        combined = (answer or "") + " " + (question or "") + " " + (context or "")
         combined_lower = combined.lower()
         if not combined.strip():
             return [
@@ -354,8 +374,52 @@ class RAGService:
                 "What practical exercises or applications should we focus on next?"
             ]
 
-        # 1. Detect Discussion Domain
-        is_programming = any(
+        # Extract Metrics / Currencies / Percentages / Quarters
+        metrics = list(dict.fromkeys(re.findall(
+            r"(\$\d+(?:\.\d+)?\s*(?:[BMK]|billion|million|trillion)?|\b\d+(?:\.\d+)?%\b|\bQ[1-4]\s*\d{2,4}\b|\bFY\s*\d{2,4}\b)",
+            combined,
+            re.IGNORECASE
+        )))
+
+        # Extract specific business / operational / financial risks
+        risks = list(dict.fromkeys(re.findall(
+            r"\b((?:supply chain|market|credit|liquidity|inflation|currency|regulatory|cybersecurity|operational|geopolitical|compliance|governance)\s*(?:risk|risks|volatility|headwinds|pressures|constraints|deficiencies|exposure|issues|challenges)?)\b",
+            combined,
+            re.IGNORECASE
+        )))
+        risks = [r.strip() for r in risks if len(r.strip()) > 3]
+
+        # Extract programming / tech concepts
+        tech_concepts = list(dict.fromkeys(re.findall(
+            r"\b(asyncio|coroutines|async/await|event loop|multithreading|multiprocessing|recursion|concurrency|pointers|memory management|OOP|polymorphism|inheritance|templates|lambdas|decorators|generators|compiler|garbage collection|REST API|GraphQL|Docker|Kubernetes|PostgreSQL|Redis)\b",
+            combined,
+            re.IGNORECASE
+        )))
+
+        ignored_words = {
+            "The", "This", "That", "These", "Those", "There", "Here", "With", "From", "About",
+            "What", "When", "Where", "Which", "Your", "Have", "Been", "Will", "Would", "Could",
+            "Should", "Each", "Some", "Many", "Main", "Points", "Topic", "Topics", "Section",
+            "Chapter", "Summary", "Overview", "Introduction", "Conclusion", "Document",
+            "Executive", "Briefing", "Financial", "Report", "Analysis", "Findings", "Results",
+            "Performance", "Table", "Figure", "Source", "Sources", "Appendix", "Risks",
+            "Metrics", "Highlights", "Key", "Total", "Quarter", "Year", "Fiscal", "Operating",
+            "Credit", "Market", "Liquidity", "Strategic", "Capital", "Primary", "Secondary",
+            "General", "Corporate", "Standard", "Note", "Notes", "Item", "Items", "Tell",
+            "Analyze", "Summarize", "Page"
+        }
+
+        # Dynamically extract company / entity names from text and context
+        extracted_entities = list(dict.fromkeys(re.findall(
+            r"\b[A-Z][a-zA-Z0-9+#]{2,}(?:\s+[A-Z][a-zA-Z0-9+#]{2,})*(?:\s+(?:Technologies|Corporation|Corp|Inc|LLC|Ltd|Group|Holdings|Capital|Bank|Services|Solutions|Systems|Therapeutics|Energy|Pharma|Media|Airlines|Networks|Software))?\b",
+            combined
+        )))
+        companies = [e.strip() for e in extracted_entities if e.strip() and e.split()[0] not in ignored_words]
+
+        answer_nouns = [n for n in re.findall(r"\b[A-Z][a-zA-Z0-9+#]{2,}\b", answer) if n not in ignored_words and n not in companies]
+        answer_nouns = list(dict.fromkeys(answer_nouns))
+
+        is_programming = bool(tech_concepts) or any(
             w in combined_lower for w in [
                 "c++", "cpp", "python", "java", "javascript", "code", "coding",
                 "function", "class", "object", "variable", "pointer", "compiler",
@@ -364,7 +428,7 @@ class RAGService:
             ]
         )
 
-        is_financial = any(
+        is_financial = bool(companies) or bool(metrics) or any(
             w in combined_lower for w in [
                 "revenue", "sales", "margin", "profit", "ebitda", "earnings",
                 "financial", "fiscal", "quarter", "10-k", "10-q", "balance sheet",
@@ -372,64 +436,95 @@ class RAGService:
             ]
         )
 
-        # 2. Extract Topic Terms & Key Proper Nouns from CURRENT question & answer
-        prog_concepts = list(dict.fromkeys(re.findall(
-            r"\b(OOP|Data Types|Functions|Input/Output|Streams|Operators|Classes|Objects|Inheritance|Polymorphism|Pointers|Templates|Arrays|Vectors|Recursion|Concurrency|Memory Management|Algorithms|Data Structures)\b",
-            combined,
-            re.IGNORECASE
-        )))
-
-        companies = list(dict.fromkeys(re.findall(
-            r"\b(Microsoft|Azure|AWS|Amazon|Google|GCP|Alphabet|Apple|Tesla|Nvidia|Meta|Facebook|Netflix|AMD|Intel|Salesforce|Oracle|IBM|GlobalTech)\b",
-            combined,
-            re.IGNORECASE
-        )))
-        companies = [c.capitalize() if c.lower() not in ("aws", "gcp") else c.upper() for c in companies]
-
-        ignored_words = {
-            "The", "This", "That", "These", "Those", "There", "Here", "With", "From", "About",
-            "What", "When", "Where", "Which", "Your", "Have", "Been", "Will", "Would", "Could",
-            "Should", "Each", "Some", "Many", "Main", "Points", "Topic", "Topics", "Section",
-            "Chapter", "Summary", "Overview", "Introduction", "Conclusion", "Document"
-        }
-        answer_nouns = [n for n in re.findall(r"\b[A-Z][a-zA-Z0-9+#]{2,}\b", answer) if n not in ignored_words]
-        answer_nouns = list(dict.fromkeys(answer_nouns))
+        is_document_analysis = any(
+            w in combined_lower
+            for w in [
+                "analyze", "analyse", "document", "report", "findings", "risk", "risks",
+                "summary", "summarize", "overview", "evaluation", "takeaways", "audit", "filing"
+            ]
+        )
 
         followups: list[str] = []
 
-        # 3. Domain-Specific Follow-Up Generation
+        # 1. Programming & Technical Domain
         if is_programming:
-            c1 = prog_concepts[0] if prog_concepts else (answer_nouns[0] if answer_nouns else "these core concepts")
-            c2 = prog_concepts[1] if len(prog_concepts) > 1 else (answer_nouns[1] if len(answer_nouns) > 1 else "other techniques")
+            c1 = tech_concepts[0] if tech_concepts else (answer_nouns[0] if answer_nouns else "these core concepts")
+            c2 = tech_concepts[1] if len(tech_concepts) > 1 else (answer_nouns[1] if len(answer_nouns) > 1 else "alternative approaches")
             
-            followups.append(f"Can you explain {c1} in more detail with practical code examples?")
-            followups.append(f"What are the key differences between {c1} and {c2}?")
-            followups.append("Can you provide practice exercises or quiz questions based on these topics?")
-            followups.append("Which concepts should be studied first as a prerequisite?")
-            followups.append("What are the common pitfalls or best practices when working with these concepts?")
+            followups.append(f"Can you provide a working code example demonstrating {c1}?")
+            if len(tech_concepts) > 1:
+                followups.append(f"What are the key performance differences between {c1} and {c2}?")
+            else:
+                followups.append(f"What are the common edge cases or debugging pitfalls when working with {c1}?")
+            followups.append(f"How can {c1} be optimized for production use cases?")
 
-        elif is_financial:
-            p_entity = companies[0] if companies else (answer_nouns[0] if answer_nouns else "the company")
-            s_entity = companies[1] if len(companies) > 1 else "its primary competitors"
+        # 2. Financial & Document Analysis Domain
+        elif is_financial or is_document_analysis:
+            p_entity = companies[0] if companies else (answer_nouns[0] if answer_nouns else "")
 
-            followups.append(f"Which business segments contributed most to {p_entity}'s revenue and margins?")
-            followups.append(f"How does {p_entity}'s operating performance compare to {s_entity} this period?")
-            followups.append(f"What key strategic risks or capital expenditure plans were highlighted for {p_entity}?")
-            followups.append("What are the long-term growth prospects and key financial guidance outlined?")
+            # Risk-focused question
+            if risks:
+                r1 = risks[0]
+                if p_entity:
+                    followups.append(f"What specific mitigation strategies does {p_entity} have in place for {r1}?")
+                else:
+                    followups.append(f"What are the primary mitigation measures or contingency plans for {r1}?")
+            elif p_entity:
+                followups.append(f"What are the most significant strategic or financial risks identified for {p_entity}?")
+            else:
+                followups.append("What are the most significant financial or operational risks identified in the document?")
 
+            # Metric-focused question
+            if metrics:
+                m1 = metrics[0]
+                if p_entity:
+                    followups.append(f"What key drivers or business segments contributed most to {p_entity}'s {m1}?")
+                else:
+                    followups.append(f"What primary factors drove the {m1} figure reported in the analysis?")
+            elif p_entity:
+                followups.append(f"Which business segments contributed most to {p_entity}'s revenue and margins?")
+            else:
+                followups.append("How do these findings and metrics affect the overall financial outlook?")
+
+            # Comparative / Forward-looking question
+            if p_entity and len(companies) > 1:
+                s_entity = companies[1]
+                followups.append(f"How does {p_entity}'s performance compare to {s_entity} this period?")
+            elif p_entity:
+                followups.append(f"What are the long-term growth prospects and key guidance outlined for {p_entity}?")
+            else:
+                followups.append("Can you provide a detailed section-by-section breakdown of the document?")
+
+            # Additional contextual question
+            if len(followups) < 4:
+                if risks and len(risks) > 1:
+                    followups.append(f"How does the impact of {risks[0]} compare to {risks[1]}?")
+                else:
+                    followups.append("What additional context or source data is needed to evaluate these findings?")
+
+        # 3. General Conversational / Narrative Domain
         else:
-            t1 = answer_nouns[0] if answer_nouns else "the main points"
-            t2 = answer_nouns[1] if len(answer_nouns) > 1 else "key topics"
+            t1 = answer_nouns[0] if answer_nouns else "these key points"
+            t2 = answer_nouns[1] if len(answer_nouns) > 1 else "related topics"
 
-            followups.append(f"Can you elaborate on {t1} in more detail?")
-            followups.append(f"What are the primary practical applications or key takeaways regarding {t1} and {t2}?")
-            followups.append("Can you provide a step-by-step breakdown or summary for each section?")
-            followups.append("What additional context or background is necessary to fully understand these points?")
+            followups.append(f"Can you elaborate on the significance of {t1} in more detail?")
+            followups.append(f"What are the primary historical or practical implications regarding {t1}?")
+            followups.append(f"What additional background or evidence supports the claims made about {t1}?")
+            followups.append("Can you provide a structured breakdown of the main takeaways?")
 
-        return followups[:5]
+        # Deduplicate with normalization
+        seen_normalized: set[str] = set()
+        unique_followups: list[str] = []
+        for f in followups:
+            norm = RAGService._normalize_question_text(f)
+            if norm not in seen_normalized:
+                seen_normalized.add(norm)
+                unique_followups.append(f)
+
+        return unique_followups[:5]
 
     @staticmethod
-    def split_answer_and_followups(text: str, question: str = "") -> tuple[str, list[str]]:
+    def split_answer_and_followups(text: str, question: str = "", context: str = "") -> tuple[str, list[str]]:
         """Split a raw generation into ``(answer, follow_up_questions)``.
 
         The model is instructed to append ``FOLLOWUP_MARKER`` followed by a JSON
@@ -477,29 +572,29 @@ class RAGService:
                 except Exception:
                     pass
 
-        # De-duplicate while preserving order
-        unique_questions: list[str] = []
-        for q in questions:
-            if q and q not in unique_questions:
-                unique_questions.append(q)
-
         # Filter out generic boilerplate questions
         def is_generic(q: str) -> bool:
             ql = q.lower()
             generic_triggers = [
                 "can i help",
                 "would you like more information",
+                "would you like to know more",
                 "can i perform a web search",
                 "what would you like to analyze next",
+                "what would you like to explore next",
                 "would you like more details",
                 "can i help summarize",
                 "is there anything else",
                 "would you like me to",
+                "do you have another question",
+                "what else would you like to know",
+                "how can i assist you further",
+                "let me know if you have questions",
             ]
             return any(gt in ql for gt in generic_triggers)
 
         # Validation layer: Detect if current query is financial vs non-financial
-        combined = (question or "") + " " + (answer or "")
+        combined = (question or "") + " " + (answer or "") + " " + (context or "")
         combined_lower = combined.lower()
         is_financial_context = any(
             w in combined_lower for w in [
@@ -520,16 +615,24 @@ class RAGService:
             ]
             return any(tw in ql for tw in off_topic_words)
 
-        valid_questions = [
-            q for q in unique_questions
-            if not is_generic(q) and not is_off_topic_leak(q)
-        ]
+        # De-duplicate with normalization and filter
+        seen_normalized: set[str] = set()
+        valid_questions: list[str] = []
+        for q in questions:
+            if not q or is_generic(q) or is_off_topic_leak(q):
+                continue
+            norm = RAGService._normalize_question_text(q)
+            if norm not in seen_normalized:
+                seen_normalized.add(norm)
+                valid_questions.append(q)
 
         # If model omitted follow-up block or generated off-topic/generic questions, fill with topic-matched follow-ups
         if len(valid_questions) < 3:
-            ctx_followups = RAGService.generate_contextual_followups(answer, question=question)
+            ctx_followups = RAGService.generate_contextual_followups(answer, question=question, context=context)
             for f in ctx_followups:
-                if f not in valid_questions and not is_off_topic_leak(f):
+                norm = RAGService._normalize_question_text(f)
+                if norm not in seen_normalized and not is_off_topic_leak(f):
+                    seen_normalized.add(norm)
                     valid_questions.append(f)
                     if len(valid_questions) >= 3:
                         break
@@ -824,6 +927,18 @@ class RAGService:
         ]
         if any(kw in lowered_q for kw in live_keywords):
             return False
+
+        # Document analysis / summary / extraction requests are always satisfied by the document context
+        doc_analysis_keywords = [
+            "analyze", "analyse", "summarize", "summarise", "summary", "overview",
+            "review", "takeaway", "key point", "extract", "explain", "findings",
+            "insights", "main point", "describe"
+        ]
+        if any(kw in lowered_q for kw in doc_analysis_keywords):
+            return True
+
+        if is_explicit_document_request(question):
+            return True
 
         # If document context is present and contains matching query terms, prioritize document (return True)
         query_words = [w for w in re.findall(r"\w+", lowered_q) if len(w) > 3 and w not in {"what", "when", "where", "which", "with", "from", "that", "this", "have", "more", "does", "were", "total", "about"}]
@@ -1974,12 +2089,21 @@ class RAGService:
                     char_count += len(chunk_text)
                 return sources, accumulated_chunks
             else:
+                lower_content = (content or "").lower()
+                is_analysis = any(
+                    kw in lower_content
+                    for kw in [
+                        "analyze", "analyse", "summary", "summarize", "overview",
+                        "review", "findings", "report", "extract", "breakdown"
+                    ]
+                )
+                top_k = 10 if is_analysis else 3
                 _, sources, chunks = self.retrieve_context_with_chunks(
                     db,
                     query=content,
                     user_id=user_id,
                     document_ids=document_ids,
-                    top_k=3,
+                    top_k=top_k,
                     workspace_id=workspace_id,
                 )
                 return sources, chunks

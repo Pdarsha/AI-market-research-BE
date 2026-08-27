@@ -326,20 +326,20 @@ Date Range:
 - Use bold (**bold**) to highlight key configuration options or commands.
 - Cite every statement or code snippet that is grounded in the CONTEXT using [n] markers.
 """
-        elif intent == "Document Analysis":
+        elif intent in ["Document Analysis", "UPLOADED_DOCUMENT"]:
             response_format_rules = """
-- Provide a comprehensive, structured market analysis of the provided CONTEXT. Focus on business context, market implications, competitive positioning, and strategic interpretation.
+- Provide a comprehensive, structured analysis of the provided CONTEXT. Focus on business context, market implications, competitive positioning, and strategic interpretation.
 - Structure your response using clear headers (##, ###) and bold key findings.
+- Ensure every analysis section (such as ## Executive Summary, ## Key Findings, ## Analysis, ## Risks) contains appropriate source citations [n] throughout the content, referencing the supporting document sections and pages.
 - Use Markdown tables when comparing multi-dimensional values or structured data from the document.
 - Include sections only when applicable and when they add value:
-  - Executive Summary (brief overview)
-  - Key Findings (bullet points with bold lead-ins)
-  - Analysis (in-depth breakdown)
-  - Tables (comparative metrics or data points)
-  - Recommendations
-  - Risks
+  - Executive Summary (brief overview grounded with citations)
+  - Key Findings (bullet points with bold lead-ins and section/page citations)
+  - Analysis (in-depth breakdown with citations)
+  - Risks (identified limitations, uncertainties, or risks with citations)
+  - Recommendations (actionable next steps with citations)
 - Do NOT force unnecessary sections or include empty headings.
-- Cite every statement that is grounded in the CONTEXT using [n] markers.
+- Cite every statement, figure, and claim that is grounded in the CONTEXT using [n] markers.
 """
         elif intent == "Research / Deep Analysis":
             response_format_rules = """

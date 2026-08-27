@@ -61,7 +61,13 @@ class CitationData:
         self.title = raw.get("title") or raw.get("document_name") or raw.get("file_name") or self.url or "Untitled source"
         self.source_title = self.title
         self.reference_index = citation_id
-        self.description = raw.get("description") or raw.get("excerpt") or raw.get("snippet") or raw.get("highlight_text")
+        self.description = (
+            raw.get("description")
+            or raw.get("excerpt")
+            or raw.get("snippet")
+            or raw.get("highlight_text")
+            or raw.get("content")
+        )
         self.document_id = raw.get("document_id")
         self.chunk_id = (
             raw.get("chunk_id") or raw.get("id")
@@ -71,7 +77,12 @@ class CitationData:
         self.document_url = raw.get("document_url") or raw.get("document_path") or (self.url if self.type == "document" else None)
         self.page = raw.get("page") if raw.get("page") is not None else raw.get("page_number")
         self.page_number = self.page
-        self.excerpt = raw.get("excerpt") or raw.get("snippet") or raw.get("highlight_text")
+        self.excerpt = (
+            raw.get("excerpt")
+            or raw.get("snippet")
+            or raw.get("highlight_text")
+            or raw.get("content")
+        )
         self.section = raw.get("section") or raw.get("section_title")
         self.published_date = raw.get("published_date") or raw.get("date") or raw.get("publishedAt") or raw.get("filing_date") or raw.get("created_at")
         self.date = self.published_date
@@ -174,6 +185,7 @@ class CitationData:
             "start_offset": self.start_offset,
             "end_offset": self.end_offset,
             "document_name": self.title if self.type == "document" else None,
+            "file_name": self.title if self.type == "document" else None,
             "highlight_text": self.excerpt,
             "section_title": self.section,
         }
