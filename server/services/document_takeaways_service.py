@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import openai
 
@@ -200,21 +200,26 @@ class DocumentTakeawaysService:
             if doc_id not in valid_doc_ids:
                 raise ValueError(f"Document {doc_id} not found in workspace")
 
-        # Prevent duplicate grid creation: reuse existing workspace grid if present
-        existing_grid = crud.document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
-        if existing_grid:
-            grid_doc_ids = {str(r.document_id) for r in existing_grid.rows}
-            if set(unique_doc_ids).issubset(grid_doc_ids) or set(grid_doc_ids) == set(unique_doc_ids):
-                logger.info(f"Reusing existing grid {existing_grid.id} for workspace {workspace_id}")
-                return existing_grid
-            else:
-                missing_doc_ids = [d for d in unique_doc_ids if d not in grid_doc_ids]
-                if missing_doc_ids:
-                    return self.add_documents_to_grid(
-                        db, background_tasks, existing_grid.id, missing_doc_ids, user_id
-                    )
-                return existing_grid
+        # Workspace Analysis creates a NEW grid on every request: no
+        # get-or-create, no "latest grid" lookup. Each analysis is its own
+        # snapshot of the workspace's current document set, and previously
+        # created grids are never modified.
+        return self._create_new_grid(
+            db, background_tasks, workspace, name, unique_doc_ids, user_id
+        )
 
+    def _create_new_grid(
+        self,
+        db: Session,
+        background_tasks: BackgroundTasks,
+        workspace,
+        name: Optional[str],
+        unique_doc_ids: List[str],
+        user_id: str,
+    ) -> DocumentTakeawayGrid:
+        workspace_id = str(workspace.id)
+        # Grid title is based on the workspace name unless the caller named it.
+        name = (name or "").strip() or (getattr(workspace, "name", None) or "").strip() or "Document Takeaways"
         grid = crud.document_takeaways.create_grid(db, workspace_id, name, user_id)
         logger.info(f"Grid created: {grid.id} for workspace: {workspace_id}")
 

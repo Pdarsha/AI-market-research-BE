@@ -98,7 +98,8 @@ class DocumentTakeawayGrid(BaseModel):
 
 
 class CreateDocumentTakeawayGridRequest(BaseModel):
-    name: str = Field("Document Takeaways")
+    # Defaults to the workspace name when omitted (see DocumentTakeawaysService.create_grid)
+    name: Optional[str] = Field(None)
     document_ids: List[str] = Field(..., min_items=1)
 
 
