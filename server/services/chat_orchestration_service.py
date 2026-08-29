@@ -462,6 +462,7 @@ class ChatOrchestrationService:
         requires_web, mcp_selected = False, False
         selected_provider = "None"
         routing_reason = "Intent matches provider."
+        intent = precomputed_intent
 
         is_analyze_action = getattr(request, "action", None) == "analyze"
         if not is_workspace_analysis:
@@ -822,6 +823,7 @@ class ChatOrchestrationService:
             )
             mode_used = "auto"
             selected_model = settings.LLM_MODEL
+            final_research_context = None
 
             if getattr(request, "mode", None) == "think_longer":
                 today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
@@ -902,7 +904,7 @@ class ChatOrchestrationService:
                     
                 ai_response, follow_up_questions = rag.split_answer_and_followups(
                     raw_response_str,
-                    question=request.content,
+                    question=(optimized_prompt if is_workspace_analysis else request.content),
                     context=(document_context or final_research_context or web_context or ""),
                 )
 

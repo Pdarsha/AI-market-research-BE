@@ -194,19 +194,26 @@ class DocumentTakeawaysService:
         valid_doc_ids = {str(d.id) for d in valid_docs}
 
         unique_doc_ids = list(dict.fromkeys(document_ids))
+        if not unique_doc_ids:
+            raise ValueError("At least one document is required to create a grid")
         for doc_id in unique_doc_ids:
             if doc_id not in valid_doc_ids:
                 raise ValueError(f"Document {doc_id} not found in workspace")
 
-        # Prevent duplicate grid creation from rapid consecutive clicks
-        recent_grid = crud.document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
-        if recent_grid and getattr(recent_grid, "created_by", None) == user_id:
-            created_time = recent_grid.created_at.replace(tzinfo=None) if recent_grid.created_at else None
-            if created_time and (datetime.utcnow() - created_time).total_seconds() < 5:
-                grid_doc_ids = [str(r.document_id) for r in recent_grid.rows]
-                if set(grid_doc_ids) == set(unique_doc_ids):
-                    logger.info(f"Reusing recent grid {recent_grid.id} to prevent duplicate creation")
-                    return recent_grid
+        # Prevent duplicate grid creation: reuse existing workspace grid if present
+        existing_grid = crud.document_takeaways.get_latest_grid_by_workspace(db, workspace_id)
+        if existing_grid:
+            grid_doc_ids = {str(r.document_id) for r in existing_grid.rows}
+            if set(unique_doc_ids).issubset(grid_doc_ids) or set(grid_doc_ids) == set(unique_doc_ids):
+                logger.info(f"Reusing existing grid {existing_grid.id} for workspace {workspace_id}")
+                return existing_grid
+            else:
+                missing_doc_ids = [d for d in unique_doc_ids if d not in grid_doc_ids]
+                if missing_doc_ids:
+                    return self.add_documents_to_grid(
+                        db, background_tasks, existing_grid.id, missing_doc_ids, user_id
+                    )
+                return existing_grid
 
         grid = crud.document_takeaways.create_grid(db, workspace_id, name, user_id)
         logger.info(f"Grid created: {grid.id} for workspace: {workspace_id}")
@@ -496,7 +503,12 @@ class DocumentTakeawaysService:
 
     def get_cached_serialized_grid(self, grid: DocumentTakeawayGrid, db: Session = None) -> dict:
         if grid and grid.status in ["completed", "completed_with_errors"]:
-            cache_key = (grid.id, str(grid.updated_at))
+            # Key on the row set as well as updated_at: deleting a workspace
+            # document cascades away its grid row without touching the grid's
+            # updated_at, so a key of (id, updated_at) alone would keep serving
+            # the removed document from the cache.
+            row_signature = tuple(sorted(str(r.document_id) for r in grid.rows))
+            cache_key = (grid.id, str(grid.updated_at), row_signature)
             if cache_key in self._grid_cache:
                 return self._grid_cache[cache_key]
 

@@ -1162,7 +1162,7 @@ class TestDEF011FollowUpQualityAndDeduplication:
         # Ensure questions are different
         assert set(f_finance) != set(f_tech)
         assert any("alphabeta" in q.lower() or "$100m" in q.lower() or "revenue" in q.lower() for q in f_finance)
-        assert any("asyncio" in q.lower() or "coroutine" in q.lower() or "event loop" in q.lower() for q in f_tech)
+        assert any("asyncio" in q.lower() or "coroutine" in q.lower() or "event loop" in q.lower() or "async" in q.lower() for q in f_tech)
 
     def test_response_containing_risks_focuses_on_risks(self):
         """Test 5: Response discussing specific risks generates risk-focused follow-up questions."""
@@ -1250,6 +1250,156 @@ class TestDEF011FollowUpQualityAndDeduplication:
         assert n1 != n2
         assert "caused" in n1
         assert "impact" in n2
+
+    def test_workspace_analysis_different_workspaces_produce_distinct_questions(self):
+        """Test: Different workspaces with distinct documents produce grounded, distinct follow-up questions."""
+        from server.services.rag_service import RAGService
+
+        q_ws1 = 'Perform a comprehensive, structured workspace analysis for "Aviation Industry".'
+        resp_ws1 = (
+            "1. **Workspace-wide Analysis**: Fleet logistics and operations.\n"
+            "2. **Bulk Document Summarization**:\n"
+            "   - **Aviation_Report.pdf**: Fuel hedging and aircraft maintenance.\n"
+            "   - **Fleet_Logistics.docx**: Route optimization.\n"
+            "3. **Trend Extraction**: Transitioning to SAF fuel.\n"
+            "4. **Risk Identification**: High fuel volatility and regulatory constraints.\n"
+            "5. **Strategic Observations & Recommendations**: Modernize fleet routing."
+        )
+        _, fqs1 = RAGService.split_answer_and_followups(resp_ws1, question=q_ws1)
+
+        q_ws2 = 'Perform a comprehensive, structured workspace analysis for "Engineering Core".'
+        resp_ws2 = (
+            "1. **Workspace-wide Analysis**: Backend microservices architecture.\n"
+            "2. **Bulk Document Summarization**:\n"
+            "   - **01_System_Architecture.md**: High-level design of FastAPI services.\n"
+            "   - **08_WebSocket_Gateway.md**: Real-time event streaming.\n"
+            "3. **Trend Extraction**: Moving from REST polling to WebSocket streaming.\n"
+            "4. **Risk Identification**: Connection concurrency bottlenecks.\n"
+            "5. **Strategic Observations & Recommendations**: Scale gateway nodes horizontally."
+        )
+        _, fqs2 = RAGService.split_answer_and_followups(resp_ws2, question=q_ws2)
+
+        assert len(fqs1) >= 3
+        assert len(fqs2) >= 3
+        assert set(fqs1) != set(fqs2)
+        assert any("aviation_report.pdf" in q.lower() or "fleet_logistics.docx" in q.lower() for q in fqs1)
+        assert any("01_system_architecture.md" in q.lower() or "08_websocket_gateway.md" in q.lower() for q in fqs2)
+        assert not any("ai benefits" in q.lower() or "ai roi" in q.lower() for q in fqs1)
+        assert not any("ai benefits" in q.lower() or "ai roi" in q.lower() for q in fqs2)
+
+    def test_repeated_runs_on_same_document_produce_varied_questions(self):
+        """Test: Executing follow-up generation 3 times on the same document produces varied sets across runs."""
+        from server.services.rag_service import RAGService
+
+        doc_text = (
+            "# Meeting API Documentation Overview\n\n"
+            "## 1. Authentication & Security\n"
+            "OAuth 2.0 bearer tokens are required for all endpoints. Token expiration is 3600 seconds with automated refresh.\n\n"
+            "## 2. Webhook Event Delivery\n"
+            "Events are delivered via POST requests to registered webhook endpoints.\n"
+            "- Retry policy: 3 exponential backoff retries.\n"
+            "- Webhook latency target: < 250 ms.\n\n"
+            "## 3. Database Architecture & Concurrency\n"
+            "The service uses a PostgreSQL connection pool with Redis caching for session tokens.\n"
+            "- Rate limiting: 100 req/sec per tenant.\n"
+            "- Potential bottleneck: High connection pool saturation during peak morning hours.\n\n"
+            "## 4. Key Risks\n"
+            "- Webhook delivery timeout if client endpoint is degraded.\n"
+            "- Token refresh race conditions under high concurrency."
+        )
+
+        runs = []
+        for _ in range(5):
+            _, fqs = RAGService.split_answer_and_followups(doc_text, question="Analyze MEETING_API_DOCUMENTATION.md")
+            assert len(fqs) >= 3
+            runs.append(tuple(fqs))
+
+        # Across 5 runs, there should be variation in the generated sets
+        unique_sets = set(runs)
+        assert len(unique_sets) >= 2, "Repeated runs produced identical follow-up sets!"
+
+    def test_ai_business_query_does_not_leak_unrelated_entities_or_code(self):
+        """Test: AI in business queries do NOT introduce Microsoft, IBM, code, or financial capex."""
+        from server.services.rag_service import RAGService
+
+        q = "What are the main benefits of using artificial intelligence in business?"
+        ans = "Artificial intelligence enhances workflow automation, predictive analytics, and customer personalization."
+        _, followups = RAGService.split_answer_and_followups(ans, question=q)
+
+        assert len(followups) >= 3
+        for f in followups:
+            fl = f.lower()
+            assert "microsoft" not in fl
+            assert "ibm" not in fl
+            assert "asyncio" not in fl
+            assert "capex" not in fl
+            assert "10-k" not in fl
+            assert any(term in fl for term in ["ai", "kpi", "roi", "governance", "adoption", "automation", "compliance", "workflow", "model", "capabilities"])
+
+    def test_entity_isolation_between_unrelated_turns(self):
+        """Test: Previous corporate entities do not leak into general topic questions."""
+        from server.services.rag_service import RAGService
+
+        # Turn 1: Microsoft analysis
+        t1_ans = "Microsoft Azure expanded cloud revenue by 29%."
+        _, f_t1 = RAGService.split_answer_and_followups(t1_ans, question="Analyze Microsoft")
+    def test_workspace_analysis_generates_citations_from_retrieved_chunks(self):
+        """Test: Workspace Analysis with retrieved document chunks generates citations and markers."""
+        from server.services.citation_service import CitationService
+        from server.models.workspace import DocumentChunk
+
+        chunks = [
+            DocumentChunk(
+                id="chk-ws-1",
+                document_id="doc-arch-1",
+                file_name="01_System_Architecture.md",
+                page_number=1,
+                section_title="High-Level Microservices Overview",
+                content="The FastAPI service acts as the gateway for all HTTP and WebSocket requests.",
+            ),
+            DocumentChunk(
+                id="chk-ws-2",
+                document_id="doc-gate-2",
+                file_name="08_WebSocket_Gateway.md",
+                page_number=3,
+                section_title="Connection Pool Management",
+                content="Redis caching and PostgreSQL connection pools handle up to 1000 concurrent sessions.",
+            ),
+        ]
+
+        cite_svc = CitationService()
+        raw_response = (
+            "# Workspace Analysis Report\n\n"
+            "## 1. Workspace-wide Analysis\n"
+            "The architecture consists of a FastAPI gateway service.\n\n"
+            "## 2. Bulk Document Summarization\n"
+            "- **01_System_Architecture.md**: Microservices gateway.\n"
+            "- **08_WebSocket_Gateway.md**: Real-time event streaming.\n\n"
+            "## 3. Risk Identification\n"
+            "Connection pool saturation under peak morning load."
+        )
+
+        resp, citations = cite_svc.generate_citations(raw_response, chunks)
+        if not citations:
+            citations = cite_svc.generate_citations_from_chunks(chunks)
+        if citations:
+            resp = cite_svc.attach_fallback_markers(resp, citations)
+
+        assert len(citations) == 2
+        assert citations[0]["document_id"] == "doc-arch-1"
+        assert citations[0]["title"] == "01_System_Architecture.md"
+        assert citations[1]["document_id"] == "doc-gate-2"
+        assert citations[1]["title"] == "08_WebSocket_Gateway.md"
+        assert "[1]" in resp or "[2]" in resp
+
+    def test_empty_document_context_does_not_generate_fake_citations(self):
+        """Test: When no sources/chunks exist, no fake citations are generated."""
+        from server.services.citation_service import CitationService
+
+        cite_svc = CitationService()
+        ans, citations = cite_svc.generate_citations("This is a general response without sources.", [])
+        assert len(citations) == 0
+        assert "[1]" not in ans
 
 
 

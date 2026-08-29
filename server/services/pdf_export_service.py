@@ -167,25 +167,49 @@ def _extract_citation_url(cit: dict) -> str | None:
     return _normalize_url(raw_url)
 
 
+_LIGATURE_MAP = {
+    "\ufb00": "ff",
+    "\ufb01": "fi",
+    "\ufb02": "fl",
+    "\ufb03": "ffi",
+    "\ufb04": "ffl",
+    "\ufb05": "ft",
+    "\ufb06": "st",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2013": "-",
+    "\u2014": "--",
+}
+
+
 _CSS = """
-body { font-family: 'Helvetica', sans-serif; font-size: 10pt; line-height: 1.55; color: #2d3748; }
+body { font-family: 'Helvetica', 'Arial', sans-serif; font-size: 10pt; line-height: 1.55; color: #2d3748; }
 h1 { font-size: 18pt; font-weight: bold; color: #1a202c; margin-top: 14pt; margin-bottom: 8pt; border-bottom: 1px solid #e2e8f0; padding-bottom: 4pt; }
 h2 { font-size: 14pt; font-weight: bold; color: #2d3748; margin-top: 14pt; margin-bottom: 6pt; }
 h3 { font-size: 12pt; font-weight: bold; color: #4a5568; margin-top: 10pt; margin-bottom: 4pt; }
 h4 { font-size: 11pt; font-weight: bold; color: #4a5568; margin-top: 8pt; margin-bottom: 3pt; }
+h5, h6 { font-size: 10pt; font-weight: bold; color: #4a5568; margin-top: 6pt; margin-bottom: 3pt; }
 p { margin-bottom: 8pt; }
+strong, b { font-weight: bold; color: #1a202c; }
+em, i { font-style: italic; }
 ul, ol { margin-bottom: 8pt; padding-left: 18pt; }
 li { margin-bottom: 3pt; }
 table { width: 100%; border-collapse: collapse; margin-top: 8pt; margin-bottom: 12pt; }
-th, td { border: 1px solid #cbd5e0; padding: 5pt 7pt; text-align: left; font-size: 9pt; }
+tr { page-break-inside: avoid; }
+th, td { border: 1px solid #cbd5e0; padding: 5pt 7pt; text-align: left; font-size: 9pt; vertical-align: top; }
 th { background-color: #edf2f7; font-weight: bold; color: #2d3748; }
 code { font-family: monospace; background-color: #edf2f7; padding: 2pt 4pt; border-radius: 3pt; font-size: 8.5pt; color: #805ad5; }
 pre { background-color: #f7fafc; border: 1px solid #e2e8f0; padding: 8pt; border-radius: 4pt; overflow-x: auto; margin-bottom: 10pt; }
 pre code { padding: 0; background-color: transparent; color: #2d3748; }
 blockquote { border-left: 3px solid #3182ce; margin-left: 0; padding-left: 10pt; color: #4a5568; font-style: italic; margin-bottom: 8pt; }
 .meta { color: #718096; font-size: 8.5pt; margin-bottom: 16pt; }
-.user-query { font-size: 11.5pt; font-weight: bold; color: #2b6cb0; margin-top: 16pt; margin-bottom: 8pt; padding: 6pt 10pt; background-color: #ebf8ff; border-left: 3px solid #3182ce; border-radius: 2pt; }
-.user-query p { margin: 0; color: #2b6cb0; }
+.user-query { font-size: 11.5pt; font-weight: bold; color: #2b6cb0; margin-top: 16pt; margin-bottom: 8pt; background-color: #ebf8ff; border-left: 3px solid #3182ce; border-radius: 2pt; }
+/* Padding lives on the inner <p>, not on the tinted box: MuPDF Story repaints a
+   padded+background block as an empty padding-height strip at the top of every
+   following page. Same visual result, no repeated band on page 2+. */
+.user-query p { margin: 0; padding: 6pt 10pt; color: #2b6cb0; }
 .assistant-response { margin-bottom: 14pt; }
 .references-section { margin-top: 24pt; border-top: 1px solid #e2e8f0; padding-top: 12pt; }
 .ref-title { font-size: 13pt; font-weight: bold; margin-bottom: 8pt; color: #2d3748; }
@@ -197,6 +221,7 @@ a { color: #3182ce; text-decoration: none; }
 def _preprocess_markdown(text: str) -> str:
     """Preprocess LLM markdown text to ensure headings, tables, and blocks render cleanly into HTML.
 
+    - Normalizes Unicode ligatures and special glyphs to prevent missing glyphs/corrupted words.
     - Normalizes CRLF and CR line endings to LF.
     - Unescapes literal '\\n' sequences when raw string escapes are present.
     - Strips internal system markers like '<<<FOLLOW_UP_QUESTIONS>>>'.
@@ -208,6 +233,9 @@ def _preprocess_markdown(text: str) -> str:
     """
     if not text:
         return ""
+    # Normalize Unicode ligatures to ASCII sequences (e.g. \ufb01 -> fi)
+    for lig, rep in _LIGATURE_MAP.items():
+        text = text.replace(lig, rep)
     # Normalize line endings
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # If text has literal escaped newlines and no actual newlines, unescape them
@@ -527,16 +555,14 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                         page.delete_link(link)
 
         # ── Pass 2: Bounding-box annotation injection for citation markers ────
-        already_annotated: set[tuple[int, int, int, int]] = set()
+        already_annotated: set[tuple[int, int, int, int, int]] = set()
 
         for marker_text, url in annotation_plan:
-            placed = False
             for page_num in range(total_pages):
-                if placed:
-                    break
                 page = doc[page_num]
                 for rect in page.search_for(marker_text):
                     key = (
+                        page_num,
                         round(rect.x0),
                         round(rect.y0),
                         round(rect.x1),
@@ -558,8 +584,6 @@ def conversation_to_pdf(title: str, messages: list[dict]) -> bytes:
                                 pass
                     page.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": url})
                     already_annotated.add(key)
-                    placed = True
-                    break
 
         # ── Audit metadata ────────────────────────────────────────────────────
         total_links = uri_links = 0

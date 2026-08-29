@@ -17,7 +17,7 @@ import openai
 import re
 import json
 import logging
-import re
+import random
 from functools import lru_cache
 from typing import Any
 
@@ -361,11 +361,12 @@ class RAGService:
     def generate_contextual_followups(answer: str, question: str = "", context: str = "") -> list[str]:
         """Generate high-quality, contextual, source-derived follow-up questions.
 
-        Extracts entities, company names, financial metrics, specific risks, and core topics
-        from the AI answer, user question, and retrieved document/source context to generate specific,
-        actionable, and non-generic follow-up questions.
+        Extracts entities, company names, financial metrics, specific risks, technical concepts,
+        headings, and bold topics from the AI answer, user question, and retrieved document/source
+        context across 7 analytical dimensions (implementation, risk, dependency, evidence, comparison,
+        roadmap, deep dive) to provide varied, non-repetitive follow-ups.
         """
-        combined = (answer or "") + " " + (question or "") + " " + (context or "")
+        combined = (answer or "") + "\n" + (question or "") + "\n" + (context or "")
         combined_lower = combined.lower()
         if not combined.strip():
             return [
@@ -374,154 +375,308 @@ class RAGService:
                 "What practical exercises or applications should we focus on next?"
             ]
 
-        # Extract Metrics / Currencies / Percentages / Quarters
-        metrics = list(dict.fromkeys(re.findall(
-            r"(\$\d+(?:\.\d+)?\s*(?:[BMK]|billion|million|trillion)?|\b\d+(?:\.\d+)?%\b|\bQ[1-4]\s*\d{2,4}\b|\bFY\s*\d{2,4}\b)",
+        # 1. Extract Document Mentions
+        doc_mentions = list(dict.fromkeys(re.findall(
+            r"\b([A-Za-z0-9_().-]+\.(?:pdf|docx|txt|md|xlsx|csv|png|jpg))\b",
             combined,
             re.IGNORECASE
         )))
 
-        # Extract specific business / operational / financial risks
-        risks = list(dict.fromkeys(re.findall(
-            r"\b((?:supply chain|market|credit|liquidity|inflation|currency|regulatory|cybersecurity|operational|geopolitical|compliance|governance)\s*(?:risk|risks|volatility|headwinds|pressures|constraints|deficiencies|exposure|issues|challenges)?)\b",
+        # 2. Extract Headings
+        headings: list[str] = []
+        for line in answer.splitlines():
+            line = line.strip()
+            m = re.match(r"^#{1,4}\s+(.+)$", line)
+            if m:
+                h = re.sub(r"[\*#_`]", "", m.group(1)).strip()
+                h = re.sub(r"^\d+[\.\)]\s*", "", h).strip()
+                h = re.sub(r":\s*$", "", h).strip()
+                if 3 < len(h) < 60 and h.lower() not in {
+                    "summary", "overview", "introduction", "conclusion", "key takeaways",
+                    "recommendations", "findings", "observations", "ai-generated observations",
+                    "strategic observations & recommendations", "table of contents", "appendix"
+                }:
+                    if not any(h.lower() == existing.lower() for existing in headings):
+                        headings.append(h)
+
+        # 3. Extract Bold Topics
+        bold_topics: list[str] = []
+        for b in re.findall(r"\*\*([A-Za-z0-9\s,._/:()&-]{3,50})\*\*", answer):
+            b_clean = re.sub(r"[\*#_`]", "", b).strip()
+            b_clean = re.sub(r"^\d+[\.\)]\s*", "", b_clean).strip()
+            b_clean = re.sub(r":\s*$", "", b_clean).strip()
+            if 3 < len(b_clean) < 50 and b_clean.lower() not in {
+                "summary", "conclusion", "note", "notes", "high", "medium", "low", "warning",
+                "important", "notice", "workspace-wide analysis", "bulk document summarization",
+                "trend extraction", "risk identification", "topic clustering", "strategic observations & recommendations"
+            }:
+                if not any(b_clean.lower() == existing.lower() for existing in bold_topics):
+                    bold_topics.append(b_clean)
+
+        # 4. Extract Metrics
+        raw_metrics = list(dict.fromkeys(re.findall(
+            r"(\$\d+(?:\.\d+)?\s*(?:[BMK]|billion|million|trillion)?|\b\d+(?:\.\d+)?%\b|\b\d+\s*(?:ms|sec|seconds|req/sec|minutes|hours|GB|MB)\b|\bQ[1-4]\s*\d{2,4}\b|\bFY\s*\d{2,4}\b)",
             combined,
             re.IGNORECASE
         )))
-        risks = [r.strip() for r in risks if len(r.strip()) > 3]
+        metrics = sorted(raw_metrics, key=lambda m: (0 if ("$" in m or "%" in m or "sec" in m or "ms" in m) else 1))
 
-        # Extract programming / tech concepts
-        tech_concepts = list(dict.fromkeys(re.findall(
-            r"\b(asyncio|coroutines|async/await|event loop|multithreading|multiprocessing|recursion|concurrency|pointers|memory management|OOP|polymorphism|inheritance|templates|lambdas|decorators|generators|compiler|garbage collection|REST API|GraphQL|Docker|Kubernetes|PostgreSQL|Redis)\b",
+        # 5. Extract Risks / Bottlenecks
+        raw_risks: list[str] = []
+        for r in re.findall(
+            r"\b((?:supply chain|credit|liquidity|inflation|currency|regulatory|cybersecurity|operational|geopolitical|compliance|governance|connection pool saturation|delivery timeout|race condition|timeout|concurrency|saturation|bottleneck|downtime|latency spikes?)\s*(?:risk|risks|volatility|vulnerabilities|constraints|pressures|exposure|bottleneck|saturation|timeout)?)\b",
             combined,
             re.IGNORECASE
-        )))
+        ):
+            r_clean = re.sub(r"[\*#_`]", "", r).strip()
+            if len(r_clean) > 3 and not any(r_clean.lower() == existing.lower() for existing in raw_risks):
+                raw_risks.append(r_clean)
 
+        risks: list[str] = []
+        for r in raw_risks:
+            rc = r.strip()
+            if rc.lower() in {"operational", "regulatory", "cybersecurity", "geopolitical", "compliance", "credit", "liquidity", "inflation", "currency"}:
+                rc = f"{rc} risks"
+            if rc and not any(rc.lower() == existing.lower() for existing in risks):
+                risks.append(rc)
+
+        # 6. Extract Tech / Code / API Concepts
+        tech_concepts: list[str] = []
+        for tc in re.findall(
+            r"\b(asyncio|coroutines|async/await|event loop|multithreading|multiprocessing|recursion|concurrency|pointers|memory management|OOP|polymorphism|inheritance|templates|lambdas|decorators|generators|compiler|garbage collection|REST API|GraphQL|Docker|Kubernetes|PostgreSQL|Redis|OAuth\s*2\.0|OAuth|JWT|Webhook|Webhooks|rate limiting|caching|event streaming|connection pool|session token|microservices?|gRPC|Kafka|RabbitMQ)\b",
+            combined,
+            re.IGNORECASE
+        ):
+            tc_clean = tc.strip()
+            if not any(tc_clean.lower() == existing.lower() for existing in tech_concepts):
+                tech_concepts.append(tc_clean)
+
+        # 7. Extract Companies / Proper Named Entities
         ignored_words = {
             "The", "This", "That", "These", "Those", "There", "Here", "With", "From", "About",
-            "What", "When", "Where", "Which", "Your", "Have", "Been", "Will", "Would", "Could",
-            "Should", "Each", "Some", "Many", "Main", "Points", "Topic", "Topics", "Section",
+            "What", "When", "Where", "Which", "Who", "How", "Why", "Can", "Does", "Do", "Did",
+            "Is", "Are", "Was", "Were", "Has", "Have", "Had", "Could", "Would", "Should",
+            "May", "Might", "Must", "Your", "Been", "Will",
+            "Each", "Some", "Many", "Main", "Points", "Topic", "Topics", "Section",
             "Chapter", "Summary", "Overview", "Introduction", "Conclusion", "Document",
             "Executive", "Briefing", "Financial", "Report", "Analysis", "Findings", "Results",
             "Performance", "Table", "Figure", "Source", "Sources", "Appendix", "Risks",
             "Metrics", "Highlights", "Key", "Total", "Quarter", "Year", "Fiscal", "Operating",
             "Credit", "Market", "Liquidity", "Strategic", "Capital", "Primary", "Secondary",
             "General", "Corporate", "Standard", "Note", "Notes", "Item", "Items", "Tell",
-            "Analyze", "Summarize", "Page"
+            "Analyze", "Summarize", "Page", "Revenue", "Income", "Loss", "Cash", "Debt",
+            "Low", "High", "Fast", "Slow", "Real", "Open", "Close", "Data", "Core", "Cloud",
+            "Enterprise", "Network", "System", "Service", "Application", "Platform", "Model",
+            "Level", "User", "Method", "Type", "Case", "Time", "Rate", "Base", "Test", "Python",
+            "Supply", "Inflationary", "Comparing", "EBITDA", "Ebitda", "Compare", "Comparison",
+            "Meeting", "Authentication", "Security", "Delivery", "Database", "Architecture",
+            "Concurrency", "Overview", "Workspace", "Analysis", "Backend", "Frontend",
+            "Microservices", "Gateway", "FastAPI", "WebSocket", "WebSockets", "API", "SDK", "UI",
+            "Artificial", "Intelligence", "Machine", "Learning"
         }
+        companies: list[str] = []
+        for line in combined.splitlines():
+            for ec in re.findall(r"\b[A-Z][a-zA-Z0-9+#]{1,}(?:[ -][A-Z][a-zA-Z0-9+#]{1,})*\b", line):
+                ec_clean = ec.strip()
+                if not ec_clean or re.match(r"^(?:FY\s*\d+|Q[1-4]\b)", ec_clean, re.I):
+                    continue
+                first_w = ec_clean.split()[0]
+                if first_w not in ignored_words and len(ec_clean) > 2:
+                    if not any(ec_clean.lower() == c.lower() for c in companies):
+                        companies.append(ec_clean)
 
-        # Dynamically extract company / entity names from text and context
-        extracted_entities = list(dict.fromkeys(re.findall(
-            r"\b[A-Z][a-zA-Z0-9+#]{2,}(?:\s+[A-Z][a-zA-Z0-9+#]{2,})*(?:\s+(?:Technologies|Corporation|Corp|Inc|LLC|Ltd|Group|Holdings|Capital|Bank|Services|Solutions|Systems|Therapeutics|Energy|Pharma|Media|Airlines|Networks|Software))?\b",
-            combined
-        )))
-        companies = [e.strip() for e in extracted_entities if e.strip() and e.split()[0] not in ignored_words]
+        # Dimensional pools
+        dim_documents: list[str] = []
+        dim_implementation: list[str] = []
+        dim_risk: list[str] = []
+        dim_dependency: list[str] = []
+        dim_evidence: list[str] = []
+        dim_comparison: list[str] = []
+        dim_roadmap: list[str] = []
+        dim_deep_dive: list[str] = []
 
-        answer_nouns = [n for n in re.findall(r"\b[A-Z][a-zA-Z0-9+#]{2,}\b", answer) if n not in ignored_words and n not in companies]
-        answer_nouns = list(dict.fromkeys(answer_nouns))
+        # Populate DIM_DOCUMENTS
+        if doc_mentions:
+            for d in doc_mentions:
+                dim_documents.append(f"What are the most critical findings and risk factors outlined in {d}?")
+                dim_documents.append(f"How do the requirements and findings in {d} impact the broader implementation plan?")
+                dim_documents.append(f"What specific operational or technical gaps are identified in {d}?")
+                dim_documents.append(f"What additional documentation or source data would provide deeper visibility into {d}?")
 
-        is_programming = bool(tech_concepts) or any(
-            w in combined_lower for w in [
-                "c++", "cpp", "python", "java", "javascript", "code", "coding",
-                "function", "class", "object", "variable", "pointer", "compiler",
-                "syntax", "algorithm", "struct", "oop", "stream", "operator",
-                "interface", "method", "framework", "database", "sql"
-            ]
-        )
+        # Populate DIM_IMPLEMENTATION
+        for tc in tech_concepts:
+            dim_implementation.append(f"How should {tc} be configured and integrated to ensure high reliability in production?")
+            dim_implementation.append(f"What are the recommended best practices and error-handling mechanisms when implementing {tc}?")
+            dim_implementation.append(f"What are the primary performance trade-offs and edge cases to consider when working with {tc}?")
+            dim_implementation.append(f"Can you provide a code implementation illustrating the recommended pattern for {tc}?")
+        for h in headings:
+            dim_implementation.append(f"What specific technical requirements are necessary to implement the recommendations in {h}?")
+        for b in bold_topics:
+            dim_implementation.append(f"What are the key integration steps required to operationalize {b}?")
 
-        is_financial = bool(companies) or bool(metrics) or any(
-            w in combined_lower for w in [
-                "revenue", "sales", "margin", "profit", "ebitda", "earnings",
-                "financial", "fiscal", "quarter", "10-k", "10-q", "balance sheet",
-                "capex", "capital expenditure", "stock", "valuation", "sec filing"
-            ]
-        )
+        # Populate DIM_RISK
+        for r in risks:
+            dim_risk.append(f"What specific contingency plans and risk controls should be prioritized to address {r}?")
+            dim_risk.append(f"How does {r} impact system stability or operational performance if left unmitigated?")
+            dim_risk.append(f"What early-warning metrics or alerts should be monitored to detect {r} before it affects users?")
+            dim_risk.append(f"What mitigation strategies are most effective for addressing {r}?")
+        for d in doc_mentions:
+            dim_risk.append(f"Which specific operational or architectural risks identified in {d} carry the highest severity?")
 
-        is_document_analysis = any(
-            w in combined_lower
-            for w in [
-                "analyze", "analyse", "document", "report", "findings", "risk", "risks",
-                "summary", "summarize", "overview", "evaluation", "takeaways", "audit", "filing"
-            ]
-        )
+        # Populate DIM_DEPENDENCY
+        if len(tech_concepts) >= 2:
+            for i in range(len(tech_concepts) - 1):
+                dim_dependency.append(f"What are the critical dependencies and communication protocols between {tech_concepts[i]} and {tech_concepts[i+1]}?")
+        elif tech_concepts and headings:
+            dim_dependency.append(f"How does {tech_concepts[0]} interact with the components described in {headings[0]}?")
+        elif len(headings) >= 2:
+            dim_dependency.append(f"How do the requirements in {headings[0]} depend on or constrain {headings[1]}?")
 
-        followups: list[str] = []
+        # Populate DIM_EVIDENCE
+        for m in metrics:
+            dim_evidence.append(f"What primary drivers, baseline assumptions, or calculations contributed to the {m} figure?")
+            dim_evidence.append(f"What additional benchmark testing or empirical data is needed to validate the {m} metric?")
+            dim_evidence.append(f"How does the {m} result compare to historical benchmarks or industry standards?")
+            dim_evidence.append(f"Which business segments or product lines drove the {m} result?")
+        for b in bold_topics:
+            dim_evidence.append(f"What supporting evidence or test results in the document validate the conclusions regarding {b}?")
 
-        # 1. Programming & Technical Domain
-        if is_programming:
-            c1 = tech_concepts[0] if tech_concepts else (answer_nouns[0] if answer_nouns else "these core concepts")
-            c2 = tech_concepts[1] if len(tech_concepts) > 1 else (answer_nouns[1] if len(answer_nouns) > 1 else "alternative approaches")
-            
-            followups.append(f"Can you provide a working code example demonstrating {c1}?")
-            if len(tech_concepts) > 1:
-                followups.append(f"What are the key performance differences between {c1} and {c2}?")
-            else:
-                followups.append(f"What are the common edge cases or debugging pitfalls when working with {c1}?")
-            followups.append(f"How can {c1} be optimized for production use cases?")
+        # Populate DIM_COMPARISON
+        if len(doc_mentions) >= 2:
+            dim_comparison.append(f"How do the findings and technical requirements in {doc_mentions[0]} compare or align with {doc_mentions[1]}?")
+            dim_comparison.append(f"Where do {doc_mentions[0]} and {doc_mentions[1]} present divergent priorities or conflicting architectural approaches?")
+        if len(companies) >= 2:
+            dim_comparison.append(f"How does {companies[0]}'s performance and strategy compare with {companies[1]} in this area?")
 
-        # 2. Financial & Document Analysis Domain
-        elif is_financial or is_document_analysis:
-            p_entity = companies[0] if companies else (answer_nouns[0] if answer_nouns else "")
+        # Populate DIM_ROADMAP
+        for d in doc_mentions:
+            dim_roadmap.append(f"What should be the phased execution roadmap and milestones for the initiatives outlined in {d}?")
+            dim_roadmap.append(f"How should engineering teams prioritize resource allocation based on the findings in {d}?")
+        for h in headings:
+            dim_roadmap.append(f"What immediate next steps should be prioritized following the assessment in {h}?")
+        for r in risks:
+            dim_roadmap.append(f"What specific mitigation steps or controls should be prioritized to address {r}?")
 
-            # Risk-focused question
-            if risks:
-                r1 = risks[0]
-                if p_entity:
-                    followups.append(f"What specific mitigation strategies does {p_entity} have in place for {r1}?")
-                else:
-                    followups.append(f"What are the primary mitigation measures or contingency plans for {r1}?")
-            elif p_entity:
-                followups.append(f"What are the most significant strategic or financial risks identified for {p_entity}?")
-            else:
-                followups.append("What are the most significant financial or operational risks identified in the document?")
+        # Populate DIM_DEEP_DIVE
+        for b in bold_topics:
+            dim_deep_dive.append(f"Can you provide a deeper technical breakdown of how {b} functions under load?")
+        for h in headings:
+            dim_deep_dive.append(f"What are the primary operational trade-offs and edge cases to consider regarding {h}?")
+        for tc in tech_concepts:
+            dim_deep_dive.append(f"Can you provide a working code example demonstrating {tc}?")
 
-            # Metric-focused question
+        # Fallback domain logic if text had few formal headers
+        is_ai_topic = any(re.search(rf"\b{re.escape(w)}\b", combined_lower) for w in ["artificial intelligence", "machine learning", "generative ai", "ai adoption", "benefits of ai", "ai roi", "ai implementation", "adopting ai", "benefits of using artificial intelligence in business"])
+        if is_ai_topic:
+            dim_implementation.append("What data governance, security, and infrastructure prerequisites are needed before deploying this AI capability?")
+            dim_risk.append("What are the primary risks, compliance challenges, or failure modes when integrating AI into these business workflows?")
+            dim_evidence.append("How can organizations establish verifiable KPIs and ROI benchmarks to measure the success of AI adoption?")
+            dim_roadmap.append("What change management strategies and phased rollout models best facilitate enterprise AI integration?")
+            dim_deep_dive.append("Which specific AI capabilities or use cases typically deliver the fastest measurable business impact?")
+
+        is_remote_work = any(re.search(rf"\b{re.escape(w)}\b", combined_lower) for w in ["remote work", "hybrid work", "work from home", "distributed team"])
+        if is_remote_work:
+            dim_implementation.append("What asynchronous communication protocols and tooling are most effective for distributed team alignment?")
+            dim_risk.append("What strategies help mitigate remote employee isolation, context fragmentation, and burnout?")
+            dim_evidence.append("How can distributed organizations evaluate productivity and team velocity without intrusive monitoring?")
+            dim_roadmap.append("What operational policies best establish sustainable work-life boundaries for remote staff?")
+
+        is_cost_reduction = any(re.search(rf"\b{re.escape(w)}\b", combined_lower) for w in ["cost reduction", "operational cost", "cost cutting", "reduce expenses"])
+        if is_cost_reduction:
+            dim_implementation.append("How can automated workflow optimization and process redesign sustainably reduce operating expenses?")
+            dim_risk.append("What are the primary risks or talent retention trade-offs of aggressive cost cutting across departments?")
+            dim_evidence.append("Which cost-reduction initiatives typically deliver the fastest verified return on investment?")
+            dim_roadmap.append("How should executives sequence and prioritize cost-reduction milestones across business units?")
+
+        if companies:
+            p_ent = companies[0]
             if metrics:
-                m1 = metrics[0]
-                if p_entity:
-                    followups.append(f"What key drivers or business segments contributed most to {p_entity}'s {m1}?")
-                else:
-                    followups.append(f"What primary factors drove the {m1} figure reported in the analysis?")
-            elif p_entity:
-                followups.append(f"Which business segments contributed most to {p_entity}'s revenue and margins?")
-            else:
-                followups.append("How do these findings and metrics affect the overall financial outlook?")
+                dim_evidence.append(f"What key drivers or business segments contributed most to {p_ent}'s {metrics[0]}?")
+            dim_roadmap.append(f"What are the long-term growth prospects and key strategic priorities outlined for {p_ent}?")
+            dim_risk.append(f"What are the most significant strategic or operational risks identified for {p_ent}?")
+            dim_deep_dive.append(f"Which products or revenue streams represent the greatest expansion opportunity for {p_ent}?")
 
-            # Comparative / Forward-looking question
-            if p_entity and len(companies) > 1:
-                s_entity = companies[1]
-                followups.append(f"How does {p_entity}'s performance compare to {s_entity} this period?")
-            elif p_entity:
-                followups.append(f"What are the long-term growth prospects and key guidance outlined for {p_entity}?")
-            else:
-                followups.append("Can you provide a detailed section-by-section breakdown of the document?")
+        # General analytical backfills if no domain or facets matched
+        if not (is_ai_topic or is_remote_work or is_cost_reduction or tech_concepts or doc_mentions or companies or metrics or risks):
+            dim_deep_dive.append("Can you provide more specific real-world examples illustrating these points?")
+            dim_roadmap.append("What are the most critical practical implications and next steps based on this?")
+            dim_risk.append("What potential challenges, blind spots, or alternative perspectives should be considered?")
 
-            # Additional contextual question
-            if len(followups) < 4:
-                if risks and len(risks) > 1:
-                    followups.append(f"How does the impact of {risks[0]} compare to {risks[1]}?")
-                else:
-                    followups.append("What additional context or source data is needed to evaluate these findings?")
+        # Dimensional ordering: prioritize buckets matching active facets
+        selected: list[str] = []
+        seen_norm: set[str] = set()
 
-        # 3. General Conversational / Narrative Domain
-        else:
-            t1 = answer_nouns[0] if answer_nouns else "these key points"
-            t2 = answer_nouns[1] if len(answer_nouns) > 1 else "related topics"
+        def is_valid_question(q: str) -> bool:
+            if not q or len(q) < 15 or not q.endswith("?"):
+                return False
+            words = [w.lower() for w in re.findall(r"\b\w+\b", q)]
+            for i in range(len(words) - 1):
+                if words[i] == words[i + 1] and words[i] not in {"that", "had"}:
+                    return False
+            return True
 
-            followups.append(f"Can you elaborate on the significance of {t1} in more detail?")
-            followups.append(f"What are the primary historical or practical implications regarding {t1}?")
-            followups.append(f"What additional background or evidence supports the claims made about {t1}?")
-            followups.append("Can you provide a structured breakdown of the main takeaways?")
+        def try_pick_from_bucket(b_list: list[str]) -> bool:
+            if not b_list:
+                return False
+            pool = list(b_list)
+            random.shuffle(pool)
+            for q in pool:
+                if is_valid_question(q):
+                    norm = RAGService._normalize_question_text(q)
+                    if norm not in seen_norm:
+                        seen_norm.add(norm)
+                        selected.append(q)
+                        return True
+            return False
 
-        # Deduplicate with normalization
-        seen_normalized: set[str] = set()
-        unique_followups: list[str] = []
-        for f in followups:
-            norm = RAGService._normalize_question_text(f)
-            if norm not in seen_normalized:
-                seen_normalized.add(norm)
-                unique_followups.append(f)
+        if doc_mentions:
+            try_pick_from_bucket(dim_documents)
+        if tech_concepts and len(selected) < 3:
+            tech_pool = [q for b in [dim_implementation, dim_deep_dive, dim_dependency] for q in b if any(tc.lower() in q.lower() for tc in tech_concepts)]
+            if tech_pool:
+                try_pick_from_bucket(tech_pool)
+        if companies and len(selected) < 3:
+            comp_pool = [q for b in [dim_roadmap, dim_evidence, dim_risk, dim_deep_dive] for q in b if companies[0].lower() in q.lower()]
+            if comp_pool:
+                try_pick_from_bucket(comp_pool)
+        if risks and len(selected) < 3:
+            try_pick_from_bucket(dim_risk)
+        if metrics and len(selected) < 3:
+            try_pick_from_bucket(dim_evidence)
 
-        return unique_followups[:5]
+        dim_buckets = [
+            dim_documents,
+            dim_implementation,
+            dim_risk,
+            dim_dependency,
+            dim_evidence,
+            dim_comparison,
+            dim_roadmap,
+            dim_deep_dive,
+        ]
+        active_buckets = [b for b in dim_buckets if b]
+        shuffled_buckets = list(active_buckets)
+        random.shuffle(shuffled_buckets)
+
+        for bucket in shuffled_buckets:
+            if len(selected) >= 3:
+                break
+            try_pick_from_bucket(bucket)
+
+        if len(selected) < 3:
+            all_qs = [q for b in active_buckets for q in b]
+            random.shuffle(all_qs)
+            for q in all_qs:
+                if not is_valid_question(q):
+                    continue
+                norm = RAGService._normalize_question_text(q)
+                if norm not in seen_norm:
+                    seen_norm.add(norm)
+                    selected.append(q)
+                    if len(selected) >= 3:
+                        break
+
+        return selected[:5]
 
     @staticmethod
     def split_answer_and_followups(text: str, question: str = "", context: str = "") -> tuple[str, list[str]]:
@@ -599,7 +754,8 @@ class RAGService:
         is_financial_context = any(
             w in combined_lower for w in [
                 "revenue", "margin", "profit", "ebitda", "earnings", "financial",
-                "fiscal", "quarter", "10-k", "10-q", "capex", "stock price", "sec filing"
+                "fiscal", "quarter", "10-k", "10-q", "capex", "capital expenditure",
+                "stock price", "sec filing", "$"
             ]
         )
 
@@ -634,6 +790,22 @@ class RAGService:
                 if norm not in seen_normalized and not is_off_topic_leak(f):
                     seen_normalized.add(norm)
                     valid_questions.append(f)
+                    if len(valid_questions) >= 3:
+                        break
+
+        # If still < 3, add general contextual backfills
+        if len(valid_questions) < 3:
+            fallbacks = [
+                "What are the most critical practical implications and next steps based on this?",
+                "What potential challenges, blind spots, or alternative perspectives should be considered?",
+                "Can you provide more specific real-world examples illustrating these points?",
+                "What additional documentation or source data would provide deeper visibility into these findings?"
+            ]
+            for fb in fallbacks:
+                norm = RAGService._normalize_question_text(fb)
+                if norm not in seen_normalized:
+                    seen_normalized.add(norm)
+                    valid_questions.append(fb)
                     if len(valid_questions) >= 3:
                         break
 
@@ -2040,7 +2212,9 @@ class RAGService:
             "3. **Trend Extraction**: Identification of recurring patterns, themes, and important trends across both documents and conversations, highlighting key developments.\n"
             "4. **Risk Identification**: Detection of potential risks, issues, inconsistencies, or areas requiring attention/further due diligence, using bullet points with bold risk severity levels.\n"
             "5. **Topic Clustering**: Grouping of related documents, chats, and discussions into logical topics or categories. Include a clean markdown table summarizing the clusters (e.g. Columns: Category/Topic, Associated Documents/Chats, Key Theme).\n"
-            "6. **AI-Generated Observations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data, emphasizing strategic next steps."
+            "6. **Strategic Observations & Recommendations**: Actionable insights, key findings, notable observations, and recommendations based on the workspace data, emphasizing strategic next steps.\n\n"
+            "Grounding & Citations: Every statement, finding, document summary, and risk observation derived from the provided context MUST include matching [n] citation markers (e.g. [1], [2]) directly after the point or table cell.\n\n"
+            "At the very end of your response, provide exactly 3 specific, non-generic follow-up questions derived directly from the analyzed documents and key findings in this workspace."
         )
 
     def retrieve_documents_context(

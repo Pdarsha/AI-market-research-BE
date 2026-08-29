@@ -50,12 +50,11 @@ class CRUDDocumentChunk(
         user_id: str,
         workspace_id: str | None = None,
     ) -> Query:
-        query = db.query(DocumentChunk).filter(DocumentChunk.user_id == user_id)
-
         if workspace_id:
-            query = query.filter(DocumentChunk.workspace_id == workspace_id)
-
-        return query
+            return db.query(DocumentChunk).filter(
+                (DocumentChunk.workspace_id == workspace_id) | (DocumentChunk.user_id == str(user_id))
+            )
+        return db.query(DocumentChunk).filter(DocumentChunk.user_id == str(user_id))
 
     def set_search_parameters(self, db: Session, ef_search: int) -> None:
         from sqlalchemy import text
