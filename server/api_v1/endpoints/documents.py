@@ -327,14 +327,25 @@ def export_conversation_pdf(
     current_user=Depends(get_current_user),
 ):
     """Render the posted conversation to a PDF file and return it."""
-    if not payload.messages:
-        raise HTTPException(status_code=400, detail="Nothing to export")
+    raw_messages = payload.messages
+    if not raw_messages:
+        fallback_content = payload.html_content or payload.content
+        if fallback_content:
+            raw_messages = [
+                schemas.ExportMessage(
+                    role="assistant",
+                    content=fallback_content,
+                    citations=payload.citations,
+                )
+            ]
+        else:
+            raise HTTPException(status_code=400, detail="Nothing to export")
 
     title = payload.title or "CapitalEdge conversation"
 
     try:
         pdf_bytes = conversation_to_pdf(
-            title, [m.model_dump() for m in payload.messages]
+            title, [m.model_dump() for m in raw_messages]
         )
     except Exception as exc:  # pragma: no cover - layout engine failure
         raise HTTPException(status_code=500, detail="PDF generation failed") from exc

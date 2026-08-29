@@ -128,6 +128,27 @@ class ChatOrchestrationService:
             ),
         )
 
+        grid_citations = []
+        try:
+            grid_chunks = []
+            for d_id in unique_doc_ids:
+                doc_chunks = crud.document_chunk.search_nearest_chunks(
+                    db,
+                    query_embedding=[0.0] * 1536,
+                    user_id=str(current_user.id),
+                    workspace_id=ws_id,
+                    document_ids=[d_id],
+                    candidate_k=1,
+                )
+                if doc_chunks:
+                    grid_chunks.extend(doc_chunks)
+            if grid_chunks:
+                grid_citations = citation_svc.generate_citations_from_chunks(grid_chunks)
+        except Exception as e:
+            logger.warning(f"Failed to generate citations for multi-document grid: {e}")
+
+        grid_source_attribution = source_attribution_from_citations(grid_citations)
+
         ai_response = f"Analysis Grid created for {len(unique_doc_ids)} documents."
         assistant_message = crud.chat_message.create(
             db=db,
@@ -138,9 +159,21 @@ class ChatOrchestrationService:
                 user_id=str(current_user.id),
                 workspace_id=ws_id,
                 document_ids=unique_doc_ids,
+                source_documents=[
+                    d.file_name
+                    for d in valid_docs
+                    if str(d.id) in unique_doc_ids and d.file_name
+                ],
+                citations=grid_citations,
                 mode_used=getattr(request, "mode", "auto"),
             ),
         )
+
+        grid_followups = [
+            f"What are the key comparative takeaways across these {len(unique_doc_ids)} documents?",
+            "Which document reports the strongest growth metrics or positive findings?",
+            "Can you summarize the main differences and risk factors across the files?",
+        ]
 
         message_obj = {
             "id": assistant_message.id,
@@ -158,9 +191,10 @@ class ChatOrchestrationService:
                 for d in valid_docs
                 if str(d.id) in unique_doc_ids and d.file_name
             ],
-            "citations": [],
-            "source_attribution": {},
-            "follow_up_questions": [],
+            "citations": grid_citations,
+            "sources": grid_citations,
+            "source_attribution": grid_source_attribution,
+            "follow_up_questions": grid_followups,
             "created_at": (
                 assistant_message.created_at.isoformat()
                 if assistant_message.created_at
@@ -193,14 +227,15 @@ class ChatOrchestrationService:
                     for d in valid_docs
                     if str(d.id) in unique_doc_ids and d.file_name
                 ],
-                "citations": [],
-                "source_attribution": {},
+                "citations": grid_citations,
+                "sources": grid_citations,
+                "source_attribution": grid_source_attribution,
                 "web_sources": None,
                 "financial_news": None,
                 "sec_company_facts": None,
                 "roic_ai": None,
                 "companies_house": None,
-                "follow_up_questions": [],
+                "follow_up_questions": grid_followups,
                 "message": message_obj,
             },
             "message": "Analysis Grid created successfully for selected documents.",
@@ -392,6 +427,11 @@ class ChatOrchestrationService:
             precomputed_intent = "WORKSPACE_ANALYSIS"
             precomputed_is_document_question = True
         else:
+            ws_doc_ids = []
+            if session.workspace_id:
+                ws_docs = crud.document.get_multi_by_workspace(db, workspace_id=session.workspace_id)
+                ws_doc_ids = [str(d.id) for d in ws_docs]
+
             stored_content = request.content
             optimized_prompt, conversation_company, extracted_entities = rag.rewrite_query(
                 client, request.content, history, model=settings.LLM_MODEL
@@ -404,7 +444,7 @@ class ChatOrchestrationService:
             )
             fut_doc = planner_exec.submit(
                 rag.classify_requires_document, client, question=optimized_prompt, model=settings.LLM_MODEL
-            ) if document_ids else None
+            ) if (document_ids or ws_doc_ids) else None
             fut_intent = planner_exec.submit(
                 rag.classify_mcp_intent, client, question=optimized_prompt, model=settings.LLM_MODEL
             )
@@ -417,47 +457,39 @@ class ChatOrchestrationService:
             precomputed_intent = fut_intent.result()
             precomputed_general_intent = fut_general_intent.result()
 
-        user_message = crud.chat_message.create(
-            db=db,
-            obj_in=schemas.ChatMessageCreate(
-                chat_id=chat_id,
-                content=stored_content,
-                role="user",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
-                document_ids=document_ids or None,
-            ),
-        )
-
-        used_rag, used_web = False, False
-        source_documents, citations, web_sources = None, [], None
-        financial_news_response, financial_context, financial_sources = None, None, []
-        sec_company_facts_response, sec_context, sec_sources = None, None, []
-        roic_response, roic_context, roic_sources = None, None, []
-        companies_house_response, companies_house_context, companies_house_sources = None, None, []
-        document_context, web_context, retrieved_chunks = None, None, None
-
         sec_tickers, sec_options = [], {}
         roic_query, financial_ticker, companies_house_query = None, None, None
         requires_web, mcp_selected = False, False
         selected_provider = "None"
         routing_reason = "Intent matches provider."
+        intent = precomputed_intent
 
+        is_analyze_action = getattr(request, "action", None) == "analyze"
         if not is_workspace_analysis:
             explicit_document_request = is_explicit_document_request(optimized_prompt)
             is_document_question = precomputed_is_document_question
             live_internet_keywords = ["latest", "live", "current", "news today"]
             requires_live_internet = any(kw in optimized_prompt.lower() for kw in live_internet_keywords)
-            if document_ids and precomputed_general_intent not in ["Greeting", "Small Talk"]:
+
+            if not document_ids and ws_doc_ids and (
+                is_document_question
+                or explicit_document_request
+                or is_analyze_action
+                or (precomputed_general_intent not in ["Greeting", "Small Talk"] and not requires_live_internet)
+            ):
+                document_ids = ws_doc_ids
+                unique_doc_ids = list(dict.fromkeys(document_ids or []))
+
+            if document_ids and (precomputed_general_intent not in ["Greeting", "Small Talk"] or is_analyze_action):
                 is_document_intent = True
             else:
-                is_document_intent = is_document_question or explicit_document_request
+                is_document_intent = is_document_question or explicit_document_request or is_analyze_action
 
             if (
                 document_ids
                 and is_document_intent
                 and not requires_live_internet
-                and precomputed_general_intent not in ["Greeting", "Small Talk"]
+                and (precomputed_general_intent not in ["Greeting", "Small Talk"] or is_analyze_action)
             ):
                 intent = "UPLOADED_DOCUMENT"
                 routing_reason = "Hard Routing: Active document intent detected."
@@ -539,6 +571,26 @@ class ChatOrchestrationService:
                 selected_provider = "RAG"
         else:
             is_document_intent = True
+
+        user_message = crud.chat_message.create(
+            db=db,
+            obj_in=schemas.ChatMessageCreate(
+                chat_id=chat_id,
+                content=stored_content,
+                role="user",
+                user_id=str(current_user.id),
+                workspace_id=session.workspace_id,
+                document_ids=document_ids or None,
+            ),
+        )
+
+        used_rag, used_web = False, False
+        source_documents, citations, web_sources = None, [], None
+        financial_news_response, financial_context, financial_sources = None, None, []
+        sec_company_facts_response, sec_context, sec_sources = None, None, []
+        roic_response, roic_context, roic_sources = None, None, []
+        companies_house_response, companies_house_context, companies_house_sources = None, None, []
+        document_context, web_context, retrieved_chunks = None, None, None
 
         validation_error = None
         workspace_docs_present = bool(session.workspace_id and crud.document.get_multi_by_workspace(db, workspace_id=session.workspace_id))
@@ -744,6 +796,12 @@ class ChatOrchestrationService:
 
             if is_workspace_analysis:
                 intent = "Research / Deep Analysis"
+            elif document_ids and (
+                is_analyze_action
+                or precomputed_general_intent == "Document Analysis"
+                or any(kw in optimized_prompt.lower() for kw in ["analyze", "analyse", "summary", "summarize", "overview", "findings"])
+            ):
+                intent = "Document Analysis"
             elif intent != "UPLOADED_DOCUMENT":
                 intent = precomputed_general_intent
 
@@ -765,6 +823,7 @@ class ChatOrchestrationService:
             )
             mode_used = "auto"
             selected_model = settings.LLM_MODEL
+            final_research_context = None
 
             if getattr(request, "mode", None) == "think_longer":
                 today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
@@ -844,7 +903,9 @@ class ChatOrchestrationService:
                     logger.error(f"Streaming error: {e}")
                     
                 ai_response, follow_up_questions = rag.split_answer_and_followups(
-                    raw_response_str, question=request.content
+                    raw_response_str,
+                    question=(optimized_prompt if is_workspace_analysis else request.content),
+                    context=(document_context or final_research_context or web_context or ""),
                 )
 
                 cited_sources: list = list(retrieved_chunks or [])
