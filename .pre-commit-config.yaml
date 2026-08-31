@@ -46,16 +46,14 @@ repos:
     args: [ --allow-multiple-documents ]
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  # Ruff version.
   rev: v0.1.14
   hooks:
-  # Run the linter.
   - id: ruff
 
 - repo: https://github.com/psf/black
   rev: 24.1.1
   hooks:
   - id: black
-    language_version: python3.10
+    language_version: python3.14
     args:
     - "-S"

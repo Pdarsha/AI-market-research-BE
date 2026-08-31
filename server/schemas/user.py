@@ -13,6 +13,11 @@ class UserBase(BaseModel):
     hashed_password: Optional[str] = None
     google_id: Optional[str] = None
     display_name: Optional[str] = None
+    subscription_tier: Optional[str] = "free"
+    daily_credits: Optional[int] = 100
+    credits_remaining: Optional[int] = 100
+    subscription_status: Optional[str] = "active"
+    subscription_period: Optional[str] = "monthly"
 
     class Config:
         from_attributes = True
@@ -23,7 +28,12 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(UserBase):
-    pass
+    name: Optional[str] = None
+    subscription_tier: Optional[str] = None
+    daily_credits: Optional[int] = None
+    credits_remaining: Optional[int] = None
+    subscription_status: Optional[str] = None
+    subscription_period: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -40,6 +50,11 @@ class RespUser(BaseModel):
     is_verified: Optional[bool] = None
     providers: Optional[str] = None
     role: Optional[str] = None
+    subscription_tier: Optional[str] = "free"
+    daily_credits: Optional[int] = 100
+    credits_remaining: Optional[int] = 100
+    subscription_status: Optional[str] = "active"
+    subscription_period: Optional[str] = "monthly"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     token: Optional[Token]
@@ -92,6 +107,12 @@ class UserProfile(BaseModel):
     role: Optional[str] = None
     display_name: Optional[str] = None
     username: Optional[str] = None
+    subscription_tier: Optional[str] = "free"
+    daily_credits: Optional[int] = 100
+    credits_remaining: Optional[int] = 100
+    subscription_status: Optional[str] = "active"
+    subscription_period: Optional[str] = "monthly"
+
 
 
 class ChangePassword(BaseModel):

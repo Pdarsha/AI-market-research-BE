@@ -316,7 +316,48 @@ class AgentExecutionService:
                 execution_response.agent_name = agent.name
                 execution_response.workflow_name = agent.name
 
-            # 5. Advance schedule & update last_run_at
+            # 5. Scheduled Agent Email Delivery
+            if (
+                trigger_source == "scheduled"
+                and execution_response
+                and execution_response.status == ExecutionStatus.COMPLETED.value
+            ):
+                try:
+                    recipient = agent.recipient_email
+                    if not recipient:
+                        from server.models.user import User
+                        user_obj = agent.user or db_session.query(User).filter(User.id == str(agent.user_id)).first()
+                        recipient = user_obj.email if user_obj else None
+
+                    if recipient:
+                        from server.utils.mail import send_agent_workflow_email
+
+                        await send_agent_workflow_email(
+                            email=recipient,
+                            agent_name=agent.name,
+                            result_content=execution_response.final_response or "",
+                            execution_time=execution_time_now,
+                            sources=execution_response.source_documents or [],
+                        )
+                        logger.info(
+                            "[AGENT_EXECUTION] [EMAIL_SENT] Dispatched scheduled result email to %s for agent '%s'",
+                            recipient,
+                            agent.name,
+                        )
+                    else:
+                        logger.warning(
+                            "[AGENT_EXECUTION] [EMAIL_SKIPPED] No recipient email found for agent '%s' (user_id=%s)",
+                            agent.name,
+                            agent.user_id,
+                        )
+                except Exception as ex_mail:
+                    logger.error(
+                        "[AGENT_EXECUTION] [EMAIL_ERROR] Failed sending scheduled agent result email: %s",
+                        ex_mail,
+                        exc_info=True,
+                    )
+
+            # 6. Advance schedule & update last_run_at
             from server.services.agent_scheduler_service import agent_scheduler_service
 
             agent.last_run_at = datetime.utcnow()

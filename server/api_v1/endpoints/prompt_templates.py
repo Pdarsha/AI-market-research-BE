@@ -6,6 +6,7 @@ from server.services.prompt_template_registry import (
     PromptTemplateRegistry,
     get_prompt_template_registry,
 )
+from server.services.agent_seed_service import AgentSeedService
 from server.services.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,13 @@ prompt_templates_router = APIRouter(prefix="/cards", tags=["Prompt Templates"])
 def list_prompt_templates(
     registry: PromptTemplateRegistry = Depends(get_prompt_template_registry),
 ):
-    """Retrieve all active, valid prompt templates."""
+    """Retrieve all active, valid landing page default agent prompt templates."""
     templates = registry.list_templates()
-    data = [t.get_metadata() for t in templates]
+    if templates:
+        data = [t.get_metadata() for t in templates]
+    else:
+        # Fallback to canonical seed definitions if filesystem cache was empty
+        data = AgentSeedService.get_default_landing_agents()
 
     AuditLogger.log(
         action="PROMPT_TEMPLATES_LIST",
@@ -38,3 +43,4 @@ def list_prompt_templates(
             "message": "Prompt templates fetched successfully.",
         },
     )
+

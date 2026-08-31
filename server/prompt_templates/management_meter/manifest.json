@@ -1,0 +1,10 @@
+{
+    "id": "management_meter",
+    "title": "Management Meter",
+    "description": "Assess Meta management credibility by comparing capex and Reality Labs commitments against delivered outcomes over the last three years.",
+    "tag": "Governance",
+    "icon": "users",
+    "prompt": "Assess Meta management credibility by comparing capex and Reality Labs commitments against delivered outcomes over the last three years.",
+    "enabled": true,
+    "display_order": 2
+}

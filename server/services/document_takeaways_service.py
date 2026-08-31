@@ -1,11 +1,10 @@
 import logging
 from typing import List, Optional
 from datetime import datetime
-import openai
 
 from sqlalchemy.orm import Session
 from fastapi import BackgroundTasks
-from server import crud, schemas
+from server import crud
 
 from server.config import settings
 from server.models.document_takeaways import DocumentTakeawayGrid
@@ -19,6 +18,9 @@ from server.services.rag_service import get_rag_service, RAGService
 from server.utils.chat_helpers import get_llm_kwargs
 from server.utils.llm_client import get_openai_client
 import json
+import csv
+import io
+from server.utils.common import slugify
 
 logger = logging.getLogger(__name__)
 client = get_openai_client()
@@ -524,6 +526,77 @@ class DocumentTakeawaysService:
             return payload
 
         return self.serialize_grid(grid, db)
+
+    def export_grid(
+        self,
+        grid: DocumentTakeawayGrid,
+        export_format: str = "csv",
+        db: Session = None,
+    ) -> tuple[bytes, str, str]:
+        """Export a document takeaways grid matrix to CSV, JSON, or Markdown.
+
+        Returns:
+            tuple of (content_bytes, media_type, filename)
+        """
+
+        data = self.serialize_grid(grid, db)
+        grid_name = data.get("name") or "Takeaways_Grid"
+        base_slug = slugify(grid_name) or "takeaways_grid"
+        columns = sorted(data.get("columns", []), key=lambda c: c.get("display_order", 0))
+        rows = data.get("rows", [])
+
+        fmt = (export_format or "csv").strip().lower()
+
+        if fmt == "json":
+            json_str = json.dumps(data, indent=2, ensure_ascii=False)
+            filename = f"{base_slug}.json"
+            return json_str.encode("utf-8"), "application/json", filename
+
+        elif fmt == "markdown" or fmt == "md":
+            lines = [
+                f"# {grid_name}",
+                f"*Exported from CapitalEdge on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*",
+                "",
+            ]
+            header = ["Document Name", "Format"] + [col["name"] for col in columns]
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+
+            for row in rows:
+                doc_name = row.get("document", {}).get("name", "Unknown")
+                doc_fmt = (row.get("document", {}).get("file_type") or "unknown").upper()
+                cell_map = {c.get("grid_column_id"): (c.get("value") or "").replace("\n", " ").replace("|", "\\|") for c in row.get("cells", [])}
+                row_vals = [doc_name, doc_fmt] + [cell_map.get(col["id"], "") for col in columns]
+                lines.append("| " + " | ".join(row_vals) + " |")
+
+            md_content = "\n".join(lines)
+            filename = f"{base_slug}.md"
+            return md_content.encode("utf-8"), "text/markdown; charset=utf-8", filename
+
+        elif fmt in ["csv", "excel", "xlsx"]:
+            # Generate RFC 4180 compliant CSV with UTF-8 BOM for Excel compatibility
+            output = io.StringIO()
+            writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+
+            # Header row
+            headers = ["Document Name", "File Format"] + [col["name"] for col in columns]
+            writer.writerow(headers)
+
+            # Data rows
+            for row in rows:
+                doc_name = row.get("document", {}).get("name", "Unknown")
+                doc_fmt = (row.get("document", {}).get("file_type") or "unknown").upper()
+                cell_map = {c.get("grid_column_id"): c.get("value") or "" for c in row.get("cells", [])}
+                row_data = [doc_name, doc_fmt] + [cell_map.get(col["id"], "") for col in columns]
+                writer.writerow(row_data)
+
+            # Prepend UTF-8 BOM (\ufeff)
+            csv_bytes = ("\ufeff" + output.getvalue()).encode("utf-8")
+            filename = f"{base_slug}.csv"
+            return csv_bytes, "text/csv; charset=utf-8", filename
+
+        else:
+            raise ValueError(f"Unsupported export format '{export_format}'. Supported formats are: csv, json, markdown.")
 
 
 document_takeaways_service = DocumentTakeawaysService()

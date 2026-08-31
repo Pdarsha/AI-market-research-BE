@@ -1,0 +1,10 @@
+{
+    "id": "unit_economics_lab",
+    "title": "Unit Economics Lab",
+    "description": "Break Zomato and Swiggy down to per-order economics — AOV, contribution margin, CAC, payback — and test durability.",
+    "tag": "Unit Economics",
+    "icon": "pie-chart",
+    "prompt": "Break Zomato and Swiggy down to per-order economics — AOV, contribution margin, CAC, payback — and test durability.",
+    "enabled": true,
+    "display_order": 4
+}

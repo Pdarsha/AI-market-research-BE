@@ -1,0 +1,10 @@
+{
+    "id": "brand_health_check",
+    "title": "Brand Health Check",
+    "description": "Assess Nike's brand health on awareness, consideration, sentiment, and share of voice versus Adidas and On Running.",
+    "tag": "Brand Analytics",
+    "icon": "activity",
+    "prompt": "Assess Nike's brand health on awareness, consideration, sentiment, and share of voice versus Adidas and On Running.",
+    "enabled": true,
+    "display_order": 6
+}

@@ -91,6 +91,12 @@ class AgentWorkflowBase(BaseModel):
     scheduled_count_limit: Optional[int] = Field(
         None, description="Maximum number of scheduled executions", ge=1
     )
+    recipient_email: Optional[str] = Field(
+        None, description="Email address to receive scheduled execution results"
+    )
+    user_email: Optional[str] = Field(
+        None, description="Alias for recipient_email"
+    )
 
     # Source & document filtering
     limit_docs_past_7_days: bool = Field(
@@ -227,6 +233,12 @@ class AgentWorkflowBase(BaseModel):
                         data["schedule_end_time"] = norm_end
             elif data.get("schedule_time") is None and interval:
                 data["schedule_time"] = f"Every {interval} minute{'s' if interval > 1 else ''}"
+
+            # 6. Sync recipient_email / user_email
+            if data.get("user_email") and not data.get("recipient_email"):
+                data["recipient_email"] = data["user_email"]
+            elif data.get("recipient_email") and not data.get("user_email"):
+                data["user_email"] = data["recipient_email"]
         return data
 
 
@@ -287,6 +299,8 @@ class AgentWorkflowUpdate(BaseModel):
     schedule_timezone: Optional[str] = None
     schedule_cron: Optional[str] = None
     scheduled_count_limit: Optional[int] = Field(None, ge=1)
+    recipient_email: Optional[str] = None
+    user_email: Optional[str] = None
     limit_docs_past_7_days: Optional[bool] = None
     limit_documents_to_past_7_days: Optional[bool] = None
     selected_document_ids: Optional[List[str]] = None
@@ -383,6 +397,12 @@ class AgentWorkflowUpdate(BaseModel):
                         data["schedule_start_time"] = norm_start
                     if norm_end:
                         data["schedule_end_time"] = norm_end
+
+            # 6. Sync recipient_email / user_email
+            if data.get("user_email") and not data.get("recipient_email"):
+                data["recipient_email"] = data["user_email"]
+            elif data.get("recipient_email") and not data.get("user_email"):
+                data["user_email"] = data["recipient_email"]
         return data
 
 
@@ -416,6 +436,8 @@ class AgentWorkflowListItem(BaseModel):
     schedule_start_time: Optional[str] = None
     schedule_end_time: Optional[str] = None
     schedule_timezone: Optional[str] = None
+    recipient_email: Optional[str] = None
+    user_email: Optional[str] = None
 
     execution_mode: AIExecutionMode
     status: AgentStatus

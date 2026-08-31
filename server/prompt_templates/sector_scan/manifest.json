@@ -1,0 +1,10 @@
+{
+    "id": "sector_scan",
+    "title": "Sector Scan",
+    "description": "Map the Indian NBFC sector's structure, growth pools, margin profile, and regulatory pressure points, and rank where value is migrating.",
+    "tag": "Sector Mapping",
+    "icon": "compass",
+    "prompt": "Map the Indian NBFC sector's structure, growth pools, margin profile, and regulatory pressure points, and rank where value is migrating.",
+    "enabled": true,
+    "display_order": 5
+}

@@ -14,6 +14,7 @@ from server.services.agent_tool_registry import agent_tool_registry
 from server.services.agent_validation_service import agent_validation_service
 
 from server.services.agent_workflow_engine import agent_workflow_engine
+from server.services.agent_seed_service import AgentSeedService
 from server.services.audit_logger import AuditLogger
 from server.utils.auth import get_current_user
 
@@ -95,6 +96,11 @@ def create_agent(
                 "message": "Cannot save invalid agent configuration.",
             },
         )
+
+    # Capture the logged-in user's email if not explicitly provided
+    if not request.recipient_email and getattr(current_user, "email", None):
+        request.recipient_email = current_user.email
+        request.user_email = current_user.email
 
     try:
         agent = crud.agent_workflow.create_agent(
@@ -294,6 +300,23 @@ def list_available_agent_tools(
             "error": None,
             "data": tools,
             "message": "Tools retrieved successfully.",
+        },
+    )
+
+
+@agent_workflow_router.get("/templates")
+def list_default_agent_templates(
+    current_user=Depends(get_current_user),
+):
+    """List the 10 canonical landing page default agents and workflow seed templates."""
+    agents = AgentSeedService.get_default_landing_agents()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": agents,
+            "message": "Default landing page agent templates retrieved successfully.",
         },
     )
 

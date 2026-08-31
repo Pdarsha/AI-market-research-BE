@@ -1,0 +1,10 @@
+{
+    "id": "launch_lab",
+    "title": "Launch Lab",
+    "description": "Build a go-to-market launch plan for OpenAI's newest enterprise product covering positioning, enablement, channels, and launch-day checklist.",
+    "tag": "GTM Launch",
+    "icon": "rocket",
+    "prompt": "Build a go-to-market launch plan for OpenAI's newest enterprise product covering positioning, enablement, channels, and launch-day checklist.",
+    "enabled": true,
+    "display_order": 10
+}

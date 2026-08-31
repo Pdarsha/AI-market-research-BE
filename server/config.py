@@ -131,8 +131,10 @@ settings = Settings()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 WORKSPACE_DOCS_DIR = STATIC_DIR / "workspace_docs"
+AVATARS_DIR = STATIC_DIR / "avatars"
 
 
 def create_storage_directories():
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     WORKSPACE_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    AVATARS_DIR.mkdir(parents=True, exist_ok=True)
