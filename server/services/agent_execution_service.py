@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from fastapi import HTTPException, status
@@ -24,9 +24,6 @@ from server import crud, schemas
 from server.db.session import SessionLocal
 from server.models.agent_workflow import (
     AgentStatus,
-    AgentWorkflow,
-    AgentWorkflowExecution,
-    AIExecutionMode,
     ExecutionStatus,
     TriggerType,
 )
@@ -40,7 +37,7 @@ from server.services.agent_workflow_engine import (
     AgentWorkflowEngine,
     get_agent_workflow_engine,
 )
-from server.services.audit_logger import AuditLogger
+from server.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -323,11 +320,10 @@ class AgentExecutionService:
                 and execution_response.status == ExecutionStatus.COMPLETED.value
             ):
                 try:
-                    recipient = agent.recipient_email
-                    if not recipient:
-                        from server.models.user import User
-                        user_obj = agent.user or db_session.query(User).filter(User.id == str(agent.user_id)).first()
-                        recipient = user_obj.email if user_obj else None
+                    user_obj = agent.user or db_session.query(User).filter(
+                        User.id == str(agent.user_id)
+                    ).first()
+                    recipient = getattr(user_obj, "email", None) or agent.recipient_email
 
                     if recipient:
                         from server.utils.mail import send_agent_workflow_email

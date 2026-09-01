@@ -97,10 +97,8 @@ def create_agent(
             },
         )
 
-    # Capture the logged-in user's email if not explicitly provided
-    if not request.recipient_email and getattr(current_user, "email", None):
-        request.recipient_email = current_user.email
-        request.user_email = current_user.email
+    request.recipient_email = getattr(current_user, "email", None)
+    request.user_email = request.recipient_email
 
     try:
         agent = crud.agent_workflow.create_agent(
@@ -472,6 +470,9 @@ def update_agent(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
         )
+
+    request.model_fields_set.discard("recipient_email")
+    request.model_fields_set.discard("user_email")
 
     # Prepare merged state for validation
     current_data = schemas.AgentWorkflowResponse.model_validate(agent).model_dump()
