@@ -1,7 +1,9 @@
 import logging
 import time
+from typing import Optional
 from server.services.audit_logger import audit_context
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from server import crud, schemas
 from server.api_v1.deps import get_db
@@ -281,3 +283,89 @@ def duplicate_grid(
     except Exception:
         logger.exception("Error duplicating grid")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@document_takeaways_router.get("/grids/{grid_id}/export")
+def export_grid_matrix_workspace(
+    workspace_id: str,
+    grid_id: str,
+    format: str = Query(default="csv", description="Export format: csv, json, markdown"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_optional_current_user),
+):
+    """Export a document takeaways grid matrix within a workspace."""
+    return _handle_grid_export(
+        grid_id=grid_id,
+        workspace_id=workspace_id,
+        format=format,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@global_takeaways_router.get("/grids/{grid_id}/export")
+def export_grid_matrix_global(
+    grid_id: str,
+    format: str = Query(default="csv", description="Export format: csv, json, markdown"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_optional_current_user),
+):
+    """Export a document takeaways grid matrix via global endpoint."""
+    return _handle_grid_export(
+        grid_id=grid_id,
+        workspace_id=None,
+        format=format,
+        db=db,
+        current_user=current_user,
+    )
+
+
+def _handle_grid_export(
+    grid_id: str,
+    workspace_id: Optional[str],
+    format: str,
+    db: Session,
+    current_user,
+):
+    grid = crud.document_takeaways.get_grid(db, grid_id)
+    if not grid:
+        raise HTTPException(status_code=404, detail="Takeaways grid not found")
+    if workspace_id and grid.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Grid does not belong to specified workspace")
+
+    try:
+        content_bytes, media_type, filename = document_takeaways_service.export_grid(
+            grid=grid,
+            export_format=format,
+            db=db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    user_id_str = str(current_user.id) if current_user else "public"
+    from server.services.audit_logger import AuditLogger
+    AuditLogger.log(
+        action="DOCUMENT_TAKEAWAYS_EXPORT",
+        user_id=user_id_str,
+        workspace_id=grid.workspace_id,
+        endpoint=f"/v1/document-takeaways/grids/{grid_id}/export",
+        http_method="GET",
+        status="200",
+        metadata={
+            "grid_id": grid_id,
+            "format": format,
+            "filename": filename,
+            "rows_count": len(grid.rows),
+        },
+    )
+
+    return Response(
+        content=content_bytes,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+

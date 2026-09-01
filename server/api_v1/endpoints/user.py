@@ -1,16 +1,21 @@
 import logging
+import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from server import crud, schemas
+from server.config import AVATARS_DIR
 from server.utils.auth import (
     authenticate_user,
     create_access_token,
     create_refresh_token,
     get_current_user,
+    get_optional_current_user,
     get_password_hash,
     verify_google_id_token,
     verify_password,
@@ -18,6 +23,9 @@ from server.utils.auth import (
 )
 from server.utils.common import validate_email_send_otp
 from server.services.audit_logger import AuditLogger
+from server.services.pricing_service import PricingService
+from server.services.settings_service import SettingsService
+from server.services.credit_service import CreditService
 
 from ..deps import get_db
 
@@ -174,6 +182,7 @@ async def google_login(data: schemas.IdTokenLoginInput, db: Session = Depends(ge
     )
 
 
+@user_router.get("/profile", response_model=schemas.UserProfile)
 @user_router.post("/profile", response_model=schemas.UserProfile)
 async def get_profile(current_user=Depends(get_current_user)):
     disp_name = current_user.display_name or getattr(current_user, 'username', None) or current_user.email.split('@')[0]
@@ -581,12 +590,19 @@ async def update_profile(
     }
     logger.debug("update_profile: user_id=%s changes=%s", user_obj.id, changed)
 
+    if getattr(data, "name", None) and not data.display_name:
+        data.display_name = data.name
+
     user_obj = crud.user.update(db, db_obj=user_obj, obj_in=data)
+    disp_name = user_obj.display_name or getattr(user_obj, 'username', None) or user_obj.email.split('@')[0]
+    uname = getattr(user_obj, 'username', None) or user_obj.email.split('@')[0]
     response = schemas.UserProfile(
         id=user_obj.id,
         email=user_obj.email,
         avatar=user_obj.avatar,
         role=user_obj.role,
+        display_name=disp_name,
+        username=uname,
     )
     logger.info("update_profile success: user_id=%s", user_obj.id)
     AuditLogger.log(
@@ -603,6 +619,204 @@ async def update_profile(
             "error": None,
             "data": response.model_dump(mode="json"),
             "message": "Profile updated successfully.",
+        },
+    )
+
+
+ALLOWED_AVATAR_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".svg",
+    ".bmp",
+    ".ico",
+}
+ALLOWED_AVATAR_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/svg+xml",
+    "image/bmp",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+}
+
+
+@user_router.post("/upload-avatar")
+@user_router.post("/avatar")
+async def upload_avatar(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    avatar: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Upload and persist user avatar image via multipart/form-data."""
+    uploaded_file = file or avatar or image
+    if not uploaded_file:
+        form_data = await request.form()
+        for field in ("file", "avatar", "image", "doc"):
+            val = form_data.get(field)
+            if isinstance(val, UploadFile):
+                uploaded_file = val
+                break
+        if not uploaded_file:
+            for val in form_data.values():
+                if isinstance(val, UploadFile):
+                    uploaded_file = val
+                    break
+
+    if not uploaded_file or not getattr(uploaded_file, "filename", None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No avatar image file provided.",
+        )
+
+    ext = Path(uploaded_file.filename).suffix.lower()
+    content_type = (uploaded_file.content_type or "").lower()
+
+    is_valid_type = (
+        content_type in ALLOWED_AVATAR_MIMES
+        or content_type.startswith("image/")
+        or ext in ALLOWED_AVATAR_EXTENSIONS
+    )
+    if not is_valid_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file must be a valid image (JPG, PNG, WebP, GIF, SVG).",
+        )
+
+    contents = await uploaded_file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded image file is empty.",
+        )
+
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Avatar image size exceeds the 10MB limit.",
+        )
+
+    AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if ext not in ALLOWED_AVATAR_EXTENSIONS:
+        ext = ".png"
+
+    safe_filename = f"avatar_{current_user.id}_{uuid.uuid4().hex[:8]}{ext}"
+    target_path = AVATARS_DIR / safe_filename
+    target_path.write_bytes(contents)
+
+    avatar_url = f"/static/avatars/{safe_filename}"
+
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id))
+    if not user_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    user_obj.avatar = avatar_url
+    crud.user.save(db, db_obj=user_obj)
+
+    disp_name = (
+        user_obj.display_name
+        or getattr(user_obj, "username", None)
+        or user_obj.email.split("@")[0]
+    )
+    uname = getattr(user_obj, "username", None) or user_obj.email.split("@")[0]
+    response = schemas.UserProfile(
+        id=user_obj.id,
+        email=user_obj.email,
+        avatar=user_obj.avatar,
+        role=user_obj.role,
+        display_name=disp_name,
+        username=uname,
+        subscription_tier=user_obj.subscription_tier or "free",
+        daily_credits=user_obj.daily_credits or 100,
+        credits_remaining=user_obj.credits_remaining or 100,
+        subscription_status=user_obj.subscription_status or "active",
+        subscription_period=user_obj.subscription_period or "monthly",
+    )
+
+    logger.info("upload_avatar success: user_id=%s avatar=%s", user_obj.id, avatar_url)
+    AuditLogger.log(
+        action="USER_UPLOAD_AVATAR",
+        user_id=str(user_obj.id),
+        endpoint="/v1/user/upload-avatar",
+        http_method="POST",
+        status="200",
+        metadata={"filename": safe_filename, "avatar_url": avatar_url},
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": response.model_dump(mode="json"),
+            "message": "Avatar uploaded successfully.",
+        },
+    )
+
+
+@user_router.delete("/avatar")
+@user_router.post("/delete-avatar")
+async def delete_avatar(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Remove user's custom avatar."""
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id))
+    if not user_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    user_obj.avatar = ""
+    crud.user.save(db, db_obj=user_obj)
+
+    disp_name = (
+        user_obj.display_name
+        or getattr(user_obj, "username", None)
+        or user_obj.email.split("@")[0]
+    )
+    uname = getattr(user_obj, "username", None) or user_obj.email.split("@")[0]
+    response = schemas.UserProfile(
+        id=user_obj.id,
+        email=user_obj.email,
+        avatar=user_obj.avatar,
+        role=user_obj.role,
+        display_name=disp_name,
+        username=uname,
+        subscription_tier=user_obj.subscription_tier or "free",
+        daily_credits=user_obj.daily_credits or 100,
+        credits_remaining=user_obj.credits_remaining or 100,
+        subscription_status=user_obj.subscription_status or "active",
+        subscription_period=user_obj.subscription_period or "monthly",
+    )
+
+    AuditLogger.log(
+        action="USER_DELETE_AVATAR",
+        user_id=str(user_obj.id),
+        endpoint="/v1/user/avatar",
+        http_method="DELETE",
+        status="200",
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": response.model_dump(mode="json"),
+            "message": "Avatar removed successfully.",
         },
     )
 
@@ -660,3 +874,334 @@ async def refresh_access_token(
             "message": "Refresh token generated successfully.",
         },
     )
+
+@user_router.get("/plans")
+async def get_subscription_plans(
+    current_user=Depends(get_optional_current_user),
+):
+    """Retrieve all available subscription tiers, pricing, features, and limits.
+
+    Supports optional Bearer token authentication to identify the current user's
+    active plan and indicate which plan they are currently subscribed to.
+    """
+    user_tier = getattr(current_user, "subscription_tier", None) if current_user else None
+    pricing_data = PricingService.get_pricing_overview(current_user_tier=user_tier)
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": pricing_data.model_dump(mode="json"),
+            "message": "Subscription plans and pricing retrieved successfully.",
+        },
+    )
+
+
+@user_router.get("/subscription")
+async def get_user_subscription(
+    current_user=Depends(get_current_user),
+):
+    """Get the active subscription, credits, and renewal details for the logged-in user."""
+    logger.info("get_user_subscription: user_id=%s", current_user.id)
+    sub_data = PricingService.get_user_subscription(current_user)
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": sub_data.model_dump(mode="json"),
+            "message": "User subscription details retrieved successfully.",
+        },
+    )
+
+
+@user_router.post("/subscription/upgrade")
+async def upgrade_user_subscription(
+    data: schemas.UpgradePlanRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Upgrade or switch the logged-in user's subscription tier.
+
+    Validates target tier ID, updates user's subscription status, period,
+    and refreshes daily credit allowance.
+    """
+    logger.info(
+        "upgrade_user_subscription attempt: user_id=%s target_plan=%s cycle=%s",
+        current_user.id,
+        data.plan_id,
+        data.billing_cycle,
+    )
+    try:
+        updated_sub = PricingService.upgrade_user_plan(
+            db=db,
+            user=current_user,
+            plan_id=data.plan_id,
+            billing_cycle=data.billing_cycle or "monthly",
+        )
+    except ValueError as e:
+        logger.warning(
+            "upgrade_user_subscription invalid parameter: user_id=%s error=%s",
+            current_user.id,
+            str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    AuditLogger.log(
+        action="USER_UPGRADE_SUBSCRIPTION",
+        user_id=str(current_user.id),
+        endpoint="/v1/user/subscription/upgrade",
+        http_method="POST",
+        status="200",
+        metadata={
+            "plan_id": data.plan_id,
+            "billing_cycle": data.billing_cycle,
+            "new_tier": updated_sub.subscription_tier,
+            "daily_credits": updated_sub.daily_credits,
+        },
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": updated_sub.model_dump(mode="json"),
+            "message": f"Successfully upgraded subscription to {data.plan_id.capitalize()}.",
+        },
+    )
+
+
+@user_router.get("/credits")
+async def get_user_credits(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get the verified daily credit allowance (100 for free tier), usage today, remaining balance, and reset timer."""
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id)) or current_user
+    credits_data = CreditService.get_user_credits(db=db, user=user_obj)
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": credits_data.model_dump(mode="json"),
+            "message": "User credits balance retrieved successfully.",
+        },
+    )
+
+
+@user_router.post("/credits/consume")
+async def consume_user_credits(
+    data: schemas.CreditConsumeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Deduct credits from user daily balance for AI operations, preventing negative balance."""
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id))
+    if not user_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    try:
+        updated_credits = CreditService.consume_credits(
+            db=db,
+            user=user_obj,
+            amount=data.amount,
+            purpose=data.purpose or "ai_generation",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": updated_credits.model_dump(mode="json"),
+            "message": f"Successfully consumed {data.amount} credit(s).",
+        },
+    )
+
+
+@user_router.post("/credits/reset")
+async def reset_user_credits(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Reset user daily credits back to full quota."""
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id))
+    if not user_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    updated_credits = CreditService.reset_user_credits(db=db, user=user_obj, force=True)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": updated_credits.model_dump(mode="json"),
+            "message": "User credits reset to daily limit successfully.",
+        },
+    )
+
+
+
+
+@user_router.get("/credits/history")
+async def get_user_credits_history(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Retrieve transaction history of credit usage and daily resets for the user."""
+    history = CreditService.get_credit_history(db=db, user_id=str(current_user.id), limit=limit)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": [h.model_dump(mode="json") for h in history],
+            "message": "Credit history retrieved successfully.",
+        },
+    )
+
+
+
+@user_router.get("/settings")
+async def get_user_settings(
+    current_user=Depends(get_current_user),
+):
+    """Retrieve full profile settings, preferences, connectors, privacy, and credits for the logged-in user."""
+    logger.info("get_user_settings: user_id=%s", current_user.id)
+    settings_data = SettingsService.get_user_settings(current_user)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": settings_data.model_dump(mode="json"),
+            "message": "User settings retrieved successfully.",
+        },
+    )
+
+
+@user_router.post("/settings")
+async def update_user_settings(
+    data: schemas.UserSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Update profile settings, personalization traits, language, and privacy preferences."""
+    logger.info("update_user_settings attempt: user_id=%s", current_user.id)
+    user_obj = crud.user.get_by_id(db, id=str(current_user.id))
+    if not user_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    updated_settings = SettingsService.update_user_settings(
+        db=db,
+        user=user_obj,
+        update_data=data,
+    )
+
+    AuditLogger.log(
+        action="USER_UPDATE_SETTINGS",
+        user_id=str(user_obj.id),
+        endpoint="/v1/user/settings",
+        http_method="POST",
+        status="200",
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": updated_settings.model_dump(mode="json"),
+            "message": "User settings updated successfully.",
+        },
+    )
+
+
+@user_router.post("/help")
+async def submit_help_query(
+    data: schemas.HelpQueryCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_optional_current_user),
+):
+    """Submit a support query or complaint form.
+
+    Dispatches notification to company email (hello@ojasyalabs.com) and sends
+    acknowledgment confirmation to the user.
+    """
+    try:
+        ticket_resp = await SettingsService.submit_help_query(
+            db=db,
+            query_in=data,
+            current_user=current_user,
+        )
+    except ValueError as e:
+        logger.warning("submit_help_query validation error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": ticket_resp.model_dump(mode="json"),
+            "message": "Your query has been submitted successfully. Our team will get back to you shortly.",
+        },
+    )
+
+
+@user_router.get("/help")
+async def get_user_help_queries(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Retrieve all submitted support queries for the current user."""
+
+    queries = crud.help_query.get_by_user(db, user_id=str(current_user.id))
+    serialized = [schemas.HelpQueryResponse.model_validate(q).model_dump(mode="json") for q in queries]
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": serialized,
+            "message": "Help queries retrieved successfully.",
+        },
+    )
+
+
+@user_router.get("/about")
+async def get_about_us():
+    """Retrieve company, website (https://www.ojasyalabs.com), and platform information."""
+    about_info = SettingsService.get_about_us()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": about_info.model_dump(mode="json"),
+            "message": "About us information retrieved successfully.",
+        },
+    )
+
+

@@ -83,6 +83,7 @@ class AgentWorkflow(Base):
     schedule_timezone = Column(String(50), default="UTC", nullable=True)
     schedule_cron = Column(String(100), nullable=True)  # computed/custom cron expression
     scheduled_count_limit = Column(Integer, nullable=True)  # max scheduled execution count
+    recipient_email = Column(String(255), nullable=True)  # email to receive scheduled execution results
 
 
     # Source & document filtering
@@ -194,6 +195,22 @@ class AgentWorkflow(Base):
     @tools.setter
     def tools(self, val: Optional[List[str]]):
         self.selected_sources = val or []
+
+    @property
+    def effective_recipient_email(self) -> Optional[str]:
+        if self.recipient_email:
+            return self.recipient_email
+        if self.user and getattr(self.user, "email", None):
+            return self.user.email
+        return None
+
+    @property
+    def user_email(self) -> Optional[str]:
+        return self.effective_recipient_email
+
+    @user_email.setter
+    def user_email(self, val: Optional[str]):
+        self.recipient_email = val
 
 
     __table_args__ = (

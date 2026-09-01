@@ -14,6 +14,7 @@ from server.services.agent_tool_registry import agent_tool_registry
 from server.services.agent_validation_service import agent_validation_service
 
 from server.services.agent_workflow_engine import agent_workflow_engine
+from server.services.agent_seed_service import AgentSeedService
 from server.services.audit_logger import AuditLogger
 from server.utils.auth import get_current_user
 
@@ -95,6 +96,9 @@ def create_agent(
                 "message": "Cannot save invalid agent configuration.",
             },
         )
+
+    request.recipient_email = getattr(current_user, "email", None)
+    request.user_email = request.recipient_email
 
     try:
         agent = crud.agent_workflow.create_agent(
@@ -298,6 +302,23 @@ def list_available_agent_tools(
     )
 
 
+@agent_workflow_router.get("/templates")
+def list_default_agent_templates(
+    current_user=Depends(get_current_user),
+):
+    """List the 10 canonical landing page default agents and workflow seed templates."""
+    agents = AgentSeedService.get_default_landing_agents()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "error": None,
+            "data": agents,
+            "message": "Default landing page agent templates retrieved successfully.",
+        },
+    )
+
+
 @agent_workflow_router.post("/run")
 async def run_adhoc_workflow(
     request: schemas.AgentExecutionRequest,
@@ -449,6 +470,9 @@ def update_agent(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found"
         )
+
+    request.model_fields_set.discard("recipient_email")
+    request.model_fields_set.discard("user_email")
 
     # Prepare merged state for validation
     current_data = schemas.AgentWorkflowResponse.model_validate(agent).model_dump()

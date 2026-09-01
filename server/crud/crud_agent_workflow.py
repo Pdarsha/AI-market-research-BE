@@ -139,11 +139,11 @@ class CRUDAgentWorkflow(
         db: Session,
         *,
         user_id: str,
-        obj_in: AgentWorkflowCreate,
+        obj_in: Any,
         status: Optional[str] = None,
     ) -> AgentWorkflow:
         """Create and persist a new Agent Workflow."""
-        agent_data = obj_in.model_dump()
+        agent_data = obj_in.model_dump() if hasattr(obj_in, "model_dump") else dict(obj_in)
         agent_status = status or agent_data.get("status") or AgentStatus.DRAFT.value
 
         # Normalize limit docs
@@ -186,6 +186,12 @@ class CRUDAgentWorkflow(
         agent_data["updated_at"] = agent_data.get("updated_at") or datetime.utcnow()
         if agent_status == AgentStatus.ACTIVE.value:
             agent_data["activated_at"] = datetime.utcnow()
+
+        if not agent_data.get("recipient_email"):
+            from server.models.user import User
+            user_obj = db.query(User).filter(User.id == str(user_id)).first()
+            if user_obj and user_obj.email:
+                agent_data["recipient_email"] = user_obj.email
 
         db_data = {
             k: v

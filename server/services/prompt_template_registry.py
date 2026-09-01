@@ -163,6 +163,15 @@ class PromptTemplateRegistry:
                         template_id,
                     )
 
+                prompt_md_path = path / "prompt.md"
+                if prompt_md_path.exists():
+                    try:
+                        md_prompt = prompt_md_path.read_text(encoding="utf-8").strip()
+                        if md_prompt:
+                            manifest["prompt"] = md_prompt
+                    except Exception as e:
+                        logger.warning("Failed to read prompt.md for template %s: %s", template_id, e)
+
                 new_cache[template_id] = PromptTemplate(
                     id=template_id, manifest=manifest, template_dir=path
                 )

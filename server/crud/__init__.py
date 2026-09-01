@@ -10,3 +10,5 @@ from .crud_document_chuck import document_chunk
 from .crud_document_takeaways import document_takeaways
 from .crud_skill import skill
 from .crud_agent_workflow import agent_workflow
+from .crud_help_query import help_query
+from .crud_credit_usage_log import credit_usage_log

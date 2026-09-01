@@ -1,0 +1,10 @@
+{
+    "id": "win_loss_review",
+    "title": "Win Loss Review",
+    "description": "Analyse won and lost deals against Salesforce and HubSpot to extract why we win, why we lose, and which objections repeat.",
+    "tag": "Sales Intelligence",
+    "icon": "award",
+    "prompt": "Analyse won and lost deals against Salesforce and HubSpot to extract why we win, why we lose, and which objections repeat.",
+    "enabled": true,
+    "display_order": 7
+}

@@ -1,0 +1,10 @@
+{
+    "id": "voice_of_customer",
+    "title": "Voice of Customer",
+    "description": "Mine app-store reviews, surveys, and support tickets for Swiggy to surface recurring themes, sentiment shifts, and unmet needs.",
+    "tag": "Customer Insights",
+    "icon": "message-square",
+    "prompt": "Mine app-store reviews, surveys, and support tickets for Swiggy to surface recurring themes, sentiment shifts, and unmet needs.",
+    "enabled": true,
+    "display_order": 8
+}

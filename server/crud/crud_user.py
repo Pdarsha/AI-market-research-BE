@@ -28,5 +28,25 @@ class CRUDUSER(CRUDBase[User, UserCreate, UserUpdate]):
     def remove(self, db: Session, *, id: str) -> Optional[User]:
         return super().remove(db, id=id)
 
+    def get_with_lock(self, db: Session, *, id: str) -> Optional[User]:
+        """Fetch a user row with an exclusive row-level lock (for credit concurrency safety)."""
+        try:
+            return (
+                db.query(User)
+                .filter(User.id == id)
+                .with_for_update(nowait=False)
+                .first()
+            )
+        except Exception:
+            return db.query(User).filter(User.id == id).first()
+
+    def save(self, db: Session, *, db_obj: User, commit: bool = True) -> User:
+        """Persist unsaved changes on a User instance."""
+        db.add(db_obj)
+        if commit:
+            db.commit()
+            db.refresh(db_obj)
+        return db_obj
+
 
 user = CRUDUSER(User)

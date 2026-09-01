@@ -836,35 +836,78 @@ Respond with ONLY the exact category name. Do not include any other text, punctu
 """
 
 
-AGENT_PROMPTS = {
-    "expert_interview_synthesizer": {
-        "prompt_substring": "Synthesize the key insights across the expert interviews",
-        "guidance": "This agent requires one or more expert interview transcripts or documents.\n\nPlease upload interview documents or select existing workspace files before running this analysis.",
-        "requires_docs": True
-    },
-    "channel_check": {
-        "prompt_substring": "Run a channel check and summarize what market participants are saying",
-        "guidance": "This agent requires channel interview documents to perform the check.\n\nPlease upload channel interview transcripts or documents to proceed.",
-        "requires_docs": True
-    },
-    "earnings_analysis": {
-        "prompt_substring": "Analyze the latest earnings call: summarize guidance",
-        "guidance": "This agent requires an earnings transcript or a company identifier (such as a stock ticker or company name).\n\nPlease upload the earnings call transcript or provide a company ticker/name before running the analysis.",
-        "requires_company_or_docs": True
-    },
-    "company_primer": {
-        "prompt_substring": "Conduct a company deep-dive primer covering the business model",
-        "guidance": "This agent requires a company name or uploaded company documents to proceed.\n\nPlease upload company documents or enter a company name/ticker.",
-        "requires_company_or_docs": True
-    },
-    "private_company_primer": {
-        "prompt_substring": "Conduct a private company primer covering funding history",
-        "guidance": "This agent requires private company documents or company details to run a private company primer.\n\nPlease upload relevant files or specify the private company name.",
-        "requires_company_or_docs": True
-    },
-    "top_investor_questions": {
-        "prompt_substring": "Summarize the top investor questions and answers about this company",
-        "guidance": "This agent requires company information or uploaded documents to compile the investor Q&A.\n\nPlease upload company filings or specify the company name.",
-        "requires_company_or_docs": True
+def _build_canonical_agent_prompts() -> dict:
+    try:
+        from server.services.prompt_template_registry import get_prompt_template_registry
+        reg = get_prompt_template_registry()
+        templates = reg.get_all()
+        if templates and len(templates) == 10:
+            result = {}
+            for t in templates:
+                substr = t.prompt[:min(len(t.prompt), 55)].strip()
+                result[t.id] = {
+                    "prompt_substring": substr,
+                    "guidance": t.description,
+                    "requires_docs": False,
+                }
+            return result
+    except Exception:
+        pass
+
+    return {
+        "market_primer": {
+            "prompt_substring": "Conduct a deep-dive on the Indian quick-commerce market",
+            "guidance": "This agent conducts a comprehensive market deep-dive covering size, growth, segments, buying behaviour, and top players.",
+            "requires_docs": False,
+        },
+        "management_meter": {
+            "prompt_substring": "Assess Meta management credibility by comparing capex and Reality Labs commitments",
+            "guidance": "This agent assesses executive management credibility by comparing capital expenditure commitments against delivered outcomes.",
+            "requires_docs": False,
+        },
+        "deal_diligence": {
+            "prompt_substring": "Run a pre-deal review of the Microsoft–Activision style acquisition",
+            "guidance": "This agent performs a comprehensive pre-deal M&A review across valuation, synergies, deal structure, and integration risk.",
+            "requires_docs": False,
+        },
+        "unit_economics_lab": {
+            "prompt_substring": "Break Zomato and Swiggy down to per-order economics",
+            "guidance": "This agent decomposes business models into per-order unit economics (AOV, contribution margin, CAC, payback period) and tests durability.",
+            "requires_docs": False,
+        },
+        "sector_scan": {
+            "prompt_substring": "Map the Indian NBFC sector's structure, growth pools",
+            "guidance": "This agent maps sector structure, revenue pools, margins, and regulatory pressure points to rank where enterprise value is migrating.",
+            "requires_docs": False,
+        },
+        "brand_health_check": {
+            "prompt_substring": "Assess Nike's brand health on awareness, consideration, sentiment",
+            "guidance": "This agent evaluates comparative brand health across awareness, consideration, sentiment, and share of voice.",
+            "requires_docs": False,
+        },
+        "win_loss_review": {
+            "prompt_substring": "Analyse won and lost deals against Salesforce and HubSpot",
+            "guidance": "This agent reviews won and lost commercial deals to extract core competitive win/loss drivers and recurring objections.",
+            "requires_docs": False,
+        },
+        "voice_of_customer": {
+            "prompt_substring": "Mine app-store reviews, surveys, and support tickets for Swiggy",
+            "guidance": "This agent mines multi-channel customer reviews, survey data, and support tickets to surface recurring themes and sentiment shifts.",
+            "requires_docs": False,
+        },
+        "persona_pro": {
+            "prompt_substring": "Build evidence-backed personas for AWS enterprise buyers",
+            "guidance": "This agent constructs evidence-backed enterprise buyer personas with pain points, buying triggers, and objection frameworks.",
+            "requires_docs": False,
+        },
+        "launch_lab": {
+            "prompt_substring": "Build a go-to-market launch plan for OpenAI's newest enterprise product",
+            "guidance": "This agent builds an end-to-end go-to-market launch strategy covering positioning, enablement channels, and launch checklists.",
+            "requires_docs": False,
+        },
     }
-}
+
+
+AGENT_PROMPTS = _build_canonical_agent_prompts()
+
+
