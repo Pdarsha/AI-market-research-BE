@@ -1,14 +1,16 @@
+import json
 import logging
 import mimetypes
 import os
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from server import crud, schemas
 from server.api_v1.deps import get_db
 from server.config import WORKSPACE_DOCS_DIR
+from server.services import generation_runtime
 from server.services.audit_logger import AuditLogger
 from server.services.chat_orchestration_service import chat_orchestration_service
 from server.services.rag_service import RAGService
@@ -390,6 +392,10 @@ def get_chat_session(
         status="200",
     )
 
+    active_gen = generation_runtime.get_active_for_chat(
+        chat_id=chat_id, user_id=str(current_user.id)
+    )
+
     return JSONResponse(
         status_code=200,
         content={
@@ -413,6 +419,7 @@ def get_chat_session(
                         db, chat_id=chat_id
                     ),
                 ),
+                "active_generation": active_gen.to_dict() if active_gen else None,
                 "messages": messages,
             },
             "message": "Chat session details fetched successfully.",
@@ -462,6 +469,142 @@ def update_chat_title(
     )
 
 
+@ai_router.get("/chats/{chat_id}/generations/active")
+def get_active_chat_generation(
+    chat_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Retrieve in-flight generation details for a chat session."""
+    session = crud.chat_session.get(db, chat_id)
+    if not session or str(session.user_id) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    active_gen = generation_runtime.get_active_for_chat(
+        chat_id=chat_id, user_id=str(current_user.id)
+    )
+    return {
+        "success": True,
+        "data": active_gen.to_dict() if active_gen else None,
+    }
+
+
+@ai_router.get("/chats/{chat_id}/generations/{generation_id}")
+def get_chat_generation_status(
+    chat_id: str,
+    generation_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Get status and current content of a specific AI generation."""
+    session = crud.chat_session.get(db, chat_id)
+    if not session or str(session.user_id) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    gen = generation_runtime.get(generation_id)
+    if not gen or str(gen.user_id) != str(current_user.id) or str(gen.chat_id) != str(chat_id):
+        return {
+            "success": True,
+            "data": {
+                "generation_id": generation_id,
+                "chat_id": chat_id,
+                "status": "completed",
+                "message": "Generation completed or archived.",
+            },
+        }
+
+    return {
+        "success": True,
+        "data": gen.to_dict(),
+    }
+
+
+@ai_router.get("/chats/{chat_id}/generations/{generation_id}/stream")
+def stream_chat_generation(
+    chat_id: str,
+    generation_id: str,
+    last_chunk_index: int = 0,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Reconnect to an in-flight AI generation stream from a specific chunk index."""
+    session = crud.chat_session.get(db, chat_id)
+    if not session or str(session.user_id) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    gen = generation_runtime.get(generation_id)
+    if not gen or str(gen.user_id) != str(current_user.id) or str(gen.chat_id) != str(chat_id):
+        raise HTTPException(status_code=404, detail="Active generation not found.")
+
+    logger.info(
+        "[GENERATION_RECONNECTED] generation_id=%s chat_id=%s user_id=%s last_chunk_index=%s",
+        generation_id,
+        chat_id,
+        current_user.id,
+        last_chunk_index,
+    )
+    return StreamingResponse(
+        gen.subscribe(last_chunk_index=last_chunk_index),
+        media_type="text/event-stream",
+        headers={"X-Generation-Id": gen.generation_id},
+    )
+
+
+@ai_router.post("/chats/{chat_id}/generations/{generation_id}/stop")
+def stop_chat_generation(
+    chat_id: str,
+    generation_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Explicitly cancel an in-flight AI generation (the Stop button).
+
+    This is the ONLY way to cancel a generation. A closed browser connection --
+    refresh, navigation, network loss -- is a delivery failure and lets the
+    generation run to completion so its response is still persisted.
+    """
+    session = crud.chat_session.get(db, chat_id)
+    if not session or str(session.user_id) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    cancelled = generation_runtime.cancel(generation_id, user_id=str(current_user.id))
+    if not cancelled:
+        cancelled = generation_runtime.cancel_for_chat(chat_id, user_id=str(current_user.id))
+
+    return {
+        "success": True,
+        "data": {"generation_id": generation_id, "cancelled": cancelled},
+        "message": (
+            "Generation cancelled."
+            if cancelled
+            else "No active generation with that id; it may have already finished."
+        ),
+    }
+
+
+@ai_router.post("/chats/{chat_id}/stop")
+def stop_chat_active_generation(
+    chat_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Explicitly cancel any in-flight AI generation for this chat session."""
+    session = crud.chat_session.get(db, chat_id)
+    if not session or str(session.user_id) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+
+    cancelled = generation_runtime.cancel_for_chat(chat_id, user_id=str(current_user.id))
+    return {
+        "success": True,
+        "data": {"chat_id": chat_id, "cancelled": cancelled},
+        "message": (
+            "Generation cancelled."
+            if cancelled
+            else "No active generation found; it may have already finished."
+        ),
+    }
+
+
 @ai_router.post("/chats/{chat_id}/messages")
 def add_chat_message(
     chat_id: str,
@@ -480,11 +623,89 @@ def add_chat_message(
     )
     chat_id = session.id
 
-    return chat_orchestration_service.process_chat_message(
-        db=db,
-        current_user=current_user,
-        chat_id=chat_id,
-        session=session,
-        request=request,
-        background_tasks=background_tasks,
+    try:
+        return chat_orchestration_service.process_chat_message(
+            db=db,
+            current_user=current_user,
+            chat_id=chat_id,
+            session=session,
+            request=request,
+            background_tasks=background_tasks,
+        )
+    except generation_runtime.GenerationCancelled as cancelled:
+        # The user pressed Stop before the token stream opened -- during skill
+        # selection, planning, retrieval, web search or deep research. The
+        # pipeline unwound at its next checkpoint; answer the original request
+        # with a terminated stream instead of a 500.
+        return _cancelled_generation_response(db, chat_id, current_user, cancelled)
+    except Exception:
+        # A handle registered for a turn that then failed has no worker to clean
+        # it up, and would otherwise look like an active generation forever.
+        generation_runtime.discard_pending_for_chat(
+            str(chat_id), user_id=str(current_user.id)
+        )
+        raise
+
+
+def _cancelled_generation_response(db, chat_id, current_user, cancelled):
+    """Close out a generation the user stopped before streaming began."""
+    handle = generation_runtime.get(cancelled.generation_id)
+    partial = handle.current_text if handle else ""
+
+    assistant_message_id = None
+    if handle is not None and handle.user_message_id:
+        # The turn is already half-persisted, so record the assistant side too --
+        # cancelled, with whatever partial text exists. Without this the chat
+        # would reload showing a question and no answer at all.
+        try:
+            assistant_message = crud.chat_message.create(
+                db=db,
+                obj_in=schemas.ChatMessageCreate(
+                    chat_id=chat_id,
+                    content=partial,
+                    role="assistant",
+                    user_id=str(current_user.id),
+                    status="cancelled",
+                ),
+            )
+            assistant_message_id = assistant_message.id
+        except Exception:
+            logger.exception(
+                "[GENERATION] failed to persist cancelled turn generation_id=%s",
+                cancelled.generation_id,
+            )
+
+    if handle is not None:
+        handle.mark_cancelled_done()
+        generation_runtime.unregister(handle.generation_id)
+
+    logger.info(
+        "[GENERATION_CANCELLED_PRESTREAM] generation_id=%s chat_id=%s stage=%s",
+        cancelled.generation_id,
+        chat_id,
+        cancelled.stage,
+    )
+
+    payload = {
+        "success": True,
+        "error": None,
+        "data": {
+            "chat_session_id": chat_id,
+            "assistant_message_id": assistant_message_id,
+            "response": partial,
+            "status": "cancelled",
+            "cancelled": True,
+            "cancelled_at_stage": cancelled.stage,
+        },
+        "message": "Generation cancelled by user.",
+    }
+
+    def _stream():
+        yield f"data: {json.dumps({'type': 'cancelled', 'data': payload})}\n\n"
+        yield f"data: {json.dumps({'type': 'complete', 'data': payload})}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"X-Generation-Id": cancelled.generation_id},
     )

@@ -8,12 +8,21 @@ from server.utils.llm_client import execute_with_llm_retry
 logger = logging.getLogger(__name__)
 
 class DeepResearchOrchestrator:
-    def __init__(self, client, rag_service, db, current_user, session):
+    def __init__(self, client, rag_service, db, current_user, session, generation=None):
         self.client = client
         self.rag = rag_service
         self.db = db
         self.current_user = current_user
         self.session = session
+        # The generation handle for this turn, when the caller has one. Deep
+        # research is the longest-running stage in the pipeline -- several
+        # rounds of LLM planning and retrieval -- so it has to be interruptible
+        # or Stop does nothing for as long as it runs.
+        self.generation = generation
+
+    def _check_cancelled(self, stage: str) -> None:
+        if self.generation is not None:
+            self.generation.raise_if_cancelled(f"deep_research.{stage}")
 
     def generate_sub_queries(self, main_query: str) -> List[str]:
         prompt = f"""Analyze the following research request and determine the user's objective (e.g., Information request, Comparison, Recommendation, Investigation, Market/Technical/Financial/Legal research). 
@@ -58,6 +67,7 @@ Format your response strictly as a simple list of topics/questions, one per line
             return [main_query]
 
     def execute_retrieval_for_query(self, query: str, chat_id: str, document_ids: list, history: list) -> str:
+        self._check_cancelled("sub_query")
         optimized_prompt, conversation_company, _ = self.rag.rewrite_query(
             self.client, query, history, model=settings.DEEP_RESEARCH_MODEL
         )
@@ -267,7 +277,9 @@ Raw Collected Evidence:
             return combined
 
     def execute(self, initial_query: str, chat_id: str, document_ids: list, history: list, initial_context: str) -> tuple:
+        self._check_cancelled("plan")
         sub_queries = self.generate_sub_queries(initial_query)
+        self._check_cancelled("dispatch")
         contexts = [initial_context] if initial_context else []
         
         all_chunks, all_news, all_sec, all_roic, all_ch, all_web = [], [], [], [], [], []
@@ -276,6 +288,12 @@ Raw Collected Evidence:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(sub_queries))) as executor:
             future_to_sq = {executor.submit(self.execute_retrieval_for_query, sq, chat_id, document_ids, history): sq for sq in sub_queries}
             for future in concurrent.futures.as_completed(future_to_sq):
+                if self.generation is not None and self.generation.cancelled:
+                    # Stop pressed mid-research: drop the remaining sub-queries
+                    # instead of waiting out the whole fan-out.
+                    for pending in future_to_sq:
+                        pending.cancel()
+                    self._check_cancelled("retrieval")
                 try:
                     ctx, chunks, news_src, sec_src, roic_src, ch_src, web_src = future.result()
                     if ctx: contexts.append(ctx)
@@ -288,5 +306,6 @@ Raw Collected Evidence:
                 except Exception as exc:
                     logger.error(f"Error executing retrieval for subquery: {exc}")
                 
+        self._check_cancelled("consolidate")
         final_context = self.validate_and_consolidate(contexts)
         return final_context, all_chunks, all_news, all_sec, all_roic, all_ch, all_web

@@ -7,6 +7,9 @@ from typing import Optional
 
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
+
+from server.db.session import SessionLocal
+from server.services import generation_runtime
 from openai import OpenAI
 
 from server import crud, schemas
@@ -332,6 +335,21 @@ class ChatOrchestrationService:
                 background_tasks=background_tasks,
             )
 
+        # Register the generation BEFORE any cancellable work starts.
+        #
+        # Everything below -- skill selection, query rewriting, intent
+        # classification, retrieval, web search, deep research -- makes LLM and
+        # network calls, and all of it used to run before the handle existed.
+        # With nothing registered, the Stop endpoint's lookups both missed and
+        # the pipeline ran on to call the model: the user pressed Stop and
+        # tokens kept coming. Registering here is what gives Stop something to
+        # find for the whole life of the request.
+        _generation = generation_runtime.register(
+            user_id=str(current_user.id),
+            chat_id=str(chat_id),
+            mode=getattr(request, "mode", "auto") or "auto",
+        )
+
         # Selected skills (manual or automatic)
         manual_skills = []
         auto_skills = []
@@ -382,6 +400,8 @@ class ChatOrchestrationService:
             [s.name for s in active_skills],
             len(active_skills),
         )
+
+        _generation.raise_if_cancelled("skill_selection")
 
         # Step 3: Load complete instructions for final selected skills (up to 5)
         skill_instruction_svc = get_skill_instruction_service()
@@ -438,6 +458,8 @@ class ChatOrchestrationService:
             )
             company_to_resolve = conversation_company if conversation_company else optimized_prompt
             
+            _generation.raise_if_cancelled("query_planning")
+
             planner_exec = _planner_executor
             fut_resolve = planner_exec.submit(
                 rag.resolve_company, client, company_to_resolve, model=settings.LLM_MODEL
@@ -456,6 +478,7 @@ class ChatOrchestrationService:
             precomputed_is_document_question = fut_doc.result() if fut_doc else False
             precomputed_intent = fut_intent.result()
             precomputed_general_intent = fut_general_intent.result()
+            _generation.raise_if_cancelled("intent_routing")
 
         sec_tickers, sec_options = [], {}
         roic_query, financial_ticker, companies_house_query = None, None, None
@@ -584,6 +607,10 @@ class ChatOrchestrationService:
             ),
         )
 
+        # The handle now knows which turn it belongs to, so a reconnecting client
+        # can line the generation up with the message it is rendering.
+        _generation.user_message_id = user_message.id
+
         used_rag, used_web = False, False
         source_documents, citations, web_sources = None, [], None
         financial_news_response, financial_context, financial_sources = None, None, []
@@ -644,6 +671,8 @@ class ChatOrchestrationService:
             follow_up_questions, citations, source_documents, source_attribution = [], [], None, []
             intent = "Other"
         else:
+            _generation.raise_if_cancelled("retrieval")
+
             futures = {}
             user_id_str = str(current_user.id)
 
@@ -780,6 +809,7 @@ class ChatOrchestrationService:
                     companies_house_context, companies_house_sources = None, []
 
             if requires_web:
+                _generation.raise_if_cancelled("web_search")
                 web_context, web_sources = rag.web_search(
                     optimized_prompt,
                     start_number=(
@@ -825,6 +855,8 @@ class ChatOrchestrationService:
             selected_model = settings.LLM_MODEL
             final_research_context = None
 
+            _generation.raise_if_cancelled("llm_request")
+
             if getattr(request, "mode", None) == "think_longer":
                 today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
                 daily_calls = crud.chat_message.count_user_daily_calls(
@@ -850,7 +882,10 @@ class ChatOrchestrationService:
                         mode_used = "think_longer_fallback"
 
             elif getattr(request, "mode", None) == "deep_research":
-                orchestrator = DeepResearchOrchestrator(client, rag, db, current_user, session)
+                _generation.raise_if_cancelled("deep_research")
+                orchestrator = DeepResearchOrchestrator(
+                    client, rag, db, current_user, session, generation=_generation
+                )
                 initial_contexts = [c for c in [document_context, web_context, financial_context, sec_context, roic_context, companies_house_context] if c]
                 initial_context_str = "\n\n".join(initial_contexts)
                 
@@ -890,17 +925,61 @@ class ChatOrchestrationService:
                 selected_model = settings.LLM_MODEL
                 raw_response = rag.generate_response(client, messages=messages, model=settings.LLM_MODEL)
 
+        # The generation outlives this HTTP request, so everything the worker needs
+        # is captured as a plain value here: the request-scoped `db` and its ORM
+        # instances are closed/expired the moment the client disconnects.
+        _workspace_id = session.workspace_id
+        _user_id = str(current_user.id)
+        _user_message_id = user_message.id
+
         def event_stream():
             nonlocal ai_response, follow_up_questions, citations, source_documents, source_attribution
             
             if not validation_error:
                 raw_response_str = ""
+                logger.info(
+                    "[LLM_STREAM_STARTED] generation_id=%s model=%s",
+                    _generation.generation_id,
+                    selected_model,
+                )
                 try:
                     for token in raw_response:
+                        # The ONLY thing that stops generation early: an explicit
+                        # Stop from the user. A client disconnect never lands here.
+                        if _generation.cancelled:
+                            logger.info(
+                                "[LLM_STREAM_CANCEL_REQUESTED] generation_id=%s tokens=%d",
+                                _generation.generation_id,
+                                len(_generation.tokens),
+                            )
+                            break
                         raw_response_str += token
+                        _generation.record_token(token)
                         yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
                 except Exception as e:
                     logger.error(f"Streaming error: {e}")
+                finally:
+                    # Break/exception leaves the provider generator suspended, so
+                    # its own `finally: completion.close()` would not run until the
+                    # GC got to it -- meaning the upstream HTTP stream could stay
+                    # open (and keep being billed) after Stop. Close it here so
+                    # cancellation reaches the provider connection immediately.
+                    _close = getattr(raw_response, "close", None)
+                    if callable(_close):
+                        try:
+                            _close()
+                        except Exception:
+                            logger.debug(
+                                "[LLM_STREAM] close failed generation_id=%s",
+                                _generation.generation_id,
+                                exc_info=True,
+                            )
+                    logger.info(
+                        "[LLM_STREAM_%s] generation_id=%s tokens=%d",
+                        "CANCELLED" if _generation.cancelled else "ENDED",
+                        _generation.generation_id,
+                        len(_generation.tokens),
+                    )
                     
                 ai_response, follow_up_questions = rag.split_answer_and_followups(
                     raw_response_str,
@@ -934,26 +1013,35 @@ class ChatOrchestrationService:
                 )
                 source_attribution = source_attribution_from_citations(citations)
 
-            assistant_message = crud.chat_message.create(
-                db=db,
-                obj_in=schemas.ChatMessageCreate(
-                    chat_id=chat_id,
-                    content=ai_response,
-                    role="assistant",
-                    user_id=str(current_user.id),
-                    workspace_id=session.workspace_id,
-                    document_ids=document_ids or None,
-                    source_documents=source_documents,
-                    citations=citations,
-                    skills_used=skills_meta,
-                    mode_used=mode_used,
-                ),
-            )
+            # Persist on a session this worker owns. The request-scoped `db` is
+            # closed by get_db() as soon as the client goes away, so writing the
+            # finished answer through it would lose the response on refresh.
+            _own_db = SessionLocal()
+            try:
+                assistant_message = crud.chat_message.create(
+                    db=_own_db,
+                    obj_in=schemas.ChatMessageCreate(
+                        chat_id=chat_id,
+                        content=ai_response,
+                        role="assistant",
+                        user_id=_user_id,
+                        workspace_id=_workspace_id,
+                        document_ids=document_ids or None,
+                        source_documents=source_documents,
+                        citations=citations,
+                        skills_used=skills_meta,
+                        mode_used=mode_used,
+                        status=("cancelled" if _generation.cancelled else "complete"),
+                    ),
+                )
+                _own_db.refresh(assistant_message)
+            finally:
+                _own_db.close()
 
             AuditLogger.log(
                 action="AI_RESPONSE",
-                user_id=str(current_user.id),
-                workspace_id=session.workspace_id,
+                user_id=_user_id,
+                workspace_id=_workspace_id,
                 chat_id=chat_id,
                 endpoint=f"/v1/ai/chats/{chat_id}/messages",
                 http_method="POST",
@@ -992,6 +1080,7 @@ class ChatOrchestrationService:
                 "agent_name": None,
                 "agents": None,
                 "follow_up_questions": follow_up_questions,
+                "status": ("cancelled" if _generation.cancelled else "complete"),
                 "created_at": assistant_message.created_at.isoformat() if assistant_message.created_at else None,
                 "updated_at": assistant_message.updated_at.isoformat() if assistant_message.updated_at else None,
             }
@@ -1001,7 +1090,7 @@ class ChatOrchestrationService:
                 "error": None,
                 "data": {
                     "chat_session_id": chat_id,
-                    "user_message_id": user_message.id,
+                    "user_message_id": _user_message_id,
                     "assistant_message_id": assistant_message.id,
                     "response": ai_response,
                     "document_ids": document_ids,
@@ -1032,13 +1121,31 @@ class ChatOrchestrationService:
                     "companies_house": companies_house_response,
                     "follow_up_questions": follow_up_questions,
                     "message": message_obj,
+                    "status": ("cancelled" if _generation.cancelled else "complete"),
+                    "cancelled": _generation.cancelled,
                 },
-                "message": "Message added and AI response created successfully.",
+                "message": (
+                    "Generation cancelled by user; partial response saved."
+                    if _generation.cancelled
+                    else "Message added and AI response created successfully."
+                ),
             }
+            _generation.mark_completed(
+                final_data=final_data,
+                assistant_message_id=assistant_message.id,
+                response_text=ai_response,
+            )
             yield f"data: {json.dumps({'type': 'complete', 'data': final_data})}\n\n"
 
         if getattr(request, "stream", True):
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
+            # The worker drains event_stream() to completion even if the browser
+            # disconnects (refresh / navigation / network loss); the relay below is
+            # only the delivery channel to THIS client.
+            return StreamingResponse(
+                generation_runtime.detached_stream(event_stream, _generation),
+                media_type="text/event-stream",
+                headers={"X-Generation-Id": _generation.generation_id},
+            )
         else:
             events = list(event_stream())
             for ev_str in reversed(events):

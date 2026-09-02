@@ -84,6 +84,10 @@ class ChatMessage(Base):
     agent_id = Column(String, nullable=True, index=True)
     agent_name = Column(String, nullable=True)
     mode_used = Column(String, nullable=True)
+    # Terminal state of the turn: "complete" | "cancelled" | "failed".
+    # Persisted so a generation the user stopped stays stopped across a restart,
+    # when the in-memory generation registry is gone.
+    status = Column(String, nullable=False, server_default="complete")
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

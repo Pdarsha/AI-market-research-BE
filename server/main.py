@@ -61,6 +61,10 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=True,
     allow_methods=["*"],
+    # The browser can only read non-simple response headers that are explicitly
+    # exposed. The chat stream returns the generation id here so the Stop button
+    # can cancel that specific generation.
+    expose_headers=["X-Generation-Id"],
 )
 
 

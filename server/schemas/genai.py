@@ -136,6 +136,7 @@ class ChatMessageCreate(ChatMessageBase):
     agent_id: Optional[str] = None
     agent_name: Optional[str] = None
     mode_used: Optional[str] = None
+    status: Optional[str] = "complete"
 
 
 class ChatMessageUpdate(BaseModel):
