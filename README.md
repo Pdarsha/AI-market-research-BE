@@ -1,315 +1,295 @@
-# CapitalEdge AI Enterprise Backend
+# CapitalEdge AI Enterprise — Backend
 
-CapitalEdge AI Enterprise is an AI-powered Conversational Intelligence and Market Research platform. The backend is a high-performance, asynchronous REST API built with **FastAPI** that powers intelligent document processing, dynamic workspace management, Retrieval-Augmented Generation (RAG), and Model Context Protocol (MCP) integrations with external financial data providers.
-
-## 1. Project Overview
-
-**Purpose**: To provide a robust, enterprise-grade backend for parsing and embedding complex market research documents, orchestrating intelligent chat workflows, and streaming AI-generated insights back to the client.
-
-**Core Features**:
-- **Workspaces & Document Management**: Segregated workspaces for organizing documents (PDFs, DOCX, CSVs, Images).
-- **Advanced Document Pipeline**: Asynchronous hybrid OCR pipeline (Native text + Computer Vision) with parallel chunking and embedding.
-- **RAG & Vector Search**: High-dimensional vector search using PostgreSQL `pgvector`.
-- **Intelligent Routing Planner**: Automatically classifies user intent to route queries between local RAG, external MCPs, or Live Web Search.
-- **MCP Services**: Direct integrations with SEC EDGAR, ROIC AI, Companies House, and Financial News APIs.
-- **SSE Streaming**: Server-Sent Events for real-time LLM token streaming to the client frontend.
+Production-grade asynchronous AI backend for conversational intelligence, hybrid OCR document ingestion, vector semantic search, Retrieval-Augmented Generation (RAG), Model Context Protocol (MCP) financial connectors, dynamic skill injection, and autonomous agent workflow orchestration.
 
 ---
 
-## 2. Technology Stack
+## Key Features
 
-- **Core Framework**: Python 3.14, FastAPI, Uvicorn (ASGI server)
-- **Database**: PostgreSQL, `pgvector` (Vector similarity search)
-- **ORM & Migrations**: SQLAlchemy (Async support), Alembic
-- **Authentication**: JWT (JSON Web Tokens), Google OAuth 2.0, Passlib (`bcrypt`), python-jose
-- **AI & Embeddings**: OpenAI API (GPT-4o, o3-mini, text-embedding-3-small)
-- **Document Processing**: PyMuPDF (`fitz`), python-docx, pandas, openpyxl
-- **OCR Engine**: `rapidocr-onnxruntime`, `pytesseract`, `easyocr`, OpenCV (`cv2`)
-- **Web Search**: SerpAPI
-- **Testing**: Pytest, `pytest-cov`, `pytest-html`
-- **Linting & Formatting**: `flake8`, `pre-commit`
-
----
-
-## 3. Backend Folder Structure
-
-```text
-.
-├── alembic/                # Database migration scripts and environment
-├── alembic.ini             # Alembic configuration
-├── main.py                 # Application entry point for Uvicorn
-├── requirements.txt        # Python dependencies
-├── server/
-│   ├── api.py              # API Router aggregator (combines all v1 routers)
-│   ├── api_v1/             # API version 1 module
-│   │   └── endpoints/      # Controller layer (FastAPI routers)
-│   ├── config/             # Environment variables and application settings
-│   ├── crud/               # Data Access Layer (Create, Read, Update, Delete)
-│   ├── db/                 # Database connection and session management
-│   ├── models/             # SQLAlchemy ORM database models
-│   ├── schemas/            # Pydantic models for Request/Response validation
-│   └── services/           # Business logic, RAG, MCP, and Document pipelines
-└── tests/                  # Pytest automated test suites
-```
-
-**Directory Responsibilities**:
-- **`models/`**: Defines the database schema (SQLAlchemy Base classes).
-- **`schemas/`**: Defines the data contracts for APIs (Pydantic).
-- **`crud/`**: Houses all direct database interactions. Controllers must call CRUD methods, not query the DB directly.
-- **`services/`**: Holds core business logic. Separation of concerns is heavily enforced here (e.g., `ocr_service.py` only handles text extraction, `embedding_service.py` only handles vectors).
+* **High-Performance Asynchronous API:** Built with **FastAPI** on Python 3.10+ (tested on Python 3.14) with Uvicorn/Gunicorn.
+* **Vector Semantic Search:** **PostgreSQL + `pgvector`** with 1536-dimensional OpenAI vector embeddings and HNSW cosine distance indexing (`ix_document_chunks_embedding`).
+* **Two-Stage Intelligent RAG:** First-stage pgvector cosine similarity search followed by second-stage LLM cross-encoder listwise re-ranking (`RerankService`), with automatic web search fallback (DEF-011, DEF-012).
+* **Multi-Modal Document Ingestion:** Hybrid extraction pipeline supporting PDF, DOCX, XLSX, XLS, CSV, TXT, MD, and image OCR (PNG, JPG, TIFF, BMP, WEBP) using PyMuPDF native extraction and OpenCV + RapidOCR / Tesseract in parallel thread pools.
+* **Model Context Protocol (MCP) Connectors:** Integrated tools for SEC EDGAR (10-K, 10-Q facts), Roic.ai (financial ratios and transcripts), UK Companies House, and Alpha Vantage (market news and sentiment), plus a standalone FastMCP server.
+* **Autonomous Agent Workflow Engine:** Trigger-agnostic multi-step agent execution engine with dynamic LLM planning, skill resolution, tool execution, exponential backoff retries, shared blackboard state (`AgentSharedState`), and step logs.
+* **Background Scheduler:** Lifespan-managed polling scheduler evaluating cron expressions and intervals every 30 seconds, enforcing execution quotas, recovering stale jobs on reboot, and sending HTML summary emails via SMTP.
+* **Document Takeaways Matrix Grid:** Asynchronous comparative analysis grids extracting structured insights across multiple workspace documents with CSV, JSON, and Markdown export.
+* **Decoupled Generation Runtime:** Robust SSE token streaming with pub/sub architecture supporting client reconnection and explicit graceful cancellation via the Stop endpoint.
+* **Role-Based Access & Credit Ledger:** Daily credit quotas per subscription tier (`free`, `plus`, `pro`, `enterprise`), row-level locked balance deductions, automatic 00:00 UTC resets, and immutable transaction ledger logging.
 
 ---
 
-## 4. Backend Architecture
+## Technology Stack
 
-The backend architecture follows a highly concurrent, service-oriented pattern.
-
-```mermaid
-graph TD
-    Client[Client Browser] -->|HTTP POST| Router[FastAPI Router]
-    Router -->|Validate JWT| Auth[Auth Middleware]
-    Auth -->|Initialize Chat| GenAI[GenAI Chat Controller]
-
-    GenAI -->|Analyze Intent| Planner[Routing Planner LLM]
-
-    Planner -->|Needs Local Docs| RAG[RAG Service]
-    Planner -->|Needs Financial Data| MCP[MCP Services]
-    Planner -->|Needs Live Info| Web[Web Search]
-
-    RAG -->|Cosine Similarity| PG[PostgreSQL pgvector]
-    MCP -->|Concurrent Fetch| ExtAPI[SEC / ROIC / News]
-
-    RAG -.-> Context[Aggregated Context]
-    MCP -.-> Context
-    Web -.-> Context
-
-    Context --> LLM[OpenAI API]
-    LLM -->|Streaming SSE| Client
-```
+* **Framework:** FastAPI 0.115+
+* **Language / Runtime:** Python 3.10+ (Docker: `python:3.10-slim`, tested on Python 3.14)
+* **ASGI Server:** Uvicorn / Gunicorn
+* **ORM & Database:** SQLAlchemy 2.0+ with PostgreSQL 15+ and `pgvector`
+* **Schema Migrations:** Alembic (21 versions: Vv1 to Vv21)
+* **LLM & Embeddings:** OpenAI API / OpenRouter (`text-embedding-3-small`, `gpt-4.1-mini`, `gpt-5.6-terra`)
+* **Document & OCR:** PyMuPDF (`fitz`), `python-docx`, `openpyxl`, `pandas`, `opencv-python-headless`, `rapidocr-onnxruntime`, `pytesseract`
+* **Report Generation:** ReportLab
+* **Authentication:** Stateless JWT (`python-jose`), Bcrypt (`passlib`), Google OAuth 2.0 (`google-auth`)
+* **Email:** FastAPI-Mail (SMTP)
+* **MCP Server:** FastMCP
+* **Testing:** Pytest, pytest-cov, pytest-asyncio, Typeguard
 
 ---
 
-## 5. Complete Backend Workflow
+## Prerequisites
 
-### RAG & Document Ingestion Workflow
-When a user uploads a document to a workspace, the `document_processor.py` orchestrates the following:
-1. **Extraction**: `ocr_service.py` evaluates the file. PDFs are processed in a 2-phase hybrid approach where the native text layer is extracted, and pages with images are rendered and sent to a highly parallelized `ThreadPoolExecutor` for OCR via OpenCV/RapidOCR.
-2. **Chunking**: `chunking_service.py` splits the text into overlapping chunks with citation metadata (page numbers, offsets).
-3. **Embedding**: `embedding_service.py` utilizes `asyncio.gather` to concurrently fire multiple batches of text chunks to OpenAI's embeddings API, generating 1536-dimensional vectors.
-4. **Storage**: The chunks and vectors are batch-inserted into PostgreSQL via `crud.document_chunk`.
+Before setting up the backend, ensure you have the following installed:
 
-### Chat & Routing Workflow
-When a user submits a prompt, `genai.py` initiates the chat sequence:
-1. **Validation**: Validates the JWT and fetches the chat session.
-2. **Planning**: A lightweight LLM classification phase runs concurrently to determine:
-   - Does this query require workspace documents?
-   - Does this query require specific MCP integrations (e.g., SEC EDGAR)?
-   - What is the primary intent?
-3. **Retrieval**: Depending on the planner's output, `rag_service.py` retrieves vector-matched document chunks from `pgvector` and/or dispatches concurrent requests to MCP services using a `ThreadPoolExecutor`.
-4. **Generation**: The context is aggregated, prompt templates are applied, and an SSE generator streams the LLM's response back to the client token-by-token.
+1. **Python 3.10+** (Python 3.11, 3.12, 3.13, or 3.14 supported)
+2. **PostgreSQL 15+** with the **`pgvector`** extension installed
+3. **OpenAI API Key** (or OpenRouter API Key)
+4. **Git**
+5. *(Optional)* **Tesseract OCR** (only required if `OCR_ENGINE=tesseract`; default is `rapidocr` which requires no OS binaries)
 
 ---
 
-## 6. Project Setup
+## Local Development Setup
 
-### Prerequisites
-- Python 3.10 or higher
-- PostgreSQL 15+ (with the `pgvector` extension installed and enabled)
-- Git
-
-### Clone Repository
+### 1. Clone the Repository
 ```bash
-git clone <repository-url>
-cd <project-name>
+git clone https://github.com/Pdarsha/agentic-ai.git
+cd agentic-ai
 ```
 
-### Create Virtual Environment
+### 2. Create and Activate Virtual Environment
 ```bash
-# Create the environment
-python -m venv venv
-
-# Activate on Linux/macOS
+python3 -m venv venv
 source venv/bin/activate
-
-# Activate on Windows
-venv\Scripts\activate
 ```
 
-### Install Dependencies
+### 3. Install Python Dependencies
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Configure Environment Variables
-Copy the template to create your `.env` file:
+### 4. Configure Environment Variables
+Copy or create your `.env` file in the project root:
 ```bash
-cp .env.example .env
+cp .env.example .env  # Or create .env directly
 ```
-Key configurations include:
-- `SQLALCHEMY_DATABASE_URI`: Your PostgreSQL connection string. Must include `postgresql+psycopg2`.
-- `OPENAI_API_KEY`: API key for LLM generation and embeddings.
-- `AUTH_TOKEN`: Secret key for signing JWTs.
-- `MAIL_USERNAME` / `MAIL_PASSWORD`: SMTP credentials for OTP and verification emails.
+
+Configure the essential variables in `.env`:
+```env
+PROJECT_NAME="CapitalEdge AI Enterprise"
+API_V1_STR="/v1"
+
+# Database Connection (PostgreSQL with pgvector)
+SQLALCHEMY_DATABASE_URI="postgresql://postgres:password@localhost:5432/agentic_db"
+
+# JWT Secret Key (Generate a secure random string)
+AUTH_TOKEN="your-super-secret-jwt-key-min-32-chars"
+ACCESS_TOKEN_EXPIRE_MINUTES=20160
+REFRESH_TOKEN_EXPIRE_MINUTES=40320
+
+# OpenAI / OpenRouter Configuration
+OPENAI_API_KEY="your-openai-or-openrouter-api-key"
+OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+LLM_MODEL="openai/gpt-4.1-mini"
+THINK_LONGER_MODEL="openai/gpt-5.6-terra"
+DEEP_RESEARCH_MODEL="openai/gpt-5.6-terra"
+EMBEDDING_MODEL="text-embedding-3-small"
+EMBEDDING_DIMENSIONS=1536
+RERANK_MODEL="openai/gpt-4.1-mini"
+
+# OCR Settings (rapidocr uses pure Python ONNX runtime)
+OCR_ENABLED=true
+OCR_ENGINE="rapidocr"
+
+# External API Integrations (Optional / As needed)
+SERPAPI_KEY="your-serpapi-key"
+SEC_EDGAR_USER_AGENT="CapitalEdge Research admin@capitaledge.ai"
+ROIC_API_KEY="your-roic-api-key"
+COMPANIES_HOUSE_API_KEY="your-companies-house-api-key"
+ALPHA_VANTAGE_API_KEY="your-alpha-vantage-api-key"
+
+# Mail / SMTP Settings (For OTPs and Scheduled Reports)
+MAIL_USERNAME="your-email@gmail.com"
+MAIL_PASSWORD="your-app-password"
+MAIL_FROM="support@capitaledge.ai"
+MAIL_PORT=587
+MAIL_SERVER="smtp.gmail.com"
+```
 
 ---
 
-## 7. Database Setup
+## Database Setup & Migrations
 
-Ensure your PostgreSQL instance is running and you have created a database (e.g., `CapitalEdge`). You must manually install the `pgvector` extension on your PostgreSQL server if you haven't already.
+Ensure PostgreSQL is running and has the `vector` extension enabled:
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
 
-Run Alembic migrations to build the tables and create the `vector` extension inside the DB:
+Run Alembic database migrations:
 ```bash
-# Apply all migrations to the latest version
+# Apply all 21 database migrations
 alembic upgrade head
 ```
-*Note: If you modify the models in `server/models/`, generate a new migration using `alembic revision --autogenerate -m "description"`.*
 
 ---
 
-## 8. Running the Backend Locally
+## Running the Application
 
-Start the FastAPI server via Uvicorn:
+### 1. Local Development (Uvicorn with Auto-Reload)
 ```bash
-uvicorn server.main:app --reload --host 127.0.0.1 --port 8000
+# Ensure virtual environment is active
+source venv/bin/activate
+
+# Run Uvicorn server on port 8000
+uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
 ```
-Alternatively, run the entry point script:
+The API is now live at: `http://localhost:8000`
+
+### 2. Running with Docker Compose
 ```bash
-python main.py
+# Build and start App + PostgreSQL + pgvector
+docker compose up -d --build
+
+# View logs
+docker compose logs -f app
 ```
 
-**Local Endpoints:**
-- **Base URL**: `http://127.0.0.1:8000`
-- **Swagger UI**: `http://127.0.0.1:8000/docs` (Interactive API documentation)
-- **ReDoc UI**: `http://127.0.0.1:8000/redoc`
-- **Health Check**: `GET /`
+---
+
+## Interactive API Documentation
+
+Once the server is running, explore the interactive documentation:
+
+* **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+* **Health Check Endpoint:** [http://localhost:8000/](http://localhost:8000/) returns `{"status": 200, "message": "Server running"}`
 
 ---
 
-## 9. API Documentation
+## Running Tests & Quality Checks
 
-The backend is modularized under the `/v1` prefix. Detailed interactive documentation is available at `/docs` when the server is running.
+Run the automated Pytest suite with `PYTHONPATH=.`:
 
-### Users (`/v1/user`)
-- `POST /login`: Authenticate and receive JWT.
-- `POST /google-login`: Authenticate via Google OAuth 2.0.
-- `POST /signup`: Register a new user.
-- `POST /verify-otp`: Verify email via OTP.
-- `POST /profile`: Fetch the current user's profile.
-- `POST /update-profile`: Update user details.
-- `POST /forgot-password-send-otp`: Initiate password reset.
-
-### Workspace (`/v1/workspace`)
-- `POST /create-workspace`: Create a new organizational workspace.
-- `GET /list-workspaces`: Fetch user's workspaces.
-- `GET /{workspace_id}`: Fetch workspace details.
-- `POST /upload-docs`: Ingest documents, extract text, chunk, and embed.
-- `GET /{workspace_id}/docs`: List all documents in a workspace.
-- `DELETE /{workspace_id}/docs/{doc_id}`: Delete a document and its embeddings.
-
-### GenAI (`/v1/ai`)
-- `POST /chats`: Create a new chat session.
-- `GET /chats`: List all chat sessions.
-- `GET /chats/{chat_id}`: Fetch chat history.
-- `POST /chats/{chat_id}/messages`: Submit a prompt and receive a streaming SSE response.
-
-### Documents & Citations (`/v1/documents` & `/v1/citations`)
-- `GET /documents/{document_id}/viewer`: Fetch file paths for viewing.
-- `GET /documents/{document_id}/highlight`: Fetch exact text boundaries for frontend highlighting.
-- `POST /documents/export-pdf`: Export generated reports to PDF.
-- `GET /citations/roic/transcript/{ticker}`: Fallback to fetch raw ROIC transcripts.
-
----
-
-## 10. Authentication
-
-The platform utilizes **JWT (JSON Web Tokens)** for stateless authentication.
-1. **Signup**: Users register and receive an OTP via SMTP. Passwords are hashed using `bcrypt` before database insertion.
-2. **Login**: Exchanges email/password for an access token.
-3. **Authorization**: Protected routes use `Depends(get_current_user)` which extracts the JWT from the `Authorization: Bearer <token>` header, decodes it using `python-jose` and the `AUTH_TOKEN` secret, and attaches the active `User` model to the request state.
-
----
-
-## 11. Database Design
-
-**Core Tables & Relationships**:
-- **`users`**: User accounts and RBAC roles.
-- **`workspaces`**: Logical containers owned by a user (`user_id` FK).
-- **`documents`**: Files uploaded to a workspace (`workspace_id` FK).
-- **`document_chunks`**: The foundational RAG table. Belongs to `documents`. Contains the `content` and the `embedding` (a `VECTOR(1536)` column). Indexed using an HNSW index for `vector_cosine_ops` to enable rapid semantic search.
-- **`chat_sessions`**: Conversations linked to a workspace.
-- **`chat_messages`**: Individual messages (User or AI) containing arrays of cited `document_ids`.
-- **`document_chat_links`**: A junction table strictly associating documents with the chats that referenced them.
-
----
-
-## 12. MCP Services (Model Context Protocol)
-
-The backend features dedicated Model Context Protocol implementations to fetch live, structured data when the LLM planner identifies a financial intent.
-
-- **`SEC EDGAR`**: Fetches real-time 10-K, 10-Q, and company facts.
-- **`ROIC AI`**: Retrieves historical financial metrics, ratios, and earnings call transcripts.
-- **`Companies House`**: Retrieves UK corporate registry data and officer histories.
-- **`Financial News`**: Aggregates recent market news dynamically.
-
-These services run concurrently via `ThreadPoolExecutor` and cache results aggressively in memory to prevent rate limits and reduce latency.
-
----
-
-## 13. Testing
-
-The project utilizes `pytest` for automated unit and integration testing.
-
-**Running the Test Suite**:
 ```bash
-# Run all tests
-pytest
+# Run full unit test suite
+PYTHONPATH=. pytest
 
-# Run tests with HTML coverage report
-pytest --cov=server --cov-report=html
+# Run with verbose output
+PYTHONPATH=. pytest -v
 
-# Run module-specific tests
-pytest tests/users/
-pytest tests/genai/
-pytest tests/documents/
+# Run specific test file
+PYTHONPATH=. pytest tests/unit/test_pricing_and_upgrade_plans.py
+
+# Run test coverage report
+PYTHONPATH=. pytest --cov=server --cov-report=term-missing
 ```
-The test suite spans authentication, GenAI routing, document processing (with mocked OCR/Embeddings), and workspace management.
 
 ---
 
-## 14. Error Handling & Logging
+## Core Architecture Overview
 
-- **Global Exceptions**: A centralized exception handler in `main.py` intercepts `StarletteHTTPException`, `RequestValidationError`, and generic `Exception`s, returning a standardized JSON structure (`{ success: false, error: "..." }`).
-- **Audit Logging**: A dedicated `AuditLogger` (`audit_logger.py`) records system actions (Logins, OCR processing times, API failures) for debugging and compliance.
-- **Logging**: Standard Python `logging` is configured for detailed module-level telemetry (e.g., tracking chunk generation counts, LLM execution times).
+```
+HTTP Request / SSE
+       │
+       ▼
+server/main.py (FastAPI Lifespan, CORS, Global Handlers)
+       │
+       ▼
+server/api.py (Central Router -> /v1)
+       │
+  ┌────┴────────────────────────┬────────────────────────┬────────────────────────┐
+  ▼                             ▼                        ▼                        ▼
+/v1/user                      /v1/ai                  /v1/workspaces           /v1/agents
+Auth, Profiles, Credits      Chat, RAG, SSE          Ingestion, OCR, Chunks   Workflows, Scheduler
+  │                             │                        │                        │
+  └─────────────────────────────┼────────────────────────┴────────────────────────┘
+                                ▼
+                       server/services/
+             (Business Logic, RAG, MCP, Agents)
+                                │
+                                ▼
+                         server/crud/
+                   (SQLAlchemy Data Access)
+                                │
+                                ▼
+                 PostgreSQL 15+ with pgvector
+        (Tables: users, workspaces, document_chunks,
+         chat_sessions, chat_messages, agent_workflows)
+```
 
 ---
 
-## 15. Performance Optimizations
+## Background Services & Concurrency
 
-- **Parallel Planner**: GenAI routing queries execute concurrently via `ThreadPoolExecutor`, reducing Time-To-First-Token by ~40%.
-- **Concurrent Embeddings**: The ingestion pipeline utilizes `asyncio.gather` to concurrently process embedding batches, dramatically reducing processing time for large documents.
-- **Hybrid Concurrent OCR**: `ocr_service.py` splits PDFs. Pages with simple text are read sequentially natively, while image-heavy pages are sent to a CPU-bound thread pool where `RapidOCR` instances run on multiple cores simultaneously.
-- **HNSW Vector Index**: `pgvector` utilizes a Hierarchical Navigable Small World (HNSW) index for sub-millisecond similarity search across millions of chunks.
+1. **Agent Scheduler (`AgentSchedulerService`):**
+   * Polling loop runs in the background of the FastAPI lifespan every 30 seconds.
+   * Evaluates cron expressions and frequency schedules (`daily`, `weekly`, `monthly`, `hourly`, `minutes`).
+   * Enforces in-memory concurrency locks (`asyncio.Lock`) and execution quotas (`scheduled_count_limit`).
+   * Automatically marks orphaned runs as failed on startup via `recover_stale_executions()`.
+   * Sends rendered HTML summary emails to recipient emails via SMTP.
 
----
-
-## 16. Deployment
-
-For production deployment:
-1. Ensure `DEBUG=False` in `.env`.
-2. Use a robust ASGI server manager like Gunicorn with Uvicorn workers:
-   ```bash
-   gunicorn -w 4 -k uvicorn.workers.UvicornWorker server.main:app --bind 0.0.0.1:8000
-   ```
-3. Ensure PostgreSQL is tuned for high-memory usage to support pgvector operations.
-4. Deploy behind a reverse proxy (e.g., NGINX) to handle SSL termination.
+2. **In-Flight Generation Runtime (`generation_runtime.py`):**
+   * Decouples LLM generation from client HTTP connections via pub/sub queues.
+   * Allows browser clients to disconnect/refresh and reconnect without aborting the LLM or losing tokens.
+   * Supports immediate, graceful stopping via `POST /v1/ai/chats/{id}/stop` while persisting all tokens generated up to that point.
 
 ---
 
-## 17. Troubleshooting
+## Production Deployment Runbook
 
-- **`No module named 'fastapi'`**: Ensure you have activated your virtual environment before running the server or tests.
-- **`alembic: command not found`**: Ensure dependencies are installed and the virtual environment is activated.
-- **Database Connection Refused**: Verify PostgreSQL is running locally and credentials in `SQLALCHEMY_DATABASE_URI` are correct.
-- **`pgvector` Extension Error**: Run `CREATE EXTENSION vector;` manually in your PostgreSQL database instance if Alembic fails to create it.
-- **OpenAI 400 Bad Request (Temperature)**: The reasoning models (`o1`, `o3`) do not support temperature parameters. The backend code conditionally strips this for reasoning models, but verify your `LLM_MODEL` environment variable matches expected formats.
+### 1. Automated Linux / EC2 Setup
+Run the automated setup script on a fresh Ubuntu 22.04+ or Debian 12 server:
+```bash
+bash serversetup.sh
+```
+
+### 2. Nginx Reverse Proxy Configuration
+Configure Nginx with SSL and disabled SSE buffering:
+```nginx
+server {
+    listen 80;
+    server_name api.capitaledge.ai;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.capitaledge.ai;
+
+    ssl_certificate /etc/letsencrypt/live/api.capitaledge.ai/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.capitaledge.ai/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Critical for Server-Sent Events (SSE) token streaming:
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+---
+
+## Troubleshooting Guide
+
+| Issue | Cause | Solution |
+|---|---|---|
+| `type "vector" does not exist` | `pgvector` extension missing in PostgreSQL | Connect to PostgreSQL as superuser and execute: `CREATE EXTENSION IF NOT EXISTS vector;` then re-run `alembic upgrade head`. |
+| `ModuleNotFoundError: No module named 'fastapi'` | Virtual environment not active or dependencies missing | Run `source venv/bin/activate && pip install -r requirements.txt`. Ensure `PYTHONPATH=.` is set when running pytest or scripts. |
+| `TesseractNotFoundError` | System Tesseract binary missing | Set `OCR_ENGINE=rapidocr` in `.env` (pure Python ONNX, no OS binary needed) or install Tesseract: `sudo apt-get install -y tesseract-ocr`. |
+| SSE Stream drops midway in production | Nginx buffering proxy responses | Add `proxy_buffering off; proxy_read_timeout 300s;` to the Nginx configuration. |
+| OpenAI 429 Rate Limit | API rate limit reached | The backend automatically applies exponential backoff retries. Verify API quota or use an OpenRouter endpoint. |
+| Scheduled Agents not firing | Scheduler paused or timezone mismatch | Check `GET /v1/agents/scheduler/status`. Verify agent's `schedule_timezone`. Manually trigger evaluation with `POST /v1/agents/scheduler/tick`. |
+
+---
+
+## Documentation Reference
+
+For comprehensive technical architecture, database schemas, and end-to-end knowledge transfer documentation, see:
+* **[BACKEND_KT_DOCUMENT.md](BACKEND_KT_DOCUMENT.md)** — Comprehensive Production Backend Knowledge Transfer Document
