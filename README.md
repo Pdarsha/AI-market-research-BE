@@ -52,8 +52,8 @@ Before setting up the backend, ensure you have the following installed:
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/Pdarsha/agentic-ai.git
-cd agentic-ai
+git clone https://github.com/Pdarsha/AI-market-research-BE.git
+cd  AI-market-research-BE
 ```
 
 ### 2. Create and Activate Virtual Environment
@@ -73,49 +73,6 @@ Copy or create your `.env` file in the project root:
 ```bash
 cp .env.example .env  # Or create .env directly
 ```
-
-Configure the essential variables in `.env`:
-```env
-PROJECT_NAME="CapitalEdge AI Enterprise"
-API_V1_STR="/v1"
-
-# Database Connection (PostgreSQL with pgvector)
-SQLALCHEMY_DATABASE_URI="postgresql://postgres:password@localhost:5432/agentic_db"
-
-# JWT Secret Key (Generate a secure random string)
-AUTH_TOKEN="your-super-secret-jwt-key-min-32-chars"
-ACCESS_TOKEN_EXPIRE_MINUTES=20160
-REFRESH_TOKEN_EXPIRE_MINUTES=40320
-
-# OpenAI / OpenRouter Configuration
-OPENAI_API_KEY="your-openai-or-openrouter-api-key"
-OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-LLM_MODEL="openai/gpt-4.1-mini"
-THINK_LONGER_MODEL="openai/gpt-5.6-terra"
-DEEP_RESEARCH_MODEL="openai/gpt-5.6-terra"
-EMBEDDING_MODEL="text-embedding-3-small"
-EMBEDDING_DIMENSIONS=1536
-RERANK_MODEL="openai/gpt-4.1-mini"
-
-# OCR Settings (rapidocr uses pure Python ONNX runtime)
-OCR_ENABLED=true
-OCR_ENGINE="rapidocr"
-
-# External API Integrations (Optional / As needed)
-SERPAPI_KEY="your-serpapi-key"
-SEC_EDGAR_USER_AGENT="CapitalEdge Research admin@capitaledge.ai"
-ROIC_API_KEY="your-roic-api-key"
-COMPANIES_HOUSE_API_KEY="your-companies-house-api-key"
-ALPHA_VANTAGE_API_KEY="your-alpha-vantage-api-key"
-
-# Mail / SMTP Settings (For OTPs and Scheduled Reports)
-MAIL_USERNAME="your-email@gmail.com"
-MAIL_PASSWORD="your-app-password"
-MAIL_FROM="support@capitaledge.ai"
-MAIL_PORT=587
-MAIL_SERVER="smtp.gmail.com"
-```
-
 ---
 
 ## Database Setup & Migrations
